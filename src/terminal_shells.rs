@@ -212,12 +212,12 @@ pub(crate) fn launch(shell: &TerminalShell) -> (String, Option<PathBuf>) {
 
 fn publish(window: &AppWindow, index: usize) {
     let shells = configured_shells(window);
-    let default_name = shell_at(window, window.get_default_shell()).name;
+    let default_id = shell_at(window, window.get_default_shell()).id;
     window.set_shell_profile_names(ModelRc::new(VecModel::from(
         shells
             .iter()
             .map(|s| {
-                SharedString::from(if s.name == default_name {
+                SharedString::from(if s.id == default_id {
                     format!("{} ({})", s.name, pick("既定", "Default"))
                 } else {
                     s.name.clone()
@@ -227,7 +227,7 @@ fn publish(window: &AppWindow, index: usize) {
     )));
     let index = index.min(shells.len().saturating_sub(1));
     window.set_shell_profile_index(index as i32);
-    window.set_shell_profile_default(shells.get(index).is_some_and(|s| s.name == default_name));
+    window.set_shell_profile_default(shells.get(index).is_some_and(|s| s.id == default_id));
     if let Some(shell) = shells.get(index) {
         let (exe, args) = command_parts(&shell.command);
         window.set_shell_profile_name(shell.name.clone().into());
@@ -241,8 +241,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
     let mut shells = configured_shells(window);
     let mut index = window.get_shell_profile_index().max(0) as usize;
     index = index.min(shells.len().saturating_sub(1));
-    let old_default = shell_at(window, window.get_default_shell()).name;
-    let editing_default = shells.get(index).is_some_and(|s| s.name == old_default);
+    let old_default = shell_at(window, window.get_default_shell()).id;
     // 書き手の報告 2026-09-24（引数を変えてもApplyできない）：押された操作と、どのプロファイルに
     // 効いたかを残す。手元の試験では再現しなかったので、実際の実行の記録で確かめる。
     live.cache.borrow_mut().log_diag(
@@ -293,6 +292,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
                 return;
             }
             shells[index] = TerminalShell {
+                id: shells[index].id,
                 name,
                 command: format!("\"{exe}\" {args}").trim().to_owned(),
                 directory,
@@ -300,6 +300,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
         }
         2 => {
             shells.push(TerminalShell {
+                id: 0,
                 name: format!("Shell {}", shells.len() + 1),
                 command: "powershell.exe -NoLogo".into(),
                 directory: String::new(),
@@ -308,6 +309,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
         }
         3 => {
             let mut copy = shells[index].clone();
+            copy.id = 0;
             copy.name = format!("{} ({})", copy.name, shells.len() + 1);
             shells.push(copy);
             index = shells.len() - 1;
@@ -343,14 +345,14 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
         }
         _ => return,
     }
-    let wanted = if what == 7 || (what == 1 && editing_default) {
-        shells[index].name.clone()
+    let wanted = if what == 7 {
+        shells[index].id
     } else {
         old_default
     };
     hold_shells(window, &shells);
     publish_shells(window);
-    if let Some(index) = offered_shells(window).iter().position(|s| s.name == wanted) {
+    if let Some(index) = offered_shells(window).iter().position(|s| s.id == wanted) {
         window.set_default_shell(index as i32);
     }
     publish(window, index);
@@ -453,6 +455,7 @@ mod tests {
     #[test]
     fn quoted_program_and_japanese_directory_roundtrip() {
         let shell = TerminalShell {
+            id: 0,
             name: "My Shell".into(),
             command: "\"C:\\Program Files\\PowerShell\\pwsh.exe\" -NoLogo".into(),
             directory: "D:\\原稿 作業".into(),
@@ -464,6 +467,7 @@ mod tests {
             (shell.command.clone(), Some(PathBuf::from(&shell.directory)))
         );
         let linux = TerminalShell {
+            id: 0,
             name: "WSL".into(),
             command: "wsl.exe -d Ubuntu".into(),
             directory: "/home/user/原稿 作業".into(),
@@ -482,11 +486,13 @@ mod tests {
     #[test]
     fn an_empty_start_folder_opens_in_the_workspace_or_home() {
         let windows = TerminalShell {
+            id: 0,
             name: "PowerShell".into(),
             command: "powershell.exe -NoLogo".into(),
             directory: String::new(),
         };
         let wsl = TerminalShell {
+            id: 0,
             name: "WSL".into(),
             command: "wsl.exe -d Ubuntu".into(),
             directory: "  ".into(),

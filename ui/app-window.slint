@@ -956,6 +956,7 @@ export component AppWindow inherits Window {
     /// 「設定ファイルへ書き戻すもの」で、書き戻す関数が持っているのは窓だけ
     /// だから、窓が持っている。要件 9 の数・色・書体と同じ置き方。
     in property <[string]> terminal-shell-lines;
+    in property <string> terminal-profile-next-id: "4";
     /// 要件 7.9（2026-09-08）: **単語チェックモード**（書き手の指摘：ソースの
     /// 予約語の色分けと同じ考え）。**モードが語群を持ち、語群が色を持つ。**
     ///

@@ -2035,6 +2035,7 @@ fn the_setting_catalog_covers_persisted_preferences_and_resolves_its_routes() {
             items.contains(key.as_str())
                 || outside_settings
                 || horizontal_vertical_only
+                || shell_identity_metadata(&key)
                 || key.starts_with("terminal.shell.")
                 || key.starts_with("terminal.appearance."),
             "uncatalogued setting: {key}",
@@ -2097,11 +2098,13 @@ fn the_palette_toggles_a_single_setting_and_opens_named_setting_groups() {
         window,
         &[
             TerminalShell {
+                id: 0,
                 name: "PowerShell".into(),
                 command: "powershell.exe -NoLogo".into(),
                 directory: "".into(),
             },
             TerminalShell {
+                id: 0,
                 name: "WSL".into(),
                 command: "wsl.exe -d Ubuntu".into(),
                 directory: "/tmp".into(),
@@ -2143,4 +2146,68 @@ fn the_palette_toggles_a_single_setting_and_opens_named_setting_groups() {
         0,
         "editing a mode does not activate it"
     );
+}
+
+#[test]
+fn terminal_profile_ids_survive_legacy_loading_and_palette_selection_after_reordering() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("terminal-profile-id");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    let numbers = VecModel::from(vec![0; 2 * SHEET_NUMBERS]);
+    let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
+    let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
+    let legacy = vec![
+        (
+            "terminal.shell.0".into(),
+            "WSL | wsl.exe -d Ubuntu\t/tmp".into(),
+        ),
+        (
+            "terminal.shell.1".into(),
+            "PowerShell | powershell.exe -NoLogo".into(),
+        ),
+        ("terminal.default".into(), "WSL".into()),
+    ];
+    apply_settings(window, &numbers, &palette, &fonts, &legacy);
+    let mut shells = configured_shells(window);
+    let wsl_id = shells[0].id;
+    assert_ne!(wsl_id, 0);
+    assert_ne!(wsl_id, shells[1].id);
+    let candidate = settings_items::Group::all(window)
+        .into_iter()
+        .find(|group| group.matches("wsl arguments"))
+        .unwrap();
+
+    shells[0].name = "Ubuntu".into();
+    shells.swap(0, 1);
+    hold_shells(window, &shells);
+    candidate.open(window, live);
+    assert_eq!(window.get_shell_profile_index(), 1);
+    assert_eq!(window.get_shell_profile_name(), "Ubuntu");
+
+    let saved = settings_values(window);
+    assert!(saved.contains(&(
+        "terminal.shell.1".into(),
+        "Ubuntu | wsl.exe -d Ubuntu\t/tmp".into()
+    )));
+    assert!(saved.contains(&("terminal.profile-id.1".into(), wsl_id.to_string())));
+    apply_settings(window, &numbers, &palette, &fonts, &saved);
+    assert_eq!(configured_shells(window)[1].id, wsl_id);
+
+    // A copied profile receives a new identity; deleting it does not rewind allocation.
+    let mut copy = shells[1].clone();
+    copy.id = 0;
+    copy.name = "Ubuntu Copy".into();
+    shells.push(copy.clone());
+    hold_shells(window, &shells);
+    let copy_id = configured_shells(window)[2].id;
+    assert!(copy_id > wsl_id);
+    shells.pop();
+    hold_shells(window, &shells);
+    let saved_without_copy = settings_values(window);
+    window.set_terminal_profile_next_id("4".into());
+    apply_settings(window, &numbers, &palette, &fonts, &saved_without_copy);
+    shells.push(copy);
+    hold_shells(window, &shells);
+    assert!(configured_shells(window)[2].id > copy_id);
 }

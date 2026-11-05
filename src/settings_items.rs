@@ -1,8 +1,6 @@
 use std::sync::OnceLock;
 
-use crate::{
-    AppWindow, Live, Setting, TerminalShell, colour_name, fold_for_search, font_name, i18n,
-};
+use crate::{AppWindow, Live, Setting, colour_name, fold_for_search, font_name, i18n};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scope {
@@ -120,7 +118,7 @@ impl Toggle {
 
 #[derive(Clone)]
 enum GroupId {
-    Shell(TerminalShell),
+    Shell(u64),
     WordMode(u32),
 }
 
@@ -147,7 +145,7 @@ impl Group {
                     ("開始フォルダ", "Start Folder"),
                     ("既定", "Default"),
                 ],
-                id: GroupId::Shell(shell),
+                id: GroupId::Shell(shell.id),
             }
         });
         let modes = crate::word_modes()
@@ -187,13 +185,11 @@ impl Group {
     pub(crate) fn open(self, window: &AppWindow, live: &Live) {
         let title = i18n::pick(&self.titles.0, &self.titles.1);
         match self.id {
-            GroupId::Shell(expected) => {
-                let shells = crate::configured_shells(window);
-                let mut matches = shells
+            GroupId::Shell(id) => {
+                if let Some(at) = crate::configured_shells(window)
                     .iter()
-                    .enumerate()
-                    .filter(|(_, shell)| **shell == expected);
-                if let Some((at, _)) = matches.next().filter(|_| matches.next().is_none()) {
+                    .position(|shell| shell.id == id)
+                {
                     crate::open_setting_target(window, live, title, "terminal.profiles", 1);
                     crate::terminal_shells::action(window, live, 0, at as i32);
                 }

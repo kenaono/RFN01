@@ -165,6 +165,7 @@ fn terminal_new_tab_random_and_direct_file_capture() {
         &h.live,
         id,
         TerminalShell {
+            id: 0,
             name: "QA".into(),
             command: "cmd.exe /Q /D /K".into(),
             directory: String::new(),
@@ -252,6 +253,7 @@ fn a_bell_marks_the_tab_until_the_keyboard_comes() {
         &h.live,
         id,
         TerminalShell {
+            id: 0,
             name: "QA".into(),
             command: "cmd.exe /Q /D /K".into(),
             directory: String::new(),
@@ -426,6 +428,7 @@ fn a_shell_comes_back_after_a_restart_with_its_output() {
         &h.live,
         id,
         TerminalShell {
+            id: 0,
             name: "QA".into(),
             command: "cmd.exe /Q /D /K".into(),
             directory: String::new(),
@@ -733,6 +736,7 @@ fn terminal_settings_refresh_profiles_loaded_after_install() {
     hold_shells(
         &h.window,
         &[TerminalShell {
+            id: 0,
             name: "Loaded QA".into(),
             command: "cmd.exe /Q /D /K".into(),
             directory: String::new(),
@@ -966,6 +970,7 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
         &h.live,
         id,
         TerminalShell {
+            id: 0,
             name: "QA".into(),
             command: "invalid-command".into(),
             directory: String::new(),
@@ -1017,6 +1022,7 @@ fn terminal_panels_keep_capture_target_and_cancel_without_stopping() {
         &h.live,
         id,
         TerminalShell {
+            id: 0,
             name: "QA".into(),
             command: "invalid-command".into(),
             directory: String::new(),
@@ -1420,11 +1426,13 @@ fn terminal_panel_shell_selection_same_cancel_and_replace() {
     let id = PaneId::FIRST;
     let profiles = vec![
         TerminalShell {
+            id: 0,
             name: "QA A".into(),
             command: "cmd.exe /Q /D /K".into(),
             directory: String::new(),
         },
         TerminalShell {
+            id: 0,
             name: "QA B".into(),
             command: "cmd.exe /Q /D /K".into(),
             directory: String::new(),

@@ -346,9 +346,14 @@ pub(crate) fn publish(window: &AppWindow) {
     let mut current = Vec::new();
     let mut modified = Vec::new();
     for kind in PresetKind::ALL {
-        let now: BTreeMap<String, String> = current_values(window, kind).into_iter().collect();
-        let same =
-            |preset: &Preset| preset.values.iter().cloned().collect::<BTreeMap<_, _>>() == now;
+        let comparable = |values: Vec<(String, String)>| {
+            values
+                .into_iter()
+                .filter(|(name, _)| !crate::shell_identity_metadata(name))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let now = comparable(current_values(window, kind));
+        let same = |preset: &Preset| comparable(preset.values.clone()) == now;
         let names: Vec<SharedString> = book
             .presets
             .iter()

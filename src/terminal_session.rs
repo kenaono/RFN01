@@ -776,6 +776,7 @@ mod tab_names {
     fn a_default_console_title_leaves_the_shells_name() {
         let mut shell = TerminalSession::waiting(
             crate::TerminalShell {
+                id: 0,
                 name: "PowerShell".into(),
                 command: "powershell.exe -NoLogo".into(),
                 directory: String::new(),
