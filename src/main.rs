@@ -13444,6 +13444,65 @@ pub(crate) fn open_settings_searching(
     window.set_find_generation(window.get_find_generation() + 1);
 }
 
+/// RFN01-66: 設定のTABをこの面で開く（ヘルプの「キーの一覧」は6＝Keys）。
+pub(crate) fn open_settings_page(window: &AppWindow, live: &Live, page: i32) {
+    open_settings(window, live);
+    window.set_settings_tab(page);
+}
+
+/// RFN01-66（書き手の判断 2026-11-05）: ヘルプの「サンプル文書を開く」。紹介用のサンプル
+/// （testdata/53、RFN01-65）を実行ファイルに組み込み、無題の文書として開く——縦書き・ルビ・
+/// 傍点などの記法が、開いてすぐ見られる。保存先は無いので、手を入れても元は変わらない。
+const SAMPLE_DOCUMENT: &str = include_str!("../testdata/53_紹介用サンプル.md");
+
+pub(crate) fn open_sample_document(window: &AppWindow, live: &Live, id: PaneId) {
+    let id = zoom_owner(window, id);
+    let asking = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| tab.empty);
+    if asking {
+        answer_new_tab(window, live, id, None);
+    } else {
+        new_file_tab(window, live, id);
+    }
+    let document = live.states.document(id);
+    live.states.of(id).borrow_mut().caret_source_byte = Some(0);
+    insert_pane_text(
+        window,
+        id,
+        &document,
+        &live.states,
+        &live.cache,
+        &SAMPLE_DOCUMENT.replace("\r\n", "\n"),
+        false,
+    );
+    live.states.of(id).borrow_mut().caret_source_byte = Some(0);
+}
+
+/// RFN01-66（書き手の判断 2026-11-05）: ヘルプの「RFN Editについて」。名前・版・著作権を、
+/// いつもの問いの窓で出す。
+pub(crate) fn show_about(window: &AppWindow, live: &Live) {
+    let text = format!(
+        "RFN Edit {}\n\n{}\nCopyright © 2026 Ken Aono",
+        env!("CARGO_PKG_VERSION"),
+        pick(
+            "縦書きで書く人のためのテキストエディタ",
+            "A text editor for writers who write vertically"
+        )
+    );
+    ask_question(
+        window,
+        live,
+        Question::About,
+        text,
+        &[pick("閉じる", "Close")],
+        -1,
+    );
+}
+
 fn open_settings(window: &AppWindow, live: &Live) {
     if focused_pane(window).is_panel() {
         window.set_focused_pane(focused_pane(window).screen(window).panel_owner);
@@ -13635,6 +13694,8 @@ enum Question {
     ChangeWorkspace(Option<workspace::WorkspaceId>),
     /// RFN01-110: Explorerから入るWorkspaceの外のファイルが開いている。0で閉じて開く。
     OutsideForWorkspace(workspace::WorkspaceId),
+    /// RFN01-66: ヘルプの「RFN Editについて」。答えは閉じるだけ。
+    About,
     DiscardForWorkspace(Option<workspace::WorkspaceId>),
     /// Closing a tab holding work that is not in its file (要件 8.4).
     ///
@@ -13780,6 +13841,7 @@ impl Question {
             Self::TerminalClose(..) => "TerminalClose",
             Self::ChangeWorkspace(..) => "ChangeWorkspace",
             Self::OutsideForWorkspace(..) => "OutsideForWorkspace",
+            Self::About => "About",
             Self::DiscardForWorkspace(..) => "DiscardForWorkspace",
             Self::CloseTab { .. } => "CloseTab",
             Self::CloseMemo { .. } => "CloseMemo",
