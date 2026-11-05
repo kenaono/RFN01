@@ -1001,6 +1001,31 @@ pub fn write_session(directory: &Path, session: &Session) -> io::Result<PathBuf>
     Ok(path)
 }
 
+/// RFN01-106: Workspaceごとの画面の並び（ペインの分け方とTAB）を置くフォルダ。
+/// 中身は作業の記録と同じ形で、使うのはペイン・分け方・フォーカスだけ。
+const WORKSPACE_TABS_DIRECTORY: &str = "workspace-tabs";
+
+fn workspace_tabs_path(directory: &Path, workspace: u64) -> PathBuf {
+    directory
+        .join(WORKSPACE_TABS_DIRECTORY)
+        .join(format!("{workspace}.rfnsession"))
+}
+
+/// RFN01-106: このWorkspaceの画面の並びを書く。
+pub fn write_workspace_tabs(directory: &Path, workspace: u64, session: &Session) -> io::Result<()> {
+    let path = workspace_tabs_path(directory, workspace);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    file_io::write_atomically(&path, encode_session(session).as_bytes()).map(|_| ())
+}
+
+/// RFN01-106: このWorkspaceで覚えた画面の並び。無ければ`None`。
+pub fn read_workspace_tabs(directory: &Path, workspace: u64) -> Option<Session> {
+    let raw = fs::read_to_string(workspace_tabs_path(directory, workspace)).ok()?;
+    decode_session(&raw)
+}
+
 /// What the last run left, if anything readable.
 pub fn read_session(directory: &Path) -> Option<Session> {
     let raw = fs::read_to_string(directory.join(SESSION_FILE)).ok()?;

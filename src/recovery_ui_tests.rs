@@ -722,3 +722,33 @@ fn save_all_defers_open_destinations_and_handles_duplicate_choices_and_cancel() 
     assert!(!b.text.edited() && !c.text.edited());
     assert_eq!(b.file.borrow().form(), chosen_form);
 }
+
+/// RFN01-110: フォルダを指定した起動はExplorerでそのフォルダを、ファイルだけなら左ペインを
+/// 閉じて始める。複数のファイルはファイルごとにTAB。
+#[test]
+fn startup_paths_set_the_left_pane() {
+    let r = Recovery::new();
+    let folder = r.directory.join("原稿");
+    std::fs::create_dir_all(&folder).unwrap();
+    r.window.set_tree_open(false);
+    open_startup_paths(&r.window, &r.live, r.id, std::slice::from_ref(&folder));
+    assert!(r.window.get_tree_open());
+    assert_eq!(r.window.get_left_tab(), LeftTab::Explorer.index());
+
+    let one = r.directory.join("一.md");
+    let two = r.directory.join("二.md");
+    std::fs::write(&one, "一").unwrap();
+    std::fs::write(&two, "二").unwrap();
+    open_startup_paths(&r.window, &r.live, r.id, &[one.clone(), two.clone()]);
+    assert!(!r.window.get_tree_open());
+    let tabs = r.live.tabs.borrow();
+    for path in [&one, &two] {
+        assert!(
+            tabs.of(r.id)
+                .tabs
+                .iter()
+                .any(|tab| tab.document.file.borrow().path() == Some(path.as_path())),
+            "{path:?}"
+        );
+    }
+}

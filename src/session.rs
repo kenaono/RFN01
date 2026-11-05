@@ -719,4 +719,29 @@ pub fn write_session(window: &AppWindow, live: &Live) {
             .borrow_mut()
             .log_diag("session", &format!("save failed error={error}"));
     }
+    // RFN01-106: 使っているWorkspaceの並びも、そのWorkspaceのものとして書く。記録を書くたびに
+    // 書くので、終了でも切り替えでも最後の並びが残る。
+    remember_workspace_tabs(live, &session);
+}
+
+/// RFN01-106: この並びを、使っているWorkspaceのものとして書く。Workspaceを使っていなければ
+/// 何もしない（Explorerの並びは覚えない、書き手の判断 2026-11-05）。
+pub fn remember_workspace_tabs(live: &Live, session: &app_data::Session) {
+    let Some(directory) = app_data::app_directory() else {
+        return;
+    };
+    let active = live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .and_then(|runtime| runtime.borrow().active_workspace());
+    let Some(active) = active else {
+        return;
+    };
+    if let Err(error) = app_data::write_workspace_tabs(&directory, active, session) {
+        live.cache
+            .borrow_mut()
+            .log_diag("workspace", &format!("tabs save failed error={error}"));
+    }
 }
