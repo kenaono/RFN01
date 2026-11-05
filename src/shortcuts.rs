@@ -37,7 +37,7 @@ const NAMES: &[(&str, &str)] = &[
     ("Kill Ringへコピー", "Copy to Kill Ring"),
     ("Kill Ringへ切り取り", "Cut to Kill Ring"),
     ("最新のKillを貼り付け", "Paste Latest Kill"),
-    ("前のKillへ置き換え", "Replace with Previous Kill"),
+    ("前のKillへ置換", "Replace with Previous Kill"),
     ("1単語後まで選択", "Select Forward One Word"),
     ("1単語前まで選択", "Select Back One Word"),
     ("行を削除", "Delete Line"),
@@ -56,11 +56,12 @@ const NAMES: &[(&str, &str)] = &[
         "Paste to Tab (in Quick Draft)",
     ),
     ("縦書き・横書きを切り替え", "Toggle Vertical / Horizontal"),
+    // RFN01-66（2026-11-05）: 名前はタイトルバーのメニューにそろえる。
+    ("Source・Preview切替", "Toggle Source / Preview"),
     (
-        "ソース・Previewを切り替え（Viewer終了）",
-        "Toggle Source / Preview (Exits Viewer)",
+        "Viewer・ReadOnly開始／終了",
+        "Start / Exit Viewer or ReadOnly",
     ),
-    ("Viewerを開始・終了", "Start or Exit Viewer"),
     ("印刷プレビューを開く", "Open Print Preview"),
 ];
 const DEFAULTS: &[&str] = &[
@@ -348,7 +349,7 @@ const PANE_ACTIONS: &[MenuAction] = &[
         ShortcutAction::OpenSettings
     ),
     menu_action!(
-        "右に分割",
+        "右へ分割",
         "Split Right",
         "Ctrl+\\",
         ShortcutAction::SplitRight
