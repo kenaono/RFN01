@@ -107,7 +107,7 @@ use crate::{
     rename_word_mode, replace_all_in_pane, replace_in_pane, reset_settings_group,
     restore_editor_focus, save_settings, schedule_relayout, search_in_folder, search_work_folder,
     selected_runs, set_picked_colour, set_word_mode_of, show_bullet_marks, shown_sheet,
-    slint_colour, step_setting, tell_goto, toggle_goto, tree_command, walk_find_history,
+    slint_colour, step_setting, tell_goto, toggle_goto, walk_find_history,
     word_modes_now,
 };
 
@@ -1555,7 +1555,14 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
     let explorer_live = live.clone();
     window.on_explorer_command(move |command| {
         if let Some(window) = weak.upgrade() {
-            crate::explorer_command(&window, &explorer_live, command);
+            use crate::tree_actions::Action;
+            let action = match command {
+                0 => Action::RevealDocument,
+                1 => Action::CollapseAll,
+                2 => Action::Refresh,
+                _ => return,
+            };
+            queue_tree_action(&window, &explorer_live, action);
         }
     });
     // 要件 5.1, 5.2: the work folder and its tree.
@@ -1739,7 +1746,7 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
     let toggle_live = live.clone();
     window.on_tree_search_toggled(move || {
         if let Some(window) = weak.upgrade() {
-            crate::toggle_tree_search(&window, &toggle_live);
+            queue_tree_action(&window, &toggle_live, crate::tree_actions::Action::Search);
         }
     });
     let weak = window.as_weak();
@@ -1842,21 +1849,23 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
 
     let weak = window.as_weak();
     let command_live = live.clone();
-    // From the event loop rather than from the callback, for 6.18's reason: the
-    // commands are asked for from a menu that hangs off a row of the tree, and
-    // half of them draw the tree again — which takes that row, and the menu on
-    // it, away while the click is still being handled.
     window.on_tree_command(move |command| {
-        let Some(command) = TreeCommand::from_index(command) else {
+        if let (Some(window), Some(command)) = (weak.upgrade(), TreeCommand::from_index(command)) {
+            queue_tree_action(&window, &command_live, crate::tree_actions::Action::Entry(command));
+        }
+    });
+
+    let context_target = Rc::new(RefCell::new(None));
+    let weak = window.as_weak();
+    let context_live = live.clone();
+    let pending = context_target.clone();
+    window.on_tree_context_command(move |command| {
+        let (Some(window), Some(command), Some(target)) =
+            (weak.upgrade(), TreeCommand::from_index(command), pending.borrow_mut().take())
+        else {
             return;
         };
-        let weak = weak.clone();
-        let live = command_live.clone();
-        Timer::single_shot(Duration::ZERO, move || {
-            if let Some(window) = weak.upgrade() {
-                tree_command(&window, &live, command);
-            }
-        });
+        crate::tree_actions::queue(&window, &context_live, target, crate::tree_actions::Action::Entry(command));
     });
 
     let picked_live = live.clone();
@@ -1869,6 +1878,9 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
     window.on_left_context_requested(move |index| {
         if let Some(window) = weak.upgrade() {
             crate::workspace_context_requested(&window, &context_live, index);
+            let target = crate::menu_commands::Target::for_tree(&window, &context_live);
+            crate::tree_actions::publish_context(&window, &context_live, &target);
+            *context_target.borrow_mut() = Some(target);
         }
     });
     let weak = window.as_weak();
@@ -2352,4 +2364,9 @@ pub fn wire_workspace(window: &AppWindow, live: &Live) {
             }
         });
     });
+}
+
+fn queue_tree_action(window: &AppWindow, live: &Live, action: crate::tree_actions::Action) {
+    let target = crate::menu_commands::Target::for_tree(window, live);
+    crate::tree_actions::queue(window, live, target, action);
 }

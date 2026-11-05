@@ -30,6 +30,7 @@ thread_local! {
 
 struct Palette {
     pane: PaneId,
+    tree: menu_commands::Target,
     /// Files in the order an empty search lists them: recent first.
     files: Option<Vec<FileCandidate>>,
     /// RFN01-114: the operations that can run now, read when first asked.
@@ -135,6 +136,7 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
         PALETTE.with(|held| {
             *held.borrow_mut() = Some(Palette {
                 pane,
+                tree: menu_commands::Target::for_tree(window, live),
                 files: None,
                 operations: None,
                 templates: None,
@@ -174,6 +176,7 @@ fn open_list_for(window: &AppWindow, live: &Live, pane: PaneId, list: List) {
     PALETTE.with(|held| {
         *held.borrow_mut() = Some(Palette {
             pane,
+            tree: menu_commands::Target::for_tree(window, live),
             files: None,
             operations: None,
             templates: None,
@@ -262,7 +265,7 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                 let pane = palette.pane;
                 let operations = palette
                     .operations
-                    .get_or_insert_with(|| operations_now(window, live, pane));
+                    .get_or_insert_with(|| operations_now(window, live, pane, &palette.tree));
                 let mut ranked = ranked_operations(operations, query.trim(), true);
                 // RFN01-88: each template is an operation of its own here.
                 let templates = palette
@@ -349,7 +352,7 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
 
 fn accept(window: &AppWindow, live: &Live) {
     let selected = window.get_palette_selected();
-    let Some((pane, chosen)) = PALETTE.with(|held| {
+    let Some((pane, tree, chosen)) = PALETTE.with(|held| {
         let held = held.borrow();
         let palette = held.as_ref()?;
         let shown = palette.shown.get(usize::try_from(selected).ok()?)?.clone();
@@ -375,7 +378,7 @@ fn accept(window: &AppWindow, live: &Live) {
                     .to_owned(),
             ),
         };
-        Some((palette.pane, chosen))
+        Some((palette.pane, palette.tree.clone(), chosen))
     }) else {
         return;
     };
@@ -390,7 +393,11 @@ fn accept(window: &AppWindow, live: &Live) {
         match chosen {
             Chosen::File(path) => open_path_in_focused_pane(&window, &live, &path, Opening::Kept),
             Chosen::Operation(command, name) => {
-                let target = menu_commands::Target::for_pane(&window, &live, pane);
+                let target = if matches!(command, menu_commands::Command::Tree(_)) {
+                    tree
+                } else {
+                    menu_commands::Target::for_pane(&window, &live, pane)
+                };
                 menu_commands::run(&window, &live, &target, command, &name);
             }
             Chosen::Template(path) => crate::insert_template(&window, &live, pane, &path),
@@ -781,15 +788,24 @@ fn file_rows(files: &[FileCandidate], query: &str) -> (Vec<PaletteRow>, Vec<Show
 
 /// RFN01-114: いま実行できる操作。アクションの表の行（Quick Draftの中の操作を除く）と、
 /// 書き手のデータの行。**前提は1つの答え**（`menu_commands::allowed_for`）。
-fn operations_now(window: &AppWindow, live: &Live, pane: PaneId) -> Vec<Operation> {
+fn operations_now(
+    window: &AppWindow,
+    live: &Live,
+    pane: PaneId,
+    tree: &menu_commands::Target,
+) -> Vec<Operation> {
+    let tree_scene = menu_commands::Scene::read(window, live, tree);
     let mut found: Vec<Operation> = crate::actions::all()
         .iter()
         .enumerate()
         .filter_map(|(at, action)| {
             let command = action.command.clone()?;
-            (menu_commands::allowed_for(window, live, pane, &command)
-                == menu_commands::Allowed::Yes)
-                .then(|| Operation {
+            let enabled = if matches!(command, menu_commands::Command::Tree(_)) {
+                tree_scene.enabled(&command)
+            } else {
+                menu_commands::allowed_for(window, live, pane, &command) == menu_commands::Allowed::Yes
+            };
+            enabled.then(|| Operation {
                     category: action.category,
                     title: action.title.clone(),
                     description: action.description.clone(),

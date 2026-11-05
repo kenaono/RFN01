@@ -39,6 +39,12 @@ export { BookmarkRow } from "bookmark-view.slint";
 /// 数えられない——一覧の中では見出しとして立つ。
 /// RFN01-87: コマンドパレットの候補の1行。ファイルなら名前とフォルダ、操作なら
 /// メニューの道と割り当て済みのキー。
+export struct TreeMenuItem {
+    title: string,
+    shortcut: string,
+    enabled: bool,
+}
+
 export struct PalettePart {
     text: string,
     matched: bool,
@@ -488,6 +494,10 @@ export component AppWindow inherits Window {
     in-out property <string> tree-new-error;
     callback tree-new-finished(bool);
     callback tree-command(int);
+    callback tree-context-command(int);
+    callback tree-shortcut(string, bool, bool, bool) -> bool;
+    in property <[TreeMenuItem]> tree-context-items;
+    in-out property <int> tree-key-reveal;
     callback explorer-command(int);
     in-out property <int> tree-reveal-generation;
     /// Choose a row without acting on it (要件 5.2). What a right click does
@@ -1585,6 +1595,7 @@ export component AppWindow inherits Window {
     callback shortcut-filter();
     callback shortcut-save(bool);
     callback shortcut-capture(string, bool, bool, bool);
+    callback shortcut-is-tree(int) -> bool;
     callback shortcut-key(string, bool, bool, bool) -> bool;
 
     // 要件 7.10: 紙の形で見る——印刷プレビュー。
@@ -2459,6 +2470,10 @@ export component AppWindow inherits Window {
                             self.take-focus();
                         }
                         shortcut(event) => {
+                            if event.text == Key.Tab && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift {
+                                tree-keys.focus();
+                                return accept;
+                            }
                             if root.left-field-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
                             return reject;
                         }
@@ -2645,6 +2660,21 @@ export component AppWindow inherits Window {
                         font-size: 12px;
                         wrap: word-wrap;
                     }
+                    tree-keys := FocusScope {
+                        height: 0px;
+                        enabled: (root.left-tab == 0 || (root.left-tab == 4 && root.workspace-active))
+                            && !root.tree-searching && root.tree-new-index < 0;
+                        key-pressed(event) => {
+                            if event.text == Key.Escape {
+                                root.left-field-escaped();
+                                return accept;
+                            }
+                            if root.tree-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) {
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
                     tree-view := ScrollView {
                         // RFN01-75: **the tree comes back where it was.** The search
                         // shows the found files in these same rows, which would leave
@@ -2698,6 +2728,13 @@ export component AppWindow inherits Window {
                                 changed reveal-generation => {
                                     if (root.left-tab == 0 || root.left-tab == 4) && index == root.tree-selected {
                                         tree-view.content-y = -min(self.y, max(0px, tree-view.content-height - tree-view.visible-height));
+                                    }
+                                }
+                                property <int> key-reveal: root.tree-key-reveal;
+                                changed key-reveal => {
+                                    if index == root.tree-selected {
+                                        tree-view.content-y = -clamp(-tree-view.content-y,
+                                            max(0px, self.y + self.height - tree-view.visible-height), self.y);
                                     }
                                 }
                                 // 要件 5.2: what this row can be given. A file
@@ -2755,7 +2792,7 @@ export component AppWindow inherits Window {
                                 // drawn again until the hand lets go.
                                 property <float> label-opacity: (root.tree-carrying
                                     && index == root.tree-carried-from) ? 0.45 : 1.0;
-                                border-width: self.receiving ? 2px : 0px;
+                                border-width: self.receiving ? 2px : (tree-keys.has-focus && index == root.tree-selected ? 1px : 0px);
                                 border-color: Tok.accent;
                                 // The selected row is the one the file commands
                                 // act on (要件 5.2), so it has to be visible
@@ -2857,9 +2894,19 @@ export component AppWindow inherits Window {
                                                 root.tree-carried-from = -1;
                                                 root.tree-drop-hand = -2;
                                                 root.tree-drop-into = -2;
-                                            } else if (tree-row.pressing && !(root.left-tab == 4 && row.is-root)) {
-                                                root.left-row-activated(index);
-                                                root.focus-generation += 1;
+                                            } else if (tree-row.pressing) {
+                                                if tree-keys.enabled && row.folder {
+                                                    tree-keys.focus();
+                                                    if root.left-tab == 4 && row.is-root {
+                                                        root.tree-selected = index;
+                                                        root.left-row-picked(index);
+                                                    } else {
+                                                        root.left-row-activated(index);
+                                                    }
+                                                } else if !(root.left-tab == 4 && row.is-root) {
+                                                    root.left-row-activated(index);
+                                                    root.focus-generation += 1;
+                                                }
                                             }
                                             tree-row.pressing = false;
                                             tree-row.carrying-self = false;
@@ -3858,7 +3905,7 @@ export component AppWindow inherits Window {
                                                         if event.text == Key.Tab && !event.modifiers.control && !event.modifiers.alt { return reject; }
                                                         if event.text == Key.Escape {
                                                             root.focus-generation += 1;
-                                                        } else if (event.text == Key.Backspace || event.text == Key.Delete) && !event.modifiers.control && !event.modifiers.alt {
+                                                        } else if event.text == Key.Backspace && !event.modifiers.control && !event.modifiers.alt {
                                                             root.shortcut-key-query = "";
                                                             root.shortcut-filter();
                                                         } else {
@@ -3996,7 +4043,7 @@ export component AppWindow inherits Window {
                                                                     if event.text == Key.Escape {
                                                                         root.shortcut-selected = -1;
                                                                         root.focus-generation += 1;
-                                                                    } else if event.text == Key.Return && root.shortcut-edit != "" {
+                                                                    } else if event.text == Key.Return && root.shortcut-edit != "" && !root.shortcut-is-tree(root.shortcut-selected) {
                                                                         root.shortcut-save(false);
                                                                     } else {
                                                                         root.shortcut-capture(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift);
@@ -7278,71 +7325,78 @@ export component AppWindow inherits Window {
                 spacing: 1px;
 
                 MenuRow {
-                    enabled: root.tree-selected >= 0;
-                    title: @tr("New File…");
+                    enabled: root.tree-context-items[0].enabled;
+                    title: root.tree-context-items[0].title;
+                    shortcut: root.tree-context-items[0].shortcut;
                     activated => {
+                        root.tree-context-command(0);
                         root.close-tree-menu();
-                        root.tree-command(0);
                     }
                 }
                 MenuRow {
-                    enabled: root.tree-selected >= 0;
-                    title: @tr("New Folder…");
+                    enabled: root.tree-context-items[1].enabled;
+                    title: root.tree-context-items[1].title;
+                    shortcut: root.tree-context-items[1].shortcut;
                     activated => {
+                        root.tree-context-command(1);
                         root.close-tree-menu();
-                        root.tree-command(1);
-                    }
-                }
-                MenuSep { }
-                MenuRow {
-                    enabled: root.tree-selected >= 0 && !root.left-rows[root.tree-selected].is-root;
-                    title: @tr("Rename…");
-                    activated => {
-                        root.close-tree-menu();
-                        root.tree-command(2);
-                    }
-                }
-                MenuRow {
-                    enabled: root.tree-selected >= 0 && !root.left-rows[root.tree-selected].is-root;
-                    title: @tr("Duplicate");
-                    activated => {
-                        root.close-tree-menu();
-                        root.tree-command(3);
-                        root.focus-generation += 1;
-                    }
-                }
-                MenuRow {
-                    enabled: root.tree-selected >= 0;
-                    title: @tr("Terminal in This Folder");
-                    activated => { root.tree-command(7); root.close-tree-menu(); }
-                }
-                MenuRow {
-                    enabled: root.tree-selected >= 0;
-                    title: @tr("Reveal in Explorer");
-                    activated => {
-                        root.close-tree-menu();
-                        root.tree-command(5);
-                        root.focus-generation += 1;
-                    }
-                }
-                MenuSep { }
-                // 要件 7.7（2026-09-07追加）: 見えて
-                // いるフォルダを指して絞る。
-                MenuRow {
-                    enabled: root.tree-selected >= 0;
-                    title: @tr("Search in This Folder");
-                    activated => {
-                        root.close-tree-menu();
-                        root.tree-command(6);
                     }
                 }
                 MenuSep { }
                 MenuRow {
-                    enabled: root.tree-selected >= 0 && !root.left-rows[root.tree-selected].is-root;
-                    title: @tr("Delete…");
+                    enabled: root.tree-context-items[2].enabled;
+                    title: root.tree-context-items[2].title;
+                    shortcut: root.tree-context-items[2].shortcut;
                     activated => {
+                        root.tree-context-command(2);
                         root.close-tree-menu();
-                        root.tree-command(4);
+                    }
+                }
+                MenuRow {
+                    enabled: root.tree-context-items[3].enabled;
+                    title: root.tree-context-items[3].title;
+                    shortcut: root.tree-context-items[3].shortcut;
+                    activated => {
+                        root.tree-context-command(3);
+                        root.close-tree-menu();
+                    }
+                }
+                MenuRow {
+                    enabled: root.tree-context-items[7].enabled;
+                    title: root.tree-context-items[7].title;
+                    shortcut: root.tree-context-items[7].shortcut;
+                    activated => {
+                        root.tree-context-command(7);
+                        root.close-tree-menu();
+                    }
+                }
+                MenuRow {
+                    enabled: root.tree-context-items[5].enabled;
+                    title: root.tree-context-items[5].title;
+                    shortcut: root.tree-context-items[5].shortcut;
+                    activated => {
+                        root.tree-context-command(5);
+                        root.close-tree-menu();
+                    }
+                }
+                MenuSep { }
+                MenuRow {
+                    enabled: root.tree-context-items[6].enabled;
+                    title: root.tree-context-items[6].title;
+                    shortcut: root.tree-context-items[6].shortcut;
+                    activated => {
+                        root.tree-context-command(6);
+                        root.close-tree-menu();
+                    }
+                }
+                MenuSep { }
+                MenuRow {
+                    enabled: root.tree-context-items[4].enabled;
+                    title: root.tree-context-items[4].title;
+                    shortcut: root.tree-context-items[4].shortcut;
+                    activated => {
+                        root.tree-context-command(4);
+                        root.close-tree-menu();
                     }
                 }
                 // RFN01-72（書き手の求め 2026-10-24）: よく使うファイルの操作を上に、

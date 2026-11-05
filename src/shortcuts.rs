@@ -131,7 +131,9 @@ fn default_at(id: usize) -> &'static str {
 fn category_at(id: usize) -> Category {
     actions::all()[id].category
 }
-/// どこでキーを受けるか：0は窓、1はQuick Draft。
+const TREE_SCOPE: i32 = 2;
+
+/// どこでキーを受けるか。
 fn scope_at(id: usize) -> i32 {
     // RFN01-114: キーが固定の行は、割り当ての場面に入れない（resolveも重なりの検査も見ない）。
     if actions::all()[id].fixed {
@@ -140,6 +142,7 @@ fn scope_at(id: usize) -> i32 {
     match actions::all()[id].scope {
         Scope::Main => 0,
         Scope::QuickDraft => 1,
+        Scope::Tree => TREE_SCOPE,
     }
 }
 /// いまの言語の名前（Keysの行、知らせ）。
@@ -186,6 +189,8 @@ fn key_token(token: &str) -> Option<String> {
         "RIGHT" => "Right",
         "UP" => "Up",
         "DOWN" => "Down",
+        "ENTER" => "Enter",
+        "DELETE" => "Delete",
         _ => return None,
     };
     Some(named.to_owned())
@@ -221,12 +226,17 @@ fn function_key(text: &str) -> Option<&'static str> {
         (value.as_str() == text).then_some(*name)
     })
 }
-/// 押された組み合わせが、保存する綴りになるか。
-///
-/// 取るのは**修飾キー付き**か、**F1〜F12だけ**（書き手の合意 2026-09-21）。素の
-/// 打鍵を取ると本文が打てなくなるので、`Shift`だけの`Shift+A`も同じ理由で断る。
-/// 固定の基本編集と、窓が先に取る鍵（[`TAKEN`]）も断る。
+#[cfg(test)]
 fn normalize(value: &str) -> Option<String> {
+    normalize_for(value, 0)
+}
+
+fn bare_tree_key(scope: i32, key: &str, shift: bool) -> bool {
+    scope == TREE_SCOPE && !shift && matches!(key, "Enter" | "Delete" | "Left" | "Right" | "Up" | "Down")
+}
+
+/// 保存する綴りにそろえる。裸の操作キーはツリーに限り、固定キーは割り当てない。
+fn normalize_for(value: &str, scope: i32) -> Option<String> {
     if value.is_empty() {
         return Some(String::new());
     }
@@ -242,7 +252,10 @@ fn normalize(value: &str) -> Option<String> {
             _ => return None,
         }
     }
-    if !control && !alt && !is_function(&key) {
+    if scope != TREE_SCOPE && matches!(key.as_str(), "Enter" | "Delete") {
+        return None;
+    }
+    if !control && !alt && !is_function(&key) && !bare_tree_key(scope, &key, shift) {
         return None;
     }
     let written = format!(
@@ -272,7 +285,12 @@ fn modifier_only(text: &str) -> bool {
         value.as_str() == text
     })
 }
+#[cfg(test)]
 fn chord(text: &str, control: bool, alt: bool, shift: bool) -> Option<String> {
+    chord_for(text, control, alt, shift, 0)
+}
+
+fn chord_for(text: &str, control: bool, alt: bool, shift: bool, scope: i32) -> Option<String> {
     use slint::platform::Key;
     let special = [
         (Key::Tab, "Tab"),
@@ -280,6 +298,8 @@ fn chord(text: &str, control: bool, alt: bool, shift: bool) -> Option<String> {
         (Key::RightArrow, "Right"),
         (Key::UpArrow, "Up"),
         (Key::DownArrow, "Down"),
+        (Key::Return, "Enter"),
+        (Key::Delete, "Delete"),
     ];
     let key = if let Some((_, name)) = special.iter().find(|(key, _)| {
         let value: slint::SharedString = (*key).into();
@@ -303,8 +323,10 @@ fn chord(text: &str, control: bool, alt: bool, shift: bool) -> Option<String> {
             _ => return None,
         }
     };
-    // **修飾キー付きか、F1〜F12だけ**（書き手の合意 2026-09-21）。
-    if !control && !alt && !is_function(&key) {
+    if scope != TREE_SCOPE && matches!(key.as_str(), "Enter" | "Delete") {
+        return None;
+    }
+    if !control && !alt && !is_function(&key) && !bare_tree_key(scope, &key, shift) {
         return None;
     }
     Some(format!(
@@ -515,7 +537,9 @@ fn bindings(raw: &str) -> Vec<String> {
         } else {
             actions::index_of(name)
         };
-        if let (Some(at), Some(key)) = (at, normalize(value)) {
+        if let Some(at) = at
+            && let Some(key) = normalize_for(value, scope_at(at))
+        {
             keys[at] = key;
         }
     }
@@ -561,7 +585,7 @@ pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shif
     if modifier_only(text) {
         return -2;
     }
-    let Some(key) = chord(text, control, alt, shift) else {
+    let Some(key) = chord_for(text, control, alt, shift, scope) else {
         return -1;
     };
     if let Some(i) = bindings(raw)
@@ -667,6 +691,7 @@ pub fn publish(app: &AppWindow) {
 }
 pub fn wire(app: &AppWindow, live: &Live) {
     publish(app);
+    app.on_shortcut_is_tree(|id| usize::try_from(id).is_ok_and(|id| id < count() && scope_at(id) == TREE_SCOPE));
     let weak = app.as_weak();
     app.on_shortcut_filter(move || {
         if let Some(app) = weak.upgrade() {
@@ -691,7 +716,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         if modifier_only(&text) {
             return;
         }
-        let Some(key) = chord(&text, control, alt, shift) else {
+        let Some(key) = chord_for(&text, control, alt, shift, TREE_SCOPE) else {
             return;
         };
         app.set_shortcut_key_query(key.into());
@@ -706,17 +731,23 @@ pub fn wire(app: &AppWindow, live: &Live) {
         if modifier_only(&text) {
             return;
         }
-        if chord(&text, control, alt, shift).is_none() && text.chars().any(|c| c as u32 >= 0xE000) {
+        let i = app.get_shortcut_selected() as usize;
+        if i >= count() {
             return;
         }
-        let key = chord(&text, control, alt, shift).unwrap_or_default();
+        let scope = scope_at(i);
+        let key = chord_for(&text, control, alt, shift, scope);
+        if key.is_none() && text.chars().any(|c| c as u32 >= 0xE000) {
+            return;
+        }
+        let key = key.unwrap_or_default();
         app.set_shortcut_edit(if key.is_empty() {
             shown(("使用不可", "Not available")).into()
         } else {
             key.clone().into()
         });
         app.set_shortcut_status(
-            if !key.is_empty() && normalize(&key).is_some() {
+            if !key.is_empty() && normalize_for(&key, scope).is_some() {
                 shown((
                     "キーを受け付けました。「適用して保存」で確定します。",
                     "Key accepted. Click \"Apply and Save\" to confirm.",
@@ -745,7 +776,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
         let typed = if reset {
             Some(default_at(i).to_owned())
         } else {
-            normalize(&app.get_shortcut_edit())
+            normalize_for(&app.get_shortcut_edit(), scope_at(i))
         };
         let Some(key) = typed else {
             app.set_shortcut_status(
@@ -843,6 +874,27 @@ pub fn wire(app: &AppWindow, live: &Live) {
             }
         });
         true
+    });
+    let weak = app.as_weak();
+    let tree_live = live.clone();
+    app.on_tree_shortcut(move |text, control, alt, shift| {
+        let Some(app) = weak.upgrade() else {
+            return false;
+        };
+        let bindings = app.get_shortcut_bindings();
+        let id = resolve(&bindings, TREE_SCOPE, &text, control, alt, shift);
+        if id == -2 {
+            return true;
+        }
+        if let Some(Command::Tree(action)) = usize::try_from(id).ok().and_then(command_at) {
+            crate::tree_actions::queue(&app, &tree_live, crate::menu_commands::Target::for_tree(&app, &tree_live), *action);
+            return true;
+        }
+        let global = resolve(&bindings, 0, &text, control, alt, shift);
+        if matches!(usize::try_from(global).ok().and_then(command_at), Some(Command::CommandPalette(_))) {
+            return app.invoke_shortcut_key(text, control, alt, shift);
+        }
+        app.invoke_left_field_shortcut(text, control, alt, shift)
     });
     let weak = app.as_weak();
     let keyed_live = live.clone();
@@ -1207,6 +1259,33 @@ mod tests {
         keys[at("view.go-to-file")].clear();
         keys[at("file.print")] = "Ctrl+P".into();
         assert_eq!(bindings(&encode(&keys))[at("file.print")], "Ctrl+P");
+    }
+
+    #[test]
+    fn tree_navigation_keys_are_local_and_can_be_reassigned() {
+        use slint::platform::Key;
+        for (key, action) in [
+            (Key::F2, "tree.rename"),
+            (Key::Delete, "tree.delete"),
+            (Key::Return, "tree.open"),
+            (Key::UpArrow, "tree.previous"),
+            (Key::DownArrow, "tree.next"),
+            (Key::LeftArrow, "tree.left"),
+            (Key::RightArrow, "tree.right"),
+        ] {
+            let text: slint::SharedString = key.into();
+            let id = actions::index_of(action).unwrap() as i32;
+            assert_eq!(resolve("", TREE_SCOPE, &text, false, false, false), id);
+            assert_ne!(resolve("", 0, &text, false, false, false), id);
+            assert_ne!(resolve("", 1, &text, false, false, false), id);
+        }
+        let raw = "tree.open=Delete;tree.delete=;v=5";
+        let key: slint::SharedString = Key::Delete.into();
+        let id = actions::index_of("tree.open").unwrap() as i32;
+        assert_eq!(resolve(raw, TREE_SCOPE, &key, false, false, false), id);
+        assert_eq!(resolve(raw, 0, &key, false, false, false), -1);
+        let key: slint::SharedString = Key::Return.into();
+        assert_eq!(resolve(raw, TREE_SCOPE, &key, false, false, false), -2);
     }
 
     /// RFN01-82: 開閉しても、出ていた面はそのまま。

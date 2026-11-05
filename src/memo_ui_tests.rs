@@ -86,6 +86,55 @@ impl slint::platform::Platform for Offscreen {
 }
 
 #[test]
+fn file_tree_focus_receives_keys_and_escape_returns_them_to_the_editor() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+
+    let root = scratch_directory("tree-key-focus");
+    let (harness, _) = Harness::new(|window| open_under(&root, "example.md", "", window));
+    let window = &harness.window;
+    window.set_tree_open(true);
+    window.set_work_folder("example".into());
+    window.set_left_rows(ModelRc::new(VecModel::from(vec![LeftRow {
+        name: "notes".into(),
+        parent: -1,
+        folder: true,
+        ..Default::default()
+    }])));
+    window.show().unwrap();
+    let draw = || {
+        harness.surface.draw_if_needed(|renderer| {
+            let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+            renderer.render(&mut pixels, 1000);
+        });
+    };
+    draw();
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let events = received.clone();
+    window.on_tree_shortcut(move |key, _, _, _| {
+        events.borrow_mut().push(key);
+        true
+    });
+    let click = |x, y| {
+        let position = slint::LogicalPosition::new(x, y);
+        let button = PointerEventButton::Left;
+        window.window().dispatch_event(WindowEvent::PointerPressed { position, button });
+        window.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    let press = |key: Key| {
+        window.window().dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        window.window().dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+    };
+    click(100.0, 57.0);
+    press(Key::Tab);
+    press(Key::DownArrow);
+    assert_eq!(*received.borrow(), vec![SharedString::from(Key::DownArrow)]);
+    press(Key::Escape);
+    press(Key::Delete);
+    assert_eq!(received.borrow().len(), 1);
+}
+
+#[test]
 #[ignore = "Explorer menu placement and refresh guard"]
 fn explorer_menu_blocks_refresh_until_dismissed() {
     use slint::platform::{PointerEventButton, WindowEvent};
@@ -141,7 +190,11 @@ fn explorer_menu_blocks_refresh_until_dismissed() {
     assert!(window.get_tree_refresh_blocked());
     let command = Rc::new(Cell::new(-1));
     let received = command.clone();
-    window.on_tree_command(move |value| received.set(value));
+    window.set_tree_context_items(ModelRc::new(VecModel::from(vec![
+        TreeMenuItem { title: "New File…".into(), enabled: true, ..Default::default() };
+        8
+    ])));
+    window.on_tree_context_command(move |value| received.set(value));
     click(100.0, 114.0, PointerEventButton::Left);
     draw();
     assert_eq!(
@@ -698,7 +751,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     assert!(!live.tree_paths.borrow().contains(&added));
     assert!(live.tree_paths.borrow().contains(&moved));
     assert!(live.folder.borrow().selected.is_none());
-    explorer_command(&window, &live, 1);
+    explorer_command(&window, &live, PaneId::from_index(0), 1);
     assert!(live.folder.borrow().expanded.is_empty());
     assert!(!live.tree_paths.borrow().contains(&moved));
     reveal_in_tree(&window, &live, &moved);
@@ -708,7 +761,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let selected_before = live.folder.borrow().selected.clone();
     reveal_in_tree(&window, &live, &directory.join("outside.md"));
     assert_eq!(live.folder.borrow().selected, selected_before);
-    explorer_command(&window, &live, 2);
+    explorer_command(&window, &live, PaneId::from_index(0), 2);
     assert_eq!(live.folder.borrow().selected, selected_before);
     assert_eq!(window.get_focused_pane(), focused);
     begin_tree_entry(&window, &live, child.clone(), true);
