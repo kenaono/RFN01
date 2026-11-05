@@ -32,7 +32,10 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self, &'static str> {
+    /// RFN01-112（書き手と合意 2026-11-05）: **知らないオプションは起動しない理由になる。**`--`より前で
+    /// `-`から始まる引数は、`--diagnostics`と`--diagnostics=分野,…`のほかはすべて間違いとして返す
+    /// （以前は黙って捨てて、診断なしで起動していた）。分野の名前の間違いも同じ。
+    pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self, String> {
         let mut config = Self::default();
         for arg in args {
             if arg == "--" {
@@ -49,17 +52,37 @@ impl Config {
                         group,
                         "all" | "render" | "input" | "terminal" | "ui" | "search" | "perf"
                     ) {
-                        return Err(
-                            "--diagnostics: choose all,render,input,terminal,ui,search,perf; using normal mode",
-                        );
+                        return Err(format!(
+                            "unknown diagnostics group: \"{group}\" in {value:?}"
+                        ));
                     }
                     if !config.groups.iter().any(|g| g == group) {
                         config.groups.push(group.to_owned());
                     }
                 }
+            } else if arg.to_string_lossy().starts_with('-') {
+                return Err(format!("unknown option: {}", arg.to_string_lossy()));
             }
         }
         Ok(config)
+    }
+
+    /// RFN01-112: 間違いを知らせる文。使えるオプションを添える。
+    pub fn usage(problem: &str) -> String {
+        // 窓を出す前なので言語の設定はまだ読めない——両方の言葉で。
+        let (japanese, english) = (
+            "オプションの指定が正しくないため、起動しませんでした。",
+            "Not started: an option is not right.",
+        );
+        format!(
+            "rfnedit: {problem}\n\n\
+             Usage: rfnedit [--diagnostics[=GROUPS]] [--] [FILE|FOLDER]...\n\n\
+             --diagnostics : all diagnostic groups\n\
+             --diagnostics=GROUPS : all, render, input, terminal, ui, search, perf (comma-separated)\n\
+             -- : everything after it is a file or folder\n\n\
+             {english}\n\
+             {japanese}"
+        )
     }
 
     pub fn summary(&self) -> String {
@@ -625,6 +648,20 @@ mod tests {
         assert_eq!(config(&["--", "--diagnostics"]), Config::default());
         assert!(Config::from_args([OsString::from("--diagnostics=")]).is_err());
         assert!(Config::from_args([OsString::from("--diagnostics=render,typo")]).is_err());
+        // RFN01-112: 名前や書き方の間違いも返す。`--`の後ろは見ない（ファイル名）。
+        for wrong in [
+            "--diagnstics",
+            "-diagnostics",
+            "--diagnostics:render",
+            "-x",
+            "--help",
+        ] {
+            let told = Config::from_args([OsString::from("原稿.md"), OsString::from(wrong)]);
+            assert!(told.is_err(), "{wrong}");
+            assert!(told.unwrap_err().contains(wrong), "{wrong}");
+        }
+        assert!(Config::from_args(["--".into(), "-原稿.md".into()]).is_ok());
+        assert!(Config::usage("unknown option: -x").contains("--diagnostics=GROUPS"));
         let paths = crate::paths_from_arguments([
             "--diagnostics=render".into(),
             "日本語 原稿.md".into(),
