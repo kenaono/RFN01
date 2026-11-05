@@ -4314,6 +4314,24 @@ export component AppWindow inherits Window {
                                             }
                                             if !root.settings-searching: Rectangle { height: 12px; }
 
+                                            // 書き手の求め 2026-11-05: 既定の倍率。**全般の設定**——倍率はTABのもので、
+                                            // 文書にもTerminalにも効く。新しいTABとResetの戻り先。
+                                            if root.shows-any([@tr("ZOOM"), @tr("Default Zoom")]): Rectangle { height: 1px; background: Tok.rule; }
+                                            if root.shows-any([@tr("ZOOM"), @tr("Default Zoom")]): Text {
+                                                text: root.section-title(@tr("General"), @tr("ZOOM"));
+                                                color: Tok.ink-faint;
+                                                font-size: 11px;
+                                                letter-spacing: 0.9px;
+                                            }
+                                            if root.shows-any([@tr("ZOOM"), @tr("Default Zoom")]): StepRow {
+                                                label: @tr("Default Zoom");
+                                                value: root.default-zoom + "%";
+                                                stepped(by) => {
+                                                    root.default-zoom-stepped(by);
+                                                }
+                                            }
+                                            if !root.settings-searching: Rectangle { height: 12px; }
+
                                             // RFN01-62（書き手と合意 2026-09-28）: **読み上げの声と速さ。**全体に1つ。
                                             // 日本語の声が無ければ、声の欄にそう出す（読み上げは押せない）。
                                             if root.shows-any([@tr("READ ALOUD"), @tr("Voice"), @tr("Speed")]): Rectangle { height: 1px; background: Tok.rule; }
@@ -4614,24 +4632,6 @@ export component AppWindow inherits Window {
                                         // ステータスバーから選ぶ（要件 10）。ここは中身を作る場所である。
                                         if root.shows-group(3, []): VerticalLayout {
                                             spacing: 20px;
-                                            // 書き手の求め 2026-11-05: 画面で読む大きさは Body の字と既定の倍率の組み。
-                                            // 倍率はTABのもので向きを持たないので、横書き・縦書きの外に1行。
-                                            if root.shows-any([@tr("ZOOM"), @tr("Default Zoom")]): VerticalLayout {
-                                                spacing: 8px;
-                                                Text {
-                                                    text: root.section-title(@tr("Text"), @tr("ZOOM"));
-                                                    color: Tok.ink-faint;
-                                                    font-size: 11px;
-                                                    letter-spacing: 0.9px;
-                                                }
-                                                StepRow {
-                                                    label: @tr("Default Zoom");
-                                                    value: root.default-zoom + "%";
-                                                    stepped(by) => {
-                                                        root.default-zoom-stepped(by);
-                                                    }
-                                                }
-                                            }
                                             // 書き手の求め 2026-09-15: **横書きと縦書きを縦に並べて全部出す。**
                                             // 切り替えて見比べるより、並んでいれば1回で読める。どちらのシートの
                                             // 値かは見出しが言う。押した欄のシートを`root.sheet`へ置いてから

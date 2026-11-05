@@ -1350,7 +1350,10 @@ pub fn wire_typography(
             // 追加要件 2026-09-15: 「横書きに合わせる」はその面の値、ランダムは Page の値。
             if group == 3 || group < 0 {
                 window.set_text_shared(false);
-                // 書き手の求め 2026-11-05: 既定の倍率は Text の面の値。開いているペインは変えない。
+            }
+            // 書き手の求め 2026-11-05: 既定の倍率は全般の値なので、戻すのは Reset All だけ。
+            // 開いているTABの倍率は変えない。
+            if group < 0 {
                 window.set_default_zoom(crate::ZOOM_DEFAULT);
             }
             if group == 4 || group < 0 {

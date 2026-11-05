@@ -324,8 +324,8 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
             });
         };
         draw();
-        // H1 の大きさの欄（上に PRESET の行と、ZOOM の見出しと行がある）。
-        let position = slint::LogicalPosition::new(322.0, 319.0);
+        // H1 の大きさの欄（上に PRESET の行がある）。
+        let position = slint::LogicalPosition::new(322.0, 250.0);
         window.window().dispatch_event(WindowEvent::PointerPressed {
             position,
             button: PointerEventButton::Left,
@@ -952,12 +952,14 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     assert_ne!(vertical().ink, channels(red));
     assert_ne!(Setting::BodySize.read(&window, 1), 30);
 
-    // 書き手の求め 2026-11-05: 既定の倍率は Text の面の値。ほかの面の Reset では動かない。
+    // 書き手の求め 2026-11-05: 既定の倍率は全般の値。面の Reset では動かず、Reset All で戻る。
     window.set_default_zoom(120);
     window.invoke_typography_reset(5);
     assert_eq!(window.get_default_zoom(), 120, "Page leaves it");
-    let open_zoom = id.zoom(&window);
     window.invoke_typography_reset(3);
+    assert_eq!(window.get_default_zoom(), 120, "Text leaves it");
+    let open_zoom = id.zoom(&window);
+    window.invoke_typography_reset(-1);
     assert_eq!(window.get_default_zoom(), ZOOM_DEFAULT);
     assert_eq!(id.zoom(&window), open_zoom, "the open pane keeps its zoom");
 }
@@ -1630,10 +1632,8 @@ fn the_left_pane_has_its_own_look() {
     );
     let values = settings_values(&window);
     assert!(values.contains(&("zoom.default".to_owned(), "120".to_owned())));
-    assert_eq!(
-        crate::settings_transfer::kind_of("zoom.default"),
-        Some(crate::settings_transfer::PresetKind::Editor)
-    );
+    // 全般の設定なので、どのプリセットにも入らない。
+    assert_eq!(crate::settings_transfer::kind_of("zoom.default"), None);
     let other = AppWindow::new().unwrap();
     other.set_sheet_stride(SHEET_NUMBERS as i32);
     apply_settings(&other, &numbers, &palette, &fonts, &values);

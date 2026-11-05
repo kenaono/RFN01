@@ -65,7 +65,6 @@ const EDITOR_SETTINGS: &[&str] = &[
     "layout.shared",
     "paper.shared",
     "paper.random",
-    "zoom.default",
     "ruby.marks",
     "list.marks",
     "count.ruby",
