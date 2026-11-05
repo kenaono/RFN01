@@ -1712,10 +1712,12 @@ impl<'a> Scene<'a> {
             | Command::Exit
             | Command::Help(_)
             | Command::FolderFind
-            | Command::Sidebar(_)
+            | Command::Sidebar(1..)
             | Command::Toolbar
             | Command::Palette
             | Command::Draft => true,
+            // RFN01-111: Workspaceを使っている間、Explorerの面は押せない（アイコン列と同じ）。
+            Command::Sidebar(_) => !window.get_workspace_active(),
             Command::FolderTerminal
             | Command::CopyPath
             | Command::Reveal
@@ -2098,6 +2100,9 @@ fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<
                 ("検索", "Search", 1),
                 ("履歴", "History", 2),
                 ("Outline", "Outline", 3),
+                // RFN01-66 第2弾: アイコン列と同じ面を同じ順で（BookmarksとTagsが無かった）。
+                ("ブックマーク", "Bookmarks", 5),
+                ("タグ", "Tags", 6),
                 ("Git Changes", "Git Changes", 8),
                 ("バックアップ", "Backups", 7),
             ] {
