@@ -1263,6 +1263,7 @@ impl Target {
 }
 
 pub fn install(window: &AppWindow, live: &Live) {
+    install_menu_actions(window, live);
     let weak = window.as_weak();
     window.global::<MenuInput>().on_open_menu(move || {
         if let Some(window) = weak.upgrade() {
@@ -1317,6 +1318,150 @@ pub fn install(window: &AppWindow, live: &Live) {
         let target = Rc::new(Target::capture(&window, &live));
         queue_group(&window, live.clone(), target, group);
     });
+}
+
+/// RFN01-66 第2弾: ⋮・TABの右クリック・TAB帯・本文の右クリックの行（`MenuActions`）。
+/// 開く直前の`refresh`で対象（前にあるペイン）を捕まえ、行の押せるかも実行も同じ対象で行う。
+fn install_menu_actions(window: &AppWindow, live: &Live) {
+    thread_local! {
+        static TARGET: RefCell<Option<Rc<Target>>> = const { RefCell::new(None) };
+    }
+    let actions = window.global::<MenuActions>();
+    let weak = window.as_weak();
+    let refresh_live = live.clone();
+    actions.on_refresh(move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let target = Target::for_shortcut(&window, &refresh_live);
+        TARGET.with(|held| *held.borrow_mut() = Some(Rc::new(target)));
+        let actions = window.global::<MenuActions>();
+        actions.set_generation(actions.get_generation() + 1);
+    });
+    let weak = window.as_weak();
+    let allowed_live = live.clone();
+    actions.on_allowed(move |action, _| {
+        let Some(window) = weak.upgrade() else {
+            return false;
+        };
+        let Some(target) = TARGET.with(|held| held.borrow().clone()) else {
+            return false;
+        };
+        let scene = Scene::read(&window, &allowed_live, &target);
+        scene.enabled(&menu_action_command(&window, &scene, action))
+    });
+    let weak = window.as_weak();
+    let run_live = live.clone();
+    actions.on_run(move |action| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let Some(target) = TARGET.with(|held| held.borrow().clone()) else {
+            return;
+        };
+        if !target.valid(&window, &run_live) {
+            return;
+        }
+        let scene = Scene::read(&window, &run_live, &target);
+        let command = menu_action_command(&window, &scene, action);
+        if scene.enabled(&command) {
+            execute(&window, &run_live, &target, command);
+        }
+    });
+}
+
+/// 画面の配置だけを確かめる試験（`Live`を持たない窓）のための`MenuActions`。行はどれも押せ、
+/// 押せば試験が見張る窓のコールバックへ渡す。
+#[cfg(test)]
+pub(crate) fn wire_bare_menu_actions(window: &AppWindow) {
+    let actions = window.global::<MenuActions>();
+    actions.on_allowed(|_, _| true);
+    let weak = window.as_weak();
+    actions.on_run(move |action| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let p = window.get_focused_pane();
+        match action {
+            MenuAction::CopyBody => window.invoke_pane_copy_body(p),
+            MenuAction::Back => window.invoke_pane_navigate(p, false),
+            MenuAction::Forward => window.invoke_pane_navigate(p, true),
+            MenuAction::Below => window.invoke_pane_below_toggled(p),
+            MenuAction::FolderTerminal => window.invoke_shell_profile_action(8, 0),
+            _ => {}
+        }
+    });
+}
+
+/// 行の操作を、タイトルバーのメニューと同じ[`Command`]へ。状態で行き先が変わる行（ログの開始・停止）
+/// は、いまの状態で決める。
+fn menu_action_command(window: &AppWindow, scene: &Scene, action: MenuAction) -> Command {
+    match action {
+        MenuAction::Save => Command::Save(false),
+        MenuAction::SaveAs => Command::Save(true),
+        MenuAction::FolderTerminal => Command::FolderTerminal,
+        MenuAction::Reveal => Command::Reveal,
+        MenuAction::CloseTab => Command::Close,
+        MenuAction::CloseOthers => Command::CloseOthers(true),
+        MenuAction::CloseAll => Command::CloseOthers(false),
+        MenuAction::CloseClean => Command::CloseClean,
+        MenuAction::Reopen => Command::Reopen,
+        MenuAction::SplitRight => Command::Split(true),
+        MenuAction::SplitDown => Command::Split(false),
+        MenuAction::SwapLeft => Command::Swap(0),
+        MenuAction::SwapRight => Command::Swap(1),
+        MenuAction::SwapUp => Command::Swap(2),
+        MenuAction::SwapDown => Command::Swap(3),
+        MenuAction::OtherPanes => Command::OtherPanes,
+        MenuAction::Below => Command::Below,
+        MenuAction::Goto => Command::Goto,
+        MenuAction::CompareSaved => Command::Compare(0),
+        MenuAction::CompareHead => Command::Compare(1),
+        MenuAction::CompareFile => Command::Compare(2),
+        MenuAction::Print => Command::Print,
+        MenuAction::ZoomIn => Command::Zoom(1),
+        MenuAction::ZoomOut => Command::Zoom(-1),
+        MenuAction::ZoomReset => Command::ZoomReset,
+        MenuAction::Duplicate => Command::Duplicate,
+        MenuAction::CopyPath => Command::CopyPath,
+        MenuAction::NewFile => Command::NewFile,
+        MenuAction::NewTerminal => Command::NewTerminal(window.get_default_shell()),
+        MenuAction::OpenFile => Command::Open,
+        MenuAction::Undo => Command::Undo(false),
+        MenuAction::Redo => Command::Undo(true),
+        MenuAction::Cut => Command::Copy(true),
+        MenuAction::Copy => Command::Copy(false),
+        MenuAction::Paste => Command::Paste,
+        MenuAction::CopyBody => Command::CopyBody,
+        MenuAction::Mark => Command::Mark(false),
+        MenuAction::MarkRect => Command::Mark(true),
+        MenuAction::Draft => Command::Draft,
+        MenuAction::Back => Command::Navigate(false),
+        MenuAction::Forward => Command::Navigate(true),
+        MenuAction::PaneBackground => Command::Paper(1),
+        MenuAction::TabColor => Command::Paper(2),
+        MenuAction::TextBackground => Command::Paper(0),
+        MenuAction::Appearance => Command::Appearance(1),
+        MenuAction::FindTerminal => Command::Find(false),
+        MenuAction::Latest => Command::Terminal(4),
+        MenuAction::SaveOutput => Command::Terminal(7),
+        MenuAction::ClearScreen => Command::Terminal(5),
+        MenuAction::ClearHistory => Command::Terminal(6),
+        MenuAction::SelectionToPanel => Command::Panel(9),
+        MenuAction::HistoryToPanel => Command::Panel(8),
+        MenuAction::LastOutputToPanel => Command::Panel(15),
+        MenuAction::CopyLastOutput => Command::Terminal(22),
+        MenuAction::FileLog => Command::Panel(if scene.screen.terminal_file_logging {
+            14
+        } else {
+            10
+        }),
+        MenuAction::PanelLog => Command::Panel(if scene.screen.terminal_capturing {
+            13
+        } else {
+            7
+        }),
+    }
 }
 
 fn queue_group(window: &AppWindow, live: Live, target: Rc<Target>, group: i32) {
@@ -1687,7 +1832,7 @@ impl<'a> Scene<'a> {
             }
             Command::Panel(13) => self.front_terminal() && self.screen.terminal_capturing,
             Command::Panel(9) => self.front_terminal() && self.selected(),
-            Command::Panel(8) => self.front_terminal(),
+            Command::Panel(8) | Command::Panel(15) => self.front_terminal(),
             Command::Panel(5) => panel && self.panel_capturing(),
             Command::Panel(_) => self.terminal || panel,
             Command::ScrollLine(_) | Command::SelectLine => text,
@@ -3334,6 +3479,37 @@ mod tests {
         assert!(menu_opens(&h.window, &h.live, 2), "挿入は開く");
         // RFN01-66（2026-11-05）: ヘルプに行ができた（以前は未実装の行だけで開かなかった）。
         assert!(menu_opens(&h.window, &h.live, 6), "Helpは開く");
+    }
+
+    /// RFN01-66 第2弾: ⋮・右クリックの行（`MenuActions`）も**メニューと同じ答え**で灰色になり、
+    /// 押せば同じ操作が走る。
+    #[test]
+    fn the_pane_menus_read_the_same_premises() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        install(window, live);
+        let actions = window.global::<MenuActions>();
+        actions.invoke_refresh();
+        let generation = actions.get_generation();
+        assert!(actions.invoke_allowed(MenuAction::Save, generation));
+        // 無題の文書にはフォルダが無い（タイトルバーのメニューでも灰色）。
+        assert!(!actions.invoke_allowed(MenuAction::FolderTerminal, generation));
+        assert!(!actions.invoke_allowed(MenuAction::Reveal, generation));
+        assert!(
+            !actions.invoke_allowed(MenuAction::SwapLeft, generation),
+            "隣のPaneが無い"
+        );
+        let saves = Rc::new(Cell::new(0));
+        let seen = saves.clone();
+        window.on_save_requested(move || seen.set(seen.get() + 1));
+        actions.invoke_run(MenuAction::Save);
+        assert_eq!(saves.get(), 1);
+        // 押せない行は、押されても走らせない。
+        let reveals = Rc::new(Cell::new(0));
+        let seen = reveals.clone();
+        window.on_reveal_requested(move || seen.set(seen.get() + 1));
+        actions.invoke_run(MenuAction::Reveal);
+        assert_eq!(reveals.get(), 0);
     }
 
     /// RFN01-66 第2弾: キーは**メニューと同じ前提**を読む。使えない場所では動かさずに知らせ、

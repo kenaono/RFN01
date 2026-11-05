@@ -2,7 +2,7 @@ import { EditorSurface } from "editor-surface.slint";
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
 import { LinkCompletion } from "link-completion.slint";
-import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, MenuInput, Role, Slider, Tab, TerminalLinks, TextButton, ToggleChip } from "controls.slint";
+import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, MenuInput, MenuActions, MenuAction, Role, Slider, Tab, TerminalLinks, TextButton, ToggleChip } from "controls.slint";
 
 // One editing pane.
 //
@@ -610,6 +610,7 @@ export component EditorPane inherits Rectangle {
     function open-tab-menu(at-x: length, at-y: length) {
         root.tab-menu-x = at-x + tabs-view.content-x;
         root.tab-menu-y = at-y;
+        MenuActions.refresh();
         tab-menu.show();
     }
     /// Bumped for the tab that should start renaming (see `Tab::rename-asked`).
@@ -971,6 +972,7 @@ export component EditorPane inherits Rectangle {
                                     root.strip-menu-y = self.absolute-position.y
                                         + self.mouse-y - root.absolute-position.y;
                                     root.menu-opened();
+                                    MenuActions.refresh();
                                     strip-menu.show();
                                 }
                             }
@@ -1068,6 +1070,7 @@ export component EditorPane inherits Rectangle {
                         tip: @tr("Pane menu");
                         clicked => {
                             root.menu-opened();
+                            MenuActions.refresh();
                             pane-menu.show();
                         }
                     }
@@ -1147,69 +1150,78 @@ export component EditorPane inherits Rectangle {
                             spacing: 1px;
 
                             MenuRow {
+                                enabled: MenuActions.allowed(MenuAction.save, MenuActions.generation);
                                 title: @tr("Save");
                                 shortcut: root.shortcut-keys[1];
                                 activated => {
-                                    root.save-requested();
+                                    MenuActions.run(MenuAction.save);
                                     pane-menu.close();
                                 }
                             }
                             MenuRow {
+                                enabled: MenuActions.allowed(MenuAction.save-as, MenuActions.generation);
                                 title: @tr("Save As…");
                                 shortcut: root.shortcut-keys[2];
                                 activated => {
-                                    root.save-as-requested();
+                                    MenuActions.run(MenuAction.save-as);
                                     pane-menu.close();
                                 }
                             }
                             MenuRow {
+                                enabled: MenuActions.allowed(MenuAction.folder-terminal, MenuActions.generation);
                                 title: @tr("Terminal in Document Folder");
-                                activated => { root.terminal-in-folder(); pane-menu.close(); }
+                                activated => { MenuActions.run(MenuAction.folder-terminal); pane-menu.close(); }
                             }
                             MenuRow {
+                                enabled: MenuActions.allowed(MenuAction.reveal, MenuActions.generation);
                                 title: @tr("Reveal in Explorer");
                                 activated => {
-                                    root.reveal-requested();
+                                    MenuActions.run(MenuAction.reveal);
                                     pane-menu.close();
                                 }
                             }
                             MenuSep { }
                         }
                         MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.close-tab, MenuActions.generation);
                             title: @tr("Close Tab");
                             shortcut: root.shortcut-keys[3];
                             activated => {
+                                MenuActions.run(MenuAction.close-tab);
                                 pane-menu.close();
-                                root.close-active-tab();
                             }
                         }
                         MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.close-others, MenuActions.generation);
                             title: @tr("Close Other Tabs");
                             activated => {
+                                MenuActions.run(MenuAction.close-others);
                                 pane-menu.close();
-                                root.close-other-tabs();
                             }
                         }
                         MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.close-all, MenuActions.generation);
                             title: @tr("Close All Tabs");
                             activated => {
+                                MenuActions.run(MenuAction.close-all);
                                 pane-menu.close();
-                                root.close-all-tabs();
                             }
                         }
                         MenuSep { }
                         MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.split-right, MenuActions.generation);
                             title: @tr("Split Right");
                             activated => {
+                                MenuActions.run(MenuAction.split-right);
                                 pane-menu.close();
-                                root.split-requested(true);
                             }
                         }
                         MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.split-down, MenuActions.generation);
                             title: @tr("Split Down");
                             activated => {
+                                MenuActions.run(MenuAction.split-down);
                                 pane-menu.close();
-                                root.split-requested(false);
                             }
                         }
                         // 要件 6.4: 編集ペインの入れ替え。**One row per
@@ -1221,30 +1233,34 @@ export component EditorPane inherits Rectangle {
                         // 6.24), and closing the menu takes away the very row
                         // whose handler is running.
                         if root.swap-left: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.swap-left, MenuActions.generation);
                             title: @tr("Swap Left");
                             activated => {
-                                root.swap-requested(0);
+                                MenuActions.run(MenuAction.swap-left);
                                 pane-menu.close();
                             }
                         }
                         if root.swap-right: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.swap-right, MenuActions.generation);
                             title: @tr("Swap Right");
                             activated => {
-                                root.swap-requested(1);
+                                MenuActions.run(MenuAction.swap-right);
                                 pane-menu.close();
                             }
                         }
                         if root.swap-up: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.swap-up, MenuActions.generation);
                             title: @tr("Swap Up");
                             activated => {
-                                root.swap-requested(2);
+                                MenuActions.run(MenuAction.swap-up);
                                 pane-menu.close();
                             }
                         }
                         if root.swap-down: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.swap-down, MenuActions.generation);
                             title: @tr("Swap Down");
                             activated => {
-                                root.swap-requested(3);
+                                MenuActions.run(MenuAction.swap-down);
                                 pane-menu.close();
                             }
                         }
@@ -1254,10 +1270,11 @@ export component EditorPane inherits Rectangle {
                             // pane is never taken away from under the tabs it
                             // holds, which is why there is no row for closing
                             // this one: a pane goes when its last tab does.
+                            enabled: MenuActions.allowed(MenuAction.other-panes, MenuActions.generation);
                             title: @tr("Close Other Panes");
                             activated => {
+                                MenuActions.run(MenuAction.other-panes);
                                 pane-menu.close();
-                                root.close-others-requested();
                             }
                         }
                         MenuSep { }
@@ -1269,10 +1286,11 @@ export component EditorPane inherits Rectangle {
                         // 設定のTAB化で`if`に入ったとき順が残り、閉じた時点で行ごと
                         // 消えて、頼みが届いていなかった。
                         if !root.settings: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.below, MenuActions.generation);
                             title: root.terminal ? @tr("Editor Panel") : @tr("Terminal Panel");
                             shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
                             activated => {
-                                root.below-toggled();
+                                MenuActions.run(MenuAction.below);
                                 pane-menu.close();
                             }
                         }
@@ -1292,6 +1310,7 @@ export component EditorPane inherits Rectangle {
                         }
                         // 追加要件 2026-09-15: このPaneの紙の色（TABの色が付いていればそちらが勝つ）。
                         if !root.settings: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.pane-background, MenuActions.generation);
                             title: @tr("Pane Background") + "…";
                             activated => {
                                 root.open-paper-palette(1, root.width - 256px, 32px);
@@ -1299,46 +1318,52 @@ export component EditorPane inherits Rectangle {
                             }
                         }
                         if root.writing: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.goto, MenuActions.generation);
                             title: @tr("Go to Line…");
                             shortcut: root.shortcut-keys[6];
                             activated => {
-                                root.goto-requested(true);
+                                MenuActions.run(MenuAction.goto);
                                 pane-menu.close();
                             }
                         }
                         if root.writing: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.reopen, MenuActions.generation);
                             title: @tr("Reopen Closed Tab");
                             shortcut: root.shortcut-keys[7];
-                            activated => { root.reopen-closed-requested(); pane-menu.close(); }
+                            activated => { MenuActions.run(MenuAction.reopen); pane-menu.close(); }
                         }
                         if root.writing: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.compare-saved, MenuActions.generation);
                             title: @tr("Compare with Saved");
                             activated => {
-                                root.compare-saved-requested();
+                                MenuActions.run(MenuAction.compare-saved);
                                 pane-menu.close();
                             }
                         }
                         if root.writing: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.compare-head, MenuActions.generation);
                             title: @tr("Compare with Git Last Commit");
                             activated => {
-                                root.compare-head-requested();
+                                MenuActions.run(MenuAction.compare-head);
                                 pane-menu.close();
                             }
                         }
                         if root.writing: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.compare-file, MenuActions.generation);
                             title: @tr("Compare with Another File…");
                             activated => {
-                                root.compare-requested();
+                                MenuActions.run(MenuAction.compare-file);
                                 pane-menu.close();
                             }
                         }
                         // 要件 7.10: 紙の形で見る。**シェルと設定のTABには無い**
                         // ——刷る本文が無い。
                         if root.writing: MenuRow {
+                            enabled: MenuActions.allowed(MenuAction.print, MenuActions.generation);
                             title: @tr("Print…");
                             shortcut: root.shortcut-keys[45];
                             activated => {
-                                root.print-requested();
+                                MenuActions.run(MenuAction.print);
                                 pane-menu.close();
                             }
                         }
@@ -1356,28 +1381,31 @@ export component EditorPane inherits Rectangle {
                             spacing: 1px;
 
                             MenuRow {
+                                enabled: MenuActions.allowed(MenuAction.zoom-in, MenuActions.generation);
                                 title: @tr("Zoom In");
                                 shortcut: "Ctrl+=";
                                 activated => {
-                                    root.zoom-stepped(1);
+                                    MenuActions.run(MenuAction.zoom-in);
                                     body-clip.take-focus();
                                     pane-menu.close();
                                 }
                             }
                             MenuRow {
+                                enabled: MenuActions.allowed(MenuAction.zoom-out, MenuActions.generation);
                                 title: @tr("Zoom Out");
                                 shortcut: "Ctrl+-";
                                 activated => {
-                                    root.zoom-stepped(-1);
+                                    MenuActions.run(MenuAction.zoom-out);
                                     body-clip.take-focus();
                                     pane-menu.close();
                                 }
                             }
                             MenuRow {
+                                enabled: MenuActions.allowed(MenuAction.zoom-reset, MenuActions.generation);
                                 title: @tr("Reset Zoom");
                                 shortcut: "Ctrl+0";
                                 activated => {
-                                    root.zoom-reset-requested();
+                                    MenuActions.run(MenuAction.zoom-reset);
                                     body-clip.take-focus();
                                     pane-menu.close();
                                 }
@@ -2501,25 +2529,28 @@ export component EditorPane inherits Rectangle {
                 spacing: 1px;
 
                 MenuRow {
+                    enabled: MenuActions.allowed(MenuAction.close-tab, MenuActions.generation);
                     title: @tr("Close");
                     shortcut: root.shortcut-keys[3];
                     activated => {
+                        MenuActions.run(MenuAction.close-tab);
                         tab-menu.close();
-                        root.close-active-tab();
                     }
                 }
                 MenuRow {
+                    enabled: MenuActions.allowed(MenuAction.close-others, MenuActions.generation);
                     title: @tr("Close Others");
                     activated => {
+                        MenuActions.run(MenuAction.close-others);
                         tab-menu.close();
-                        root.close-other-tabs();
                     }
                 }
                 MenuRow {
+                    enabled: MenuActions.allowed(MenuAction.close-clean, MenuActions.generation);
                     title: @tr("Close Saved");
                     activated => {
+                        MenuActions.run(MenuAction.close-clean);
                         tab-menu.close();
-                        root.close-clean-tabs();
                     }
                 }
                 // 追加要件 2026-09-15: このTABの色。TABが残っている限り付いている。
@@ -2530,6 +2561,7 @@ export component EditorPane inherits Rectangle {
 
                     // 追加要件 2026-09-15（書き手）: TABの右クリックはTABの色。背景はPaperの右クリックから。
                     MenuRow {
+                        enabled: MenuActions.allowed(MenuAction.tab-color, MenuActions.generation);
                         title: @tr("Tab Color…");
                         activated => {
                             root.open-paper-palette(2, root.tab-menu-x, root.tab-menu-y);
@@ -2619,16 +2651,18 @@ export component EditorPane inherits Rectangle {
                         }
                     }
                     MenuRow {
+                        enabled: MenuActions.allowed(MenuAction.duplicate, MenuActions.generation);
                         title: @tr("Open in Another Tab");
                         activated => {
-                            root.duplicate-tab-requested(root.tab-menu-target);
+                            MenuActions.run(MenuAction.duplicate);
                             tab-menu.close();
                         }
                     }
                     MenuRow {
+                        enabled: MenuActions.allowed(MenuAction.copy-path, MenuActions.generation);
                         title: @tr("Copy Path");
                         activated => {
-                            root.copy-path-requested(root.tab-menu-target);
+                            MenuActions.run(MenuAction.copy-path);
                             tab-menu.close();
                         }
                     }
@@ -2640,18 +2674,20 @@ export component EditorPane inherits Rectangle {
                     MenuSep { }
 
                     MenuRow {
+                        enabled: MenuActions.allowed(MenuAction.save, MenuActions.generation);
                         title: @tr("Save");
                         shortcut: root.shortcut-keys[1];
                         activated => {
-                            root.save-requested();
+                            MenuActions.run(MenuAction.save);
                             tab-menu.close();
                         }
                     }
                     MenuRow {
+                        enabled: MenuActions.allowed(MenuAction.save-as, MenuActions.generation);
                         title: @tr("Save As…");
                         shortcut: root.shortcut-keys[2];
                         activated => {
-                            root.save-as-requested();
+                            MenuActions.run(MenuAction.save-as);
                             tab-menu.close();
                         }
                     }
@@ -2680,10 +2716,11 @@ export component EditorPane inherits Rectangle {
                 // New Tab を作って訊き直したりはしない。前に出ているタブが
                 // まだ何でもないなら、そのタブがそれになる。
                 MenuRow {
+                    enabled: MenuActions.allowed(MenuAction.new-file, MenuActions.generation);
                     title: @tr("New File");
                     activated => {
+                        MenuActions.run(MenuAction.new-file);
                         strip-menu.close();
-                        root.new-file-requested();
                     }
                 }
                 // RFN01-88: each template, under New File.
@@ -2696,43 +2733,48 @@ export component EditorPane inherits Rectangle {
                     }
                 }
                 MenuRow {
+                    enabled: MenuActions.allowed(MenuAction.new-terminal, MenuActions.generation);
                     title: @tr("New Terminal");
                     shortcut: root.terminal-shells[root.default-shell];
                     activated => {
+                        MenuActions.run(MenuAction.new-terminal);
                         strip-menu.close();
-                        root.new-terminal-requested(root.default-shell);
                     }
                 }
 
                 MenuRow {
+                    enabled: MenuActions.allowed(MenuAction.open-file, MenuActions.generation);
                     title: @tr("Open File…");
                     shortcut: root.shortcut-keys[0];
                     activated => {
+                        MenuActions.run(MenuAction.open-file);
                         strip-menu.close();
-                        root.open-file-requested();
                     }
                 }
                 MenuSep { }
                 MenuRow {
+                    enabled: MenuActions.allowed(MenuAction.close-tab, MenuActions.generation);
                     title: @tr("Close");
                     shortcut: root.shortcut-keys[3];
                     activated => {
+                        MenuActions.run(MenuAction.close-tab);
                         strip-menu.close();
-                        root.close-active-tab();
                     }
                 }
                 MenuRow {
+                    enabled: MenuActions.allowed(MenuAction.close-all, MenuActions.generation);
                     title: @tr("Close All");
                     activated => {
+                        MenuActions.run(MenuAction.close-all);
                         strip-menu.close();
-                        root.close-all-tabs();
                     }
                 }
                 MenuRow {
+                    enabled: MenuActions.allowed(MenuAction.close-clean, MenuActions.generation);
                     title: @tr("Close Saved");
                     activated => {
+                        MenuActions.run(MenuAction.close-clean);
                         strip-menu.close();
-                        root.close-clean-tabs();
                     }
                 }
             }

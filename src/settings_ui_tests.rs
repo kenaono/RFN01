@@ -977,6 +977,7 @@ fn terminal_below_rows_reach_the_pane() {
     let surface = MinimalSoftwareWindow::new(Default::default());
     slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
     let window = AppWindow::new().unwrap();
+    crate::menu_commands::wire_bare_menu_actions(&window);
     let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
     let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
     let fonts = Rc::new(VecModel::from(vec![
