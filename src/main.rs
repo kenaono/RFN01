@@ -1730,6 +1730,13 @@ fn perf_log_header(window: &AppWindow) -> String {
 fn main() -> Result<(), slint::PlatformError> {
     let launched = Instant::now();
     let diagnostic_options = diag::Config::from_args(std::env::args_os().skip(1));
+    // RFN01-112（書き手と合意 2026-11-05）: **オプションが間違っていれば起動しない。**メッセージ
+    // ボックスで知らせて終える（書き手の判断：コンソールでもメッセージボックスでもよい。窓のアプリは
+    // 標準エラーを持たないので、どこから起動しても見えるほうにした）。
+    if let Err(problem) = &diagnostic_options {
+        tell_wrong_options(&diag::Config::usage(problem));
+        std::process::exit(2);
+    }
     let diagnostic_config = diagnostic_options.clone().unwrap_or_default();
     let diagnostic_mode = diagnostic_config.summary();
     let mut diagnostic_log = DiagLog::default();
@@ -4150,13 +4157,6 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_workspace_links(&window, &live);
     open_startup_paths(&window, &live, opening_pane, &paths_from_command_line());
     observe_folder_autosave(&window, &live);
-    if let Err(message) = diagnostic_options {
-        live.cache.borrow_mut().log_diag("error", message);
-        window.tell_pane(pick(
-            "診断モードの指定が不明です。通常モードで起動しました。指定例: --diagnostics=render,input",
-            "Unknown diagnostics selection. Started in normal mode. Example: --diagnostics=render,input",
-        ).into());
-    }
 
     // 要件 8.1・8.4: **自動退避を切ってあるときだけ、閉じる前に訊く**
     // （2026-09-08）。退避が働いていれば、閉じても未保存の中身は次の起動で
@@ -11814,6 +11814,20 @@ fn replace_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, mut ta
 /// [`diag::beside_executable`]).
 fn paths_from_command_line() -> Vec<PathBuf> {
     paths_from_arguments(std::env::args_os().skip(1))
+}
+
+/// RFN01-112: オプションの間違いを、窓を出す前にメッセージボックスで知らせる。
+fn tell_wrong_options(text: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    use windows::core::HSTRING;
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            &HSTRING::from("RFN Edit"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
 }
 
 fn paths_from_arguments(args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<PathBuf> {
