@@ -246,6 +246,22 @@ pub fn wire_colours(
         }
     });
 
+    // 書き手の求め 2026-11-05: 既定の倍率。キーとホイールと同じ10%刻み。**開いているペインは
+    // 変えない**——変わるのは新しいペインと Reset の戻り先。
+    let weak = window.as_weak();
+    let held = doors.clone();
+    window.on_default_zoom_stepped(move |by| {
+        if let Some(window) = weak.upgrade() {
+            let percent = (crate::default_zoom(&window) + by * crate::ZOOM_STEP)
+                .clamp(crate::ZOOM_MIN, crate::ZOOM_MAX);
+            window.set_default_zoom(percent);
+            held.cache
+                .borrow_mut()
+                .log_diag("spec", &format!("default zoom={percent}"));
+            save_settings(&window, &held.cache);
+        }
+    });
+
     // 追加要件 2026-09-15（書き手）: Left Pane の面の Reset。この面の値だけを戻す。
     let weak = window.as_weak();
     let held = doors.clone();
@@ -1334,6 +1350,8 @@ pub fn wire_typography(
             // 追加要件 2026-09-15: 「横書きに合わせる」はその面の値、ランダムは Page の値。
             if group == 3 || group < 0 {
                 window.set_text_shared(false);
+                // 書き手の求め 2026-11-05: 既定の倍率は Text の面の値。開いているペインは変えない。
+                window.set_default_zoom(crate::ZOOM_DEFAULT);
             }
             if group == 4 || group < 0 {
                 window.set_layout_shared(false);

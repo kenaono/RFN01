@@ -324,8 +324,8 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
             });
         };
         draw();
-        // H1 の大きさの欄（上に PRESET の行がある）。
-        let position = slint::LogicalPosition::new(322.0, 250.0);
+        // H1 の大きさの欄（上に PRESET の行と、ZOOM の見出しと行がある）。
+        let position = slint::LogicalPosition::new(322.0, 319.0);
         window.window().dispatch_event(WindowEvent::PointerPressed {
             position,
             button: PointerEventButton::Left,
@@ -951,6 +951,15 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     window.invoke_layout_shared_toggled(false);
     assert_ne!(vertical().ink, channels(red));
     assert_ne!(Setting::BodySize.read(&window, 1), 30);
+
+    // 書き手の求め 2026-11-05: 既定の倍率は Text の面の値。ほかの面の Reset では動かない。
+    window.set_default_zoom(120);
+    window.invoke_typography_reset(5);
+    assert_eq!(window.get_default_zoom(), 120, "Page leaves it");
+    let open_zoom = id.zoom(&window);
+    window.invoke_typography_reset(3);
+    assert_eq!(window.get_default_zoom(), ZOOM_DEFAULT);
+    assert_eq!(id.zoom(&window), open_zoom, "the open pane keeps its zoom");
 }
 
 /// 書き手の報告 2026-09-15: **Paneメニューの「Terminal Below」が効かない。**
@@ -1588,4 +1597,65 @@ fn the_left_pane_has_its_own_look() {
     assert_eq!(window.get_left_size(), LEFT_SIZE_DEFAULT);
     assert_eq!(window.get_left_paper(), slint_colour(LEFT_PAPER_DEFAULT));
     assert!(!window.get_left_file_own());
+
+    // 書き手の求め 2026-11-05: 既定の倍率。10%刻みで範囲に収まり、**開いているペインは変えない**。
+    // 新しいペインと、倍率を持たない行（Resetの戻り先と同じ読み方）がこれを使う。
+    assert_eq!(
+        window.get_default_zoom(),
+        ZOOM_DEFAULT,
+        "the window's default is Rust's"
+    );
+    let open_zoom = id.zoom(&window);
+    window.invoke_default_zoom_stepped(-3);
+    assert_eq!(window.get_default_zoom(), ZOOM_DEFAULT - 3 * ZOOM_STEP);
+    assert_eq!(id.zoom(&window), open_zoom, "the open pane keeps its zoom");
+    window.invoke_default_zoom_stepped(-100);
+    assert_eq!(window.get_default_zoom(), ZOOM_MIN);
+    window.invoke_default_zoom_stepped(100);
+    assert_eq!(window.get_default_zoom(), ZOOM_MAX);
+    window.invoke_default_zoom_stepped(-(ZOOM_MAX - 120) / ZOOM_STEP);
+    assert_eq!(window.get_default_zoom(), 120);
+    publish_panes(&window, 2);
+    assert_eq!(
+        PaneId::from_index(1).zoom(&window),
+        120,
+        "a new pane opens at it"
+    );
+    assert_eq!(id.zoom(&window), open_zoom);
+    id.set_zoom(&window, 0);
+    assert_eq!(
+        id.zoom(&window),
+        120,
+        "a row without a zoom reads the default"
+    );
+    let values = settings_values(&window);
+    assert!(values.contains(&("zoom.default".to_owned(), "120".to_owned())));
+    assert_eq!(
+        crate::settings_transfer::kind_of("zoom.default"),
+        Some(crate::settings_transfer::PresetKind::Editor)
+    );
+    let other = AppWindow::new().unwrap();
+    other.set_sheet_stride(SHEET_NUMBERS as i32);
+    apply_settings(&other, &numbers, &palette, &fonts, &values);
+    assert_eq!(other.get_default_zoom(), 120);
+    // 手で書き換えた値も範囲と刻みに収める。読めなければ出荷時の値。
+    for (written, read) in [
+        ("4000", ZOOM_MAX),
+        ("1", ZOOM_MIN),
+        ("124", 120),
+        ("x", ZOOM_DEFAULT),
+    ] {
+        apply_settings(
+            &other,
+            &numbers,
+            &palette,
+            &fonts,
+            &[("zoom.default".to_owned(), written.to_owned())],
+        );
+        assert_eq!(other.get_default_zoom(), read, "{written}");
+    }
+    // 起動ではペインを作る前に既定の倍率だけ当てる。
+    let early = AppWindow::new().unwrap();
+    apply_default_zoom(&early, &values);
+    assert_eq!(early.get_default_zoom(), 120);
 }
