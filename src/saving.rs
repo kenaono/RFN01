@@ -77,6 +77,8 @@ pub fn discard_work_copy(live: &Live, copy: &app_data::WorkCopy) {
         if app_data::work_file_name(&work_identity(&document.file.borrow())) == name {
             document.protective_recovery.set(false);
             document.recovery_failed.set(false);
+            document.recovery_write.set(None);
+            retire_previous_work_copies(live, &document);
         }
     }
     let Some(directory) = app_data::work_directory() else {
@@ -87,6 +89,44 @@ pub fn discard_work_copy(live: &Live, copy: &app_data::WorkCopy) {
         return;
     }
     let _ = app_data::discard_in(&directory, copy);
+}
+
+pub(crate) fn work_copy_follows(
+    window: &AppWindow,
+    live: &Live,
+    document: &Rc<OpenDocument>,
+    previous: app_data::WorkCopy,
+) {
+    let old = app_data::work_file_name(&previous);
+    let current = app_data::work_file_name(&work_identity(&document.file.borrow()));
+    document.recovery_write.set(None);
+    if old != current {
+        document.previous_work_copies.borrow_mut().insert(old);
+    }
+    document.text.mark_pending();
+    write_work_copy_of(window, live, document);
+}
+
+fn retire_previous_work_copies(live: &Live, document: &OpenDocument) {
+    if document.previous_work_copies.borrow().is_empty() {
+        return;
+    }
+    let Some(directory) = app_data::work_directory() else {
+        return;
+    };
+    let in_use: std::collections::BTreeSet<_> = open_documents(live)
+        .iter()
+        .map(|held| app_data::work_file_name(&work_identity(&held.file.borrow())))
+        .collect();
+    for name in document.previous_work_copies.take() {
+        // A case-only rename or a second document may now use this name.
+        if !in_use.contains(&name) {
+            let path = directory.join(name);
+            if !live.writer.remove(path.clone()) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
 }
 
 /// S1: closing a memo must not leave an invisible backup to restore later.
@@ -349,9 +389,12 @@ fn write_work_copy_of_impl(
                     removed: true,
                     superseded: false,
                     error,
+                    sequence: None,
                 }],
             );
         }
+        document.recovery_write.set(None);
+        retire_previous_work_copies(live, document);
         document.protective_recovery.set(false);
         return true;
     }
@@ -383,7 +426,8 @@ fn write_work_copy_of_impl(
         app_data::encode_with_protection(&copy, document.protective_recovery.get()).into_bytes();
     let length = bytes.len();
     document.recovery_failed.set(false);
-    if live.writer.write(path.clone(), bytes) {
+    if let Some(receipt) = live.writer.write_tracked(path.clone(), bytes) {
+        document.recovery_write.set(Some(receipt));
         cache
             .borrow_mut()
             .log_diag("work", &format!("queued bytes={length}"));
@@ -400,6 +444,10 @@ fn write_work_copy_of_impl(
     });
     let elapsed = elapsed_ms(started);
     let success = outcome.is_ok();
+    document.recovery_write.set(None);
+    if success {
+        retire_previous_work_copies(live, document);
+    }
     report_write_results(
         window,
         live,
@@ -410,6 +458,7 @@ fn write_work_copy_of_impl(
             removed: false,
             superseded: false,
             error: outcome.err().map(|error| error.to_string()),
+            sequence: None,
         }],
     );
     success
@@ -485,7 +534,20 @@ pub fn report_write_results(
             }
         };
         live.cache.borrow_mut().log_diag("work", &message);
+        let named = result.path.file_name().and_then(|name| name.to_str());
+        let document = open_documents(live).into_iter().find(|document| {
+            let copy = work_identity(&document.file.borrow());
+            named == Some(app_data::work_file_name(&copy).as_str())
+        });
         if result.error.is_none() {
+            if !result.removed
+                && let Some(document) = document
+                && result.sequence.is_some()
+                && document.recovery_write.get() == result.sequence
+            {
+                document.recovery_write.set(None);
+                retire_previous_work_copies(live, &document);
+            }
             continue;
         }
         // 2026-09-08: **失敗したら旗を立て直す。**渡した時点で「退避済み」に
@@ -495,12 +557,7 @@ pub fn report_write_results(
         //
         // **新しい編集が来ていれば何もしない**（`retry_work_copy`は待っている
         // 旗があれば触らない）。そちらの時計のほうが正しい。
-        let named = result.path.file_name().and_then(|name| name.to_str());
-        let failed = open_documents(live).into_iter().find(|document| {
-            let copy = work_identity(&document.file.borrow());
-            named == Some(app_data::work_file_name(&copy).as_str())
-        });
-        if let Some(document) = failed {
+        if let Some(document) = document {
             document.text.retry_work_copy();
             document.recovery_failed.set(true);
         }

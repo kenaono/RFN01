@@ -36,6 +36,7 @@ pub struct WriteJob {
     pub path: PathBuf,
     /// 書くなら中身、消すなら`None`。
     pub bytes: Option<Vec<u8>>,
+    sequence: usize,
 }
 
 /// What became of one job, for the log.
@@ -56,6 +57,7 @@ pub struct WriteResult {
     pub superseded: bool,
     /// `None` when it was done.
     pub error: Option<String>,
+    pub sequence: Option<usize>,
 }
 
 /// A thread that writes files, and the two queues to it.
@@ -103,28 +105,33 @@ impl FileWriter {
     /// Hand over a file to be written. `false` means there is no thread to
     /// write it, and the caller has to.
     pub fn write(&self, path: PathBuf, bytes: Vec<u8>) -> bool {
-        self.hand_over(WriteJob {
-            path,
-            bytes: Some(bytes),
-        })
+        self.write_tracked(path, bytes).is_some()
+    }
+
+    /// A receipt identifies the write even if a document moves away and back
+    /// to the same path before the result arrives.
+    pub(crate) fn write_tracked(&self, path: PathBuf, bytes: Vec<u8>) -> Option<usize> {
+        self.hand_over(path, Some(bytes))
     }
 
     /// Hand over a file to be taken away, **behind whatever is queued for it**.
     /// `false` means there is no thread, and the caller has to.
     pub fn remove(&self, path: PathBuf) -> bool {
-        self.hand_over(WriteJob { path, bytes: None })
+        self.hand_over(path, None).is_some()
     }
 
-    fn hand_over(&self, job: WriteJob) -> bool {
+    fn hand_over(&self, path: PathBuf, bytes: Option<Vec<u8>>) -> Option<usize> {
         let jobs = self.jobs.borrow();
-        let Some(jobs) = jobs.as_ref() else {
-            return false;
-        };
-        if jobs.send(job).is_err() {
-            return false;
-        }
-        self.handed_over.set(self.handed_over.get() + 1);
-        true
+        let jobs = jobs.as_ref()?;
+        let sequence = self.handed_over.get() + 1;
+        jobs.send(WriteJob {
+            path,
+            bytes,
+            sequence,
+        })
+        .ok()?;
+        self.handed_over.set(sequence);
+        Some(sequence)
     }
 
     /// Everything finished since this was last asked.
@@ -220,6 +227,7 @@ fn run(jobs: &Receiver<WriteJob>, results: &Sender<WriteResult>) {
                             removed: false,
                             superseded: true,
                             error: None,
+                            sequence: None,
                         };
                         if results.send(result).is_err() {
                             return;
@@ -257,6 +265,7 @@ fn run(jobs: &Receiver<WriteJob>, results: &Sender<WriteResult>) {
                 removed: job.bytes.is_none(),
                 superseded: false,
                 error: outcome.err().map(|error| error.to_string()),
+                sequence: Some(job.sequence),
             };
             // A closed receiver means the editor is gone. Nothing to report to.
             if results.send(result).is_err() {

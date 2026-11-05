@@ -18,7 +18,7 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
@@ -530,6 +530,25 @@ fn read_with(
         None => decode(&bytes, limit)?,
     };
     Ok(LoadedFile { text, form, stamp })
+}
+
+/// Read the bytes and text from the same handle so the backup can keep the
+/// exact input used for a guarded replacement.
+pub(crate) fn read_for_replacement(
+    file: &mut fs::File,
+    limit: usize,
+) -> Result<(String, TextForm, Vec<u8>), LoadError> {
+    let max = largest_readable(limit);
+    let mut bytes = Vec::new();
+    file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(LoadError::FileTooLarge {
+            bytes: bytes.len() as u64,
+            limit,
+        });
+    }
+    let (text, form) = decode(&bytes, limit)?;
+    Ok((text, form, bytes))
 }
 
 /// The text as the file should hold it.

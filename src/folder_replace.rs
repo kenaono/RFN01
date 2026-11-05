@@ -8,6 +8,11 @@
 //! * 開いていないファイルは、**バックアップを取ってから**書き換える。文字コードと改行は
 //!   元のまま。バックアップが取れなければ書き換えない。
 use crate::*;
+use std::io;
+use std::os::windows::fs::OpenOptionsExt;
+use windows::Win32::Storage::FileSystem::{
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+};
 
 /// 訊いているあいだ持っておく、置換の頼み。答えが来たら、この語と探し方でやり直す。
 #[derive(Clone, Debug)]
@@ -105,11 +110,12 @@ pub(crate) fn confirmed(window: &AppWindow, live: &Live, plan: Plan) {
     };
     let store = saving::backup_store(window);
     let keep = window.get_backup_keep().clamp(1, backup::MAX_KEEP as i32) as usize;
-    let (mut files, mut places, mut refused) = (0usize, 0usize, 0usize);
+    let (mut files, mut places, mut refused, mut changed) = (0usize, 0usize, 0usize, 0usize);
     for path in &plan.files {
         let documents = open_documents(live);
         let replaced = match held_document(&documents, path) {
-            Some(document) => replace_open(window, live, &document, &search, &plan.replacement),
+            Some(document) => replace_open(window, live, &document, &search, &plan.replacement)
+                .map_err(|()| Refused::Other),
             None => replace_closed(live, path, &search, &plan.replacement, store.as_ref(), keep),
         };
         match replaced {
@@ -118,7 +124,8 @@ pub(crate) fn confirmed(window: &AppWindow, live: &Live, plan: Plan) {
                 files += 1;
                 places += count;
             }
-            Err(()) => refused += 1,
+            Err(Refused::Changed) => changed += 1,
+            Err(Refused::Other) => refused += 1,
         }
     }
     let told = if refused == 0 {
@@ -132,9 +139,17 @@ pub(crate) fn confirmed(window: &AppWindow, live: &Live, plan: Plan) {
             "Replaced {places} places in {files} files ({refused} files could not be changed)"
         )
     };
+    let told = if changed == 0 {
+        told
+    } else {
+        say!(
+            "{told}。外部で変更された {changed} ファイルは置換しませんでした",
+            "{told}. Skipped {changed} files changed outside RFN Edit"
+        )
+    };
     live.cache.borrow_mut().log_diag(
         "search",
-        &format!("replace files={files} places={places} refused={refused}"),
+        &format!("replace files={files} places={places} refused={refused} changed={changed}"),
     );
     publish_tabs(window, live);
     crate::backup_ui::refresh_pane(window, live);
@@ -214,6 +229,12 @@ fn replace_open(
     Ok(replaced)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Refused {
+    Changed,
+    Other,
+}
+
 /// 開いていないファイルを、バックアップを取ってから書き換える。
 fn replace_closed(
     live: &Live,
@@ -222,35 +243,138 @@ fn replace_closed(
     replacement: &str,
     store: Option<&backup::Store>,
     keep: usize,
-) -> Result<usize, ()> {
-    let shown = path.display();
-    let readonly = std::fs::metadata(path)
-        .map_err(|_| ())?
-        .permissions()
-        .readonly();
-    if readonly {
-        return Err(());
-    }
-    let loaded = file_io::read(path, MAX_DOCUMENT_CHARACTERS).map_err(|_| ())?;
-    let (next, replaced) = search.replace_all(&loaded.text, replacement);
+) -> Result<usize, Refused> {
+    let source = ClosedSource::read(path)?;
+    let (next, replaced) = search.replace_all(&source.text, replacement);
     if replaced == 0 {
         return Ok(0);
     }
     if next.chars().count() > MAX_DOCUMENT_CHARACTERS {
-        return Err(());
+        return Err(Refused::Other);
     }
     let Some(store) = store else {
-        return Err(());
+        return Err(Refused::Other);
     };
-    if let Err(error) = store.take(path, keep, timestamp::now()) {
-        let told = format!("replace backup failed path={shown} error={error}");
-        live.cache.borrow_mut().log_diag("file", &told);
-        return Err(());
+    match source.install(path, &next, store, keep) {
+        Ok(retained) => {
+            if let Some(retained) = retained {
+                live.cache.borrow_mut().log_diag(
+                    "file",
+                    &format!("replace retained old file at {}", retained.display()),
+                );
+            }
+            Ok(replaced)
+        }
+        Err(error) => {
+            live.cache.borrow_mut().log_diag(
+                "file",
+                &format!("replace failed path={} error={error}", path.display()),
+            );
+            Err(refusal(error))
+        }
     }
-    if let Err(error) = file_io::save(path, &next, loaded.form) {
-        let told = format!("replace write failed path={shown} error={error:?}");
-        live.cache.borrow_mut().log_diag("file", &told);
-        return Err(());
+}
+
+struct ClosedSource {
+    file: std::fs::File,
+    version: disk_entry::Version,
+    text: String,
+    form: file_io::TextForm,
+    bytes: Vec<u8>,
+}
+
+impl ClosedSource {
+    fn read(path: &Path) -> Result<Self, Refused> {
+        // Deny writes to this file while reading and preparing the result.
+        // Other editors can rename a new entry onto the path, so install
+        // also checks the identity of the entry that would be replaced.
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(path)
+            .map_err(refusal)?;
+        let metadata = file.metadata().map_err(refusal)?;
+        if !metadata.is_file()
+            || metadata.permissions().readonly()
+            || file_tree::is_reparse_point(&metadata)
+        {
+            return Err(Refused::Other);
+        }
+        let version = disk_entry::Version::of(&file).map_err(refusal)?;
+        let (text, form, bytes) = file_io::read_for_replacement(&mut file, MAX_DOCUMENT_CHARACTERS)
+            .map_err(|_| Refused::Other)?;
+        Ok(Self {
+            file,
+            version,
+            text,
+            form,
+            bytes,
+        })
     }
-    Ok(replaced)
+
+    fn install(
+        self,
+        path: &Path,
+        next: &str,
+        store: &backup::Store,
+        keep: usize,
+    ) -> io::Result<Option<PathBuf>> {
+        if disk_entry::Version::read(path)? != self.version {
+            return Err(disk_entry::changed());
+        }
+        let stage = disk_entry::Stage::beside(path)?;
+        let incoming = stage.incoming();
+        let outcome = (|| {
+            file_io::save(&incoming, next, self.form)
+                .map_err(|error| io::Error::other(format!("{error:?}")))?;
+            store.take_exact(path, &self.bytes, keep, timestamp::now())?;
+            stage.replace(&incoming, path, self.version)
+        })();
+        // Release the read handle before removing the displaced entry.
+        drop(self.file);
+        match outcome {
+            Ok(previous) => Ok(std::fs::remove_file(&previous).is_err().then_some(previous)),
+            Err(error) => {
+                let _ = std::fs::remove_file(incoming);
+                Err(error)
+            }
+        }
+    }
+}
+
+fn refusal(error: io::Error) -> Refused {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::NotFound
+    ) || matches!(error.raw_os_error(), Some(32 | 33))
+    {
+        Refused::Changed
+    } else {
+        Refused::Other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn a_file_replaced_after_the_read_keeps_its_external_contents() {
+        let root = saving::scratch_directory("replace-version");
+        let path = root.join("memo.md");
+        let original = root.join("previous.md");
+        fs::write(&path, "置換前\r\n").unwrap();
+        let source = ClosedSource::read(&path).unwrap();
+        fs::rename(&path, &original).unwrap();
+        fs::write(&path, "外部からの更新").unwrap();
+        let store = backup::Store::new(root.join("backups"), backup::DEFAULT_NAME_FORMAT);
+
+        let error = source.install(&path, "置換後\n", &store, 10).unwrap_err();
+
+        assert_eq!(refusal(error), Refused::Changed);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "外部からの更新");
+        assert_eq!(fs::read_to_string(original).unwrap(), "置換前\r\n");
+    }
 }
