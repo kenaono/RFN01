@@ -74,10 +74,7 @@ pub(crate) fn send(window: &AppWindow, live: &Live, input: Input) {
         if entry.view.borrow().viewer {
             return;
         }
-        input
-            .session
-            .borrow_mut()
-            .send(&terminal::encode_typing(&input.text));
+        input.session.borrow_mut().send_draft(&input.text);
         // Do not delete edits made while confirmation was showing.
         if *entry.document.text.borrow() == input.text {
             entry.document.text.borrow_mut().clear();

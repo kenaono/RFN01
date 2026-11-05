@@ -1519,7 +1519,7 @@ Quick Draftを開く、新しいTAB、Quick Draft内のコピーして閉じる�
 
 ## TerminalとPanel（2026-09-19）
 
-Terminalの右クリックから、履歴検索（Ctrl+Shift+F）、最新位置、出力保存、画面／履歴の消去を操作できます。Ctrl+FとCtrl+Cはシェル側へ渡します。URLはCtrl+クリックで開きます。複数行貼付は確認後に送信し、実行中シェルの終了も既定で確認します。いずれも設定 → Terminalで変更できます。
+Terminalの右クリックから、履歴検索（Ctrl+Shift+F）、最新位置、出力保存、画面／履歴の消去を操作できます。Ctrl+FとCtrl+Cはシェル側へ渡します。URLはCtrl+クリックで開きます。複数行貼付は確認後に送信し、実行中シェルの終了も既定で確認します。下段のEditor Panelから`Ctrl+Enter`で送るとき、受け取る側が貼り付けの印を受け付けていれば（bash・Claude Code）途中の改行を`Ctrl+J`、末尾の改行を`Enter`1回で送ります。Claude Codeでは複数行が1つの入力になります。PowerShellとcmdには以前どおり各行`Enter`で送ります（RFN01-104、2026-11-05）。いずれも設定 → Terminalで変更できます。
 
 下段はEditor Panel／Terminal Panelです。「＋」で下段TABを追加し、「...」から保存・ReadOnly・取り込み停止・外観・TABを閉じる操作を行います。上段TABごとに保持し、非表示にしてもシェルや取り込みは継続します。上段Terminalの右クリックには「選択出力の挿入」「履歴の取り込み」「ログ取り込み」「ファイルへのログ保存」があります。継続取り込みは新規Editor Panelへ固定し、取り込み中はReadOnlyです。停止後に編集できます。保持したいPanel文書は保存してください。
 
