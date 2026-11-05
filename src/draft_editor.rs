@@ -8,9 +8,6 @@ struct Editor {
     timer: Timer,
     publishing: Rc<Cell<bool>>,
     refresh_pending: bool,
-    /// RFN01-77: put on with the first report of where the IME is, since the
-    /// window has no handle before it is shown.
-    ime_watch: Option<Box<ime::ImeWatch>>,
     /// RFN01-79: the IME's copy of a conversion a click already put in.
     settled: ime::Settled,
 }
@@ -80,15 +77,17 @@ impl Editor {
         let laid_out = editor_render::layout(
             &mut self.graphics,
             &mut self.view,
-            &self.session.document(),
-            &source,
-            LineFit::Extent(usable_horizontal_width(screen.shown_width.max(1.0))),
-            &typography,
-            None,
-            state.caret_source_byte,
-            pane_selection(&state),
-            &state.preedit,
-            &options,
+            editor_render::LayoutRequest {
+                document: &self.session.document(),
+                source: &source,
+                line_fit: LineFit::Extent(usable_horizontal_width(screen.shown_width.max(1.0))),
+                typography: &typography,
+                active_line_start: None,
+                caret_source_byte: state.caret_source_byte,
+                selection: pane_selection(&state),
+                preedit: &state.preedit,
+                options: &options,
+            },
         )?;
         Ok((source, laid_out, screen))
     }
@@ -516,7 +515,6 @@ pub(crate) fn install(window: &QuickDraft) {
         timer: Timer::default(),
         publishing: Rc::new(Cell::new(false)),
         refresh_pending: false,
-        ime_watch: None,
         settled: ime::Settled::default(),
     }));
     let weak = window.as_weak();
@@ -526,13 +524,10 @@ pub(crate) fn install(window: &QuickDraft) {
             return;
         };
         ime::candidate_area(window.window(), x, y, w, h, vertical);
-        let Ok(mut held) = editor.try_borrow_mut() else {
-            return;
-        };
-        if held.ime_watch.is_none() {
+        if !ime::ImeWatch::installed(window.window()) {
             let weak = window.as_weak();
             let editor = Rc::downgrade(&editor);
-            held.ime_watch = ime::ImeWatch::install(window.window(), ime_host(&weak, &editor));
+            ime::ImeWatch::install(window.window(), ime_host(&weak, &editor));
         }
     });
     macro_rules! wire {

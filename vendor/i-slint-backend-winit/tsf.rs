@@ -41,7 +41,7 @@ use windows::Win32::System::Variant::{
     VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_I4,
 };
 use windows::Win32::UI::TextServices::*;
-use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsWindow};
+use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows_core::{BOOL, GUID, HRESULT, IUnknown, Interface, PCWSTR, PWSTR, Ref, implement};
 
 use crate::winitwindowadapter::WinitWindowAdapter;
@@ -215,11 +215,6 @@ fn window_for(hwnd: HWND) -> Option<Rc<Window>> {
     if let Some(window) = window_of(key) {
         return Some(window);
     }
-    // Windows that are gone take their documents with them.
-    WINDOWS.with(|w| {
-        // SAFETY: asking whether a handle still names a window.
-        w.borrow_mut().retain(|&h, _| unsafe { IsWindow(Some(HWND(h as *mut _))).as_bool() })
-    });
     let thread = thread()?;
     let state = Rc::new(State::default());
     state.hwnd.set(key);
@@ -310,6 +305,36 @@ pub(crate) fn disable(winit_window: &winit::window::Window) {
     }
 }
 
+/// Called before the native window is released. Invalidate the old state
+/// before calling into COM, which can synchronously call the text store back.
+pub(crate) fn detach(winit_window: &winit::window::Window) {
+    let Some(hwnd) = hwnd_of(winit_window) else { return };
+    let key = hwnd.0 as isize;
+    let window = WINDOWS.with(|windows| windows.borrow_mut().remove(&key));
+    let document = DOCUMENTS.with(|documents| documents.borrow_mut().remove(&key));
+    if let Some(window) = window {
+        let state = &window.state;
+        state.hwnd.set(0);
+        state.focused.set(false);
+        state.discard.set(true);
+        state.pending.borrow_mut().clear();
+        state.queued.borrow_mut().clear();
+        state.adapter.replace(Weak::new());
+        let _inside = Inside::new();
+        if let Some(thread) = thread() {
+            // SAFETY: these are the TSF objects and HWND being detached.
+            unsafe {
+                let _ = thread.manager.AssociateFocus(hwnd, None);
+                let _ = window.docmgr.Pop(TF_POPF_ALL);
+            }
+        }
+        let sink = state.sink.borrow_mut().take();
+        let view = state.view.borrow_mut().take();
+        drop((sink, view));
+    }
+    drop(document);
+}
+
 fn terminate(window: &Window) {
     if let Ok(services) = window.context.cast::<ITfContextOwnerCompositionServices>() {
         window.state.allow_sync.set(true);
@@ -397,6 +422,13 @@ fn with_window(winit_window: &winit::window::Window, f: impl FnOnce(&Rc<Window>)
     if let Some(window) = hwnd_of(winit_window).and_then(|h| window_of(h.0 as isize)) {
         f(&window);
     }
+}
+
+/// Whether this native window currently has an application text host.
+pub fn has_document(winit_window: &winit::window::Window) -> bool {
+    hwnd_of(winit_window).is_some_and(|hwnd| {
+        DOCUMENTS.with(|documents| documents.borrow().contains_key(&(hwnd.0 as isize)))
+    })
 }
 
 /// Register the application's own text for this window (see [`Document`]).
@@ -513,7 +545,7 @@ pub fn conversion_mode() -> Option<u32> {
 // After a lock: hand the IME's edits on.
 
 fn after_lock(state: &Rc<State>) {
-    if state.reading.get() {
+    if state.hwnd.get() == 0 || state.reading.get() {
         return;
     }
     settle_edits(state);
@@ -591,6 +623,7 @@ fn dispatch(state: &Rc<State>) {
     let events = std::mem::take(&mut *state.queued.borrow_mut());
     let Some(adapter) = state.adapter.borrow().upgrade() else { return };
     for event in events {
+        if state.hwnd.get() == 0 { return; }
         let mut key_event = KeyEvent::default();
         key_event.text = event.text.into();
         let internal = InternalKeyEvent {
@@ -756,8 +789,9 @@ fn grant(state: &Rc<State>, flags: u32) -> HRESULT {
 }
 
 fn grant_later(state: &Rc<State>) {
-    let state = state.clone();
+    let state = Rc::downgrade(state);
     corelib::timers::Timer::single_shot(Duration::ZERO, move || {
+        let Some(state) = state.upgrade().filter(|state| state.hwnd.get() != 0) else { return };
         if inside() || state.lock.get() != 0 {
             grant_later(&state);
             return;
@@ -803,6 +837,7 @@ impl ITextStoreACP_Impl for Store_Impl {
         Ok(())
     }
     fn RequestLock(&self, flags: u32) -> windows_core::Result<HRESULT> {
+        if self.state.hwnd.get() == 0 { return Err(E_FAIL.into()); }
         let state = &self.state;
         let sync = flags & TS_LF_SYNC != 0;
         // A read-only lock changes nothing here or in the application, so it

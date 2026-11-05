@@ -279,12 +279,17 @@ impl tsf::Document for HostDocument {
 }
 
 impl ImeWatch {
-    /// Offer `window`'s text to the IME. `None` if it is not a Win32 window yet.
-    pub(crate) fn install(window: &slint::Window, host: ImeHost) -> Option<Box<Self>> {
-        native_handle(window)?;
-        let document: Rc<dyn tsf::Document> = Rc::new(HostDocument(host));
-        with_winit(window, |native| tsf::set_document(native, document));
-        Some(Box::new(Self))
+    /// Offer the editor's text for the lifetime of this native window.
+    pub(crate) fn install(window: &slint::Window, host: ImeHost) {
+        with_winit(window, |native| {
+            tsf::set_document(native, Rc::new(HostDocument(host)))
+        });
+    }
+
+    pub(crate) fn installed(window: &slint::Window) -> bool {
+        let mut registered = false;
+        with_winit(window, |native| registered = tsf::has_document(native));
+        registered
     }
 }
 

@@ -1593,6 +1593,9 @@ enum State {
     Osc,
     /// Inside an OSC, having just seen `ESC`: the next byte should be `\`.
     OscEscape,
+    DiscardOsc,
+    DiscardOscEscape,
+    DiscardCsi,
     /// A DCS/APC/PM string, kept only so its end can be found.
     Ignore,
     IgnoreEscape,
@@ -1609,6 +1612,7 @@ pub struct Parser {
     groups: Vec<Vec<u16>>,
     group: Vec<u16>,
     number: Option<u16>,
+    csi_bytes: usize,
     private: Option<u8>,
     intermediate: Option<u8>,
     osc: Vec<u8>,
@@ -1616,6 +1620,9 @@ pub struct Parser {
     pending: u32,
     due: u8,
 }
+
+const MAX_CSI_BYTES: usize = 256;
+const MAX_OSC_BYTES: usize = 8192;
 
 impl Parser {
     pub fn new() -> Self {
@@ -1640,7 +1647,11 @@ impl Parser {
                     self.state = State::Ground;
                 }
                 0x1b => self.state = State::OscEscape,
-                _ => self.osc.push(byte),
+                _ if self.osc.len() < MAX_OSC_BYTES => self.osc.push(byte),
+                _ => {
+                    self.osc.clear();
+                    self.state = State::DiscardOsc;
+                }
             },
             State::OscEscape => {
                 self.finish_osc(screen);
@@ -1650,6 +1661,19 @@ impl Parser {
                 if byte != b'\\' {
                     self.escape(byte, screen);
                 }
+            }
+            State::DiscardCsi => match byte {
+                0x1b => self.state = State::Escape,
+                0x18 | 0x1a | 0x40..=0x7e => self.state = State::Ground,
+                _ => {}
+            },
+            State::DiscardOsc | State::DiscardOscEscape => {
+                self.state = match byte {
+                    0x07 => State::Ground,
+                    b'\\' if self.state == State::DiscardOscEscape => State::Ground,
+                    0x1b => State::DiscardOscEscape,
+                    _ => State::DiscardOsc,
+                };
             }
             State::Ignore => {
                 if byte == 0x1b {
@@ -1747,10 +1771,31 @@ impl Parser {
     }
 
     fn csi(&mut self, byte: u8, screen: &mut Screen) {
+        if matches!(byte, 0x18 | 0x1a | 0x1b) {
+            self.clear();
+            self.state = if byte == 0x1b {
+                State::Escape
+            } else {
+                State::Ground
+            };
+            return;
+        }
+        if self.csi_bytes == MAX_CSI_BYTES {
+            self.clear();
+            self.state = State::DiscardCsi;
+            self.step(byte, screen);
+            return;
+        }
+        self.csi_bytes += 1;
         match byte {
             b'0'..=b'9' => {
                 let digit = (byte - b'0') as u16;
-                self.number = Some(self.number.unwrap_or(0).saturating_mul(10) + digit);
+                self.number = Some(
+                    self.number
+                        .unwrap_or(0)
+                        .saturating_mul(10)
+                        .saturating_add(digit),
+                );
             }
             b';' => {
                 let number = self.number.take().unwrap_or(0);
@@ -1911,6 +1956,7 @@ impl Parser {
     }
 
     fn clear(&mut self) {
+        self.csi_bytes = 0;
         self.groups.clear();
         self.group.clear();
         self.number = None;
@@ -3311,5 +3357,31 @@ mod key_tests {
         ] {
             assert_eq!(character_width(text), width, "{text:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod sequence_limits {
+    use super::*;
+
+    #[test]
+    fn large_csi_number_saturates_and_following_text_is_processed() {
+        let mut terminal = Terminal::new(12, 2);
+        terminal.feed(b"\x1b[655");
+        terminal.feed(b"36C!\x1b[1GX");
+        assert_eq!(terminal.screen.cursor().column, 1);
+    }
+
+    #[test]
+    fn oversized_sequences_are_discarded_across_reads() {
+        let mut terminal = Terminal::new(12, 2);
+        terminal.feed(b"\x1b[");
+        terminal.feed(&vec![b';'; MAX_CSI_BYTES + 1]);
+        terminal.feed(b"C\x1b]2;");
+        terminal.feed(&vec![b'x'; MAX_OSC_BYTES + 1]);
+        terminal.feed(b"\x1b");
+        terminal.feed(b"\\\x1b]2;Valid\x07A");
+        assert_eq!(terminal.screen.title(), "Valid");
+        assert_eq!(terminal.screen.cursor().column, 1);
     }
 }

@@ -18,8 +18,9 @@
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, channel, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::thread;
 #[cfg(test)]
 use std::time::Duration;
@@ -33,7 +34,7 @@ struct FileLog {
     stamp: Option<Stamp>,
 }
 
-use crate::pty::Pty;
+use crate::pty::{OwnedHandle, Pty};
 use crate::terminal::{
     Key, Modifiers, MouseAction, MouseButton, MouseTracking, Screen, Terminal, encode_focus,
     encode_key, encode_mouse, encode_paste, encode_typing,
@@ -43,6 +44,48 @@ use crate::timestamp::Stamp;
 /// How much is read at once. **A screenful of coloured text is a few KB**, and
 /// a program printing a large file will simply come back around the loop.
 const CHUNK: usize = 8192;
+
+const OUTPUT_SLOTS: usize = 16;
+const CHUNKS_PER_DRAIN: usize = 8;
+const INPUT_SLOTS: usize = 16;
+const MAX_INPUT_BYTES: usize = 1024 * 1024;
+
+struct Wake {
+    posted: AtomicBool,
+    post: Mutex<Box<dyn Fn() + Send>>,
+}
+
+impl Wake {
+    fn notify(&self) {
+        if !self.posted.swap(true, Ordering::AcqRel) {
+            (self.post.lock().unwrap())();
+        }
+    }
+
+    fn collected(&self) {
+        self.posted.store(false, Ordering::Release);
+    }
+}
+
+struct Console {
+    process: OwnedHandle,
+    size: Arc<Mutex<(u16, u16)>>,
+    resized: SyncSender<()>,
+}
+
+impl Console {
+    fn resize(&self, columns: u16, rows: u16) {
+        *self.size.lock().unwrap() = (columns, rows);
+        let _ = self.resized.try_send(());
+    }
+}
+
+struct TerminalIo {
+    console: Console,
+    output: Receiver<Vec<u8>>,
+    input: SyncSender<Vec<u8>>,
+    wake: Arc<Wake>,
+}
 
 impl std::fmt::Debug for TerminalSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,7 +106,7 @@ pub struct TerminalSession {
     log_error: Option<String>,
     /// `None` while a shell put back from the last run is waiting to be shown
     /// (RFN01-97): **it starts when it is first drawn** ([`Self::start_waiting`]).
-    pty: Option<Pty>,
+    console: Option<Console>,
     /// Held while waiting, so the channel stays open and the empty shell is not
     /// taken for one that ended.
     idle: Option<std::sync::mpsc::Sender<Vec<u8>>>,
@@ -75,6 +118,9 @@ pub struct TerminalSession {
     restored_title: Option<String>,
     terminal: Terminal,
     output: Receiver<Vec<u8>>,
+    input: Option<SyncSender<Vec<u8>>>,
+    wake: Option<Arc<Wake>>,
+    pending_replies: Vec<u8>,
     /// The shell has exited. **The screen stays** — what it last said is often
     /// the reason it exited.
     finished: bool,
@@ -118,19 +164,27 @@ impl TerminalSession {
         rows: usize,
         wake: impl Fn() + Send + 'static,
     ) -> windows::core::Result<Self> {
-        let mut pty = Pty::open_in(command, directory, columns as u16, rows as u16)?;
-        let output = read_in_background(&mut pty, wake)?;
+        let pty = Pty::open_in(command, directory, columns as u16, rows as u16)?;
+        let TerminalIo {
+            console,
+            output,
+            input,
+            wake,
+        } = start_io(pty, wake)?;
         Ok(Self {
             name: name.to_owned(),
             number: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
             file_log: None,
             log_error: None,
-            pty: Some(pty),
+            console: Some(console),
             idle: None,
             restored: None,
             restored_title: None,
             terminal: Terminal::new(columns, rows),
             output,
+            input: Some(input),
+            wake: Some(wake),
+            pending_replies: Vec::new(),
             finished: false,
             mouse_at: None,
             keyboard: false,
@@ -154,12 +208,15 @@ impl TerminalSession {
             number: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
             file_log: None,
             log_error: None,
-            pty: None,
+            console: None,
             idle: Some(idle),
             restored: Some((lines, when)),
             restored_title: None,
             terminal: Terminal::new(80, 24),
             output,
+            input: None,
+            wake: None,
+            pending_replies: Vec::new(),
             finished: false,
             mouse_at: None,
             keyboard: false,
@@ -170,7 +227,7 @@ impl TerminalSession {
 
     /// RFN01-97: still waiting to be shown for the first time.
     pub fn is_waiting(&self) -> bool {
-        self.pty.is_none() && !self.finished
+        self.idle.is_some() && !self.finished
     }
 
     /// RFN01-97: start a shell that was waiting. The last run's output goes on
@@ -200,11 +257,13 @@ impl TerminalSession {
             rows as u16,
             true,
         )
-        .and_then(|mut pty| read_in_background(&mut pty, wake).map(|output| (pty, output)));
+        .and_then(|pty| start_io(pty, wake));
         match started {
-            Ok((pty, output)) => {
-                self.pty = Some(pty);
-                self.output = output;
+            Ok(io) => {
+                self.console = Some(io.console);
+                self.output = io.output;
+                self.input = Some(io.input);
+                self.wake = Some(io.wake);
                 self.idle = None;
                 Ok(())
             }
@@ -320,7 +379,7 @@ impl TerminalSession {
     }
 
     pub fn start_file_log(&mut self, path: PathBuf, file: std::fs::File, stamp: Option<Stamp>) {
-        self.drain();
+        self.drain_chunks(OUTPUT_SLOTS + 1);
         self.terminal.screen.start_file_capture(stamp.clone());
         self.file_log = Some(FileLog {
             path,
@@ -351,7 +410,7 @@ impl TerminalSession {
     }
 
     pub fn stop_file_log(&mut self) {
-        self.drain();
+        self.drain_chunks(OUTPUT_SLOTS + 1);
         self.finish_file_log();
     }
 
@@ -398,33 +457,32 @@ impl TerminalSession {
 
     /// The shell has exited and everything it wrote has been applied.
     ///
-    /// **The pipe does not say this** (see [`Pty::exited`]): a pseudo console
-    /// holds the far end open until we close it, so waiting for end-of-file
-    /// waits forever. The process is asked instead, and only once a drain has
-    /// found nothing left — otherwise the pane would be told the shell is gone
-    /// while its last line was still on its way.
+    /// Once the child exits, the console worker closes the output pipe.
+    /// The last buffered bytes are applied before the session is finished.
     pub fn finished(&self) -> bool {
         self.finished
     }
 
-    /// Apply everything that has arrived. `true` if the screen changed.
-    ///
-    /// **Everything waiting is applied before one repaint**, which is what
-    /// makes a program printing thousands of lines cost the window a frame
-    /// rather than a frame per line.
+    /// Apply a bounded batch, then let the UI handle input and paint.
     pub fn drain(&mut self) -> bool {
+        self.drain_chunks(CHUNKS_PER_DRAIN)
+    }
+
+    fn drain_chunks(&mut self, budget: usize) -> bool {
+        if let Some(wake) = &self.wake {
+            wake.collected();
+        }
         let before = self.terminal.screen.revision();
-        let mut applied = 0_usize;
+        let mut applied = 0;
         let mut closed = false;
-        loop {
+        self.flush_replies();
+        while applied < budget && self.pending_replies.is_empty() {
             match self.output.try_recv() {
                 Ok(chunk) => {
                     self.terminal.feed(&chunk);
                     applied += 1;
                 }
                 Err(TryRecvError::Empty) => break,
-                // The reading thread stopped, which with a pseudo console means
-                // we closed the console — not that the shell exited.
                 Err(TryRecvError::Disconnected) => {
                     closed = true;
                     break;
@@ -433,9 +491,27 @@ impl TerminalSession {
         }
         self.answer();
         self.collect_file_log();
-        if applied == 0 && (closed || self.pty.as_ref().is_some_and(Pty::exited)) {
+        if closed {
             self.finished = true;
+            self.input = None;
+            self.console = None;
             self.finish_file_log();
+        } else if self
+            .console
+            .as_ref()
+            .is_some_and(|console| console.process.exited())
+        {
+            // Let the console thread close the pipe and keep collecting its tail.
+            self.input = None;
+            self.console = None;
+            if let Some(wake) = &self.wake {
+                wake.notify();
+            }
+        }
+        if applied == budget
+            && let Some(wake) = &self.wake
+        {
+            wake.notify();
         }
         self.terminal.screen.revision() != before
     }
@@ -468,11 +544,22 @@ impl TerminalSession {
     /// **A question left unanswered is a program left waiting**, so this
     /// happens on every drain rather than when somebody thinks to do it.
     fn answer(&mut self) {
-        let replies = self.terminal.screen.take_replies();
-        if let Some(pty) = &mut self.pty
-            && !replies.is_empty()
+        // At most one batch of output has produced replies since the last
+        // successful send. Keep those replies ahead of subsequent input.
+        self.pending_replies
+            .extend(self.terminal.screen.take_replies());
+        self.flush_replies();
+    }
+
+    fn flush_replies(&mut self) {
+        if self.pending_replies.is_empty() {
+            return;
+        }
+        let replies = std::mem::take(&mut self.pending_replies);
+        if let Some(input) = &self.input
+            && let Err(TrySendError::Full(replies)) = input.try_send(replies)
         {
-            let _ = pty.write(&replies);
+            self.pending_replies = replies;
         }
     }
 
@@ -607,25 +694,29 @@ impl TerminalSession {
     }
 
     /// RFN01-104: Editor PanelのCtrl+Enter——打ったものとして送る（[`encode_typing`]）。
-    pub fn send_draft(&mut self, text: &str) {
+    pub fn send_draft(&mut self, text: &str) -> bool {
         let bytes = encode_typing(text, self.terminal.screen.modes());
-        self.send(&bytes);
+        self.send(&bytes)
     }
 
-    pub fn paste(&mut self, text: &str) {
+    pub fn paste(&mut self, text: &str) -> bool {
         let bytes = encode_paste(text, self.terminal.screen.modes());
-        self.send(&bytes);
+        self.send(&bytes)
     }
 
     /// Write bytes as they are. The pane uses this for what it has already
     /// encoded; everything else should go through [`Self::send_key`].
-    pub fn send(&mut self, bytes: &[u8]) {
+    pub fn send(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
-            return;
+            return true;
         }
-        if let Some(pty) = &mut self.pty {
-            let _ = pty.write(bytes);
-        }
+        self.flush_replies();
+        bytes.len() <= MAX_INPUT_BYTES
+            && self.pending_replies.is_empty()
+            && self
+                .input
+                .as_ref()
+                .is_some_and(|input| input.try_send(bytes.to_vec()).is_ok())
     }
 
     /// The pane changed size (要件 6.4).
@@ -639,47 +730,83 @@ impl TerminalSession {
             return;
         }
         self.terminal.screen.resize(columns, rows);
-        if let Some(pty) = &mut self.pty {
-            let _ = pty.resize(columns as u16, rows as u16);
+        if let Some(console) = &self.console {
+            console.resize(columns as u16, rows as u16);
         }
     }
 }
 
-/// Read the console's output on a thread of its own, waking the window for
-/// each chunk. **Without the thread there is no terminal** — reading on the
-/// window's thread is exactly what must not happen.
-fn read_in_background(
-    pty: &mut Pty,
-    wake: impl Fn() + Send + 'static,
-) -> windows::core::Result<Receiver<Vec<u8>>> {
-    let reader = pty
-        .take_reader()
-        .expect("a freshly opened pty still has its reader");
-    let (sender, output) = channel::<Vec<u8>>();
-    let spawned = thread::Builder::new()
-        .name("rfnedit-terminal".to_owned())
+/// ConPTY requires separate read and write threads so either pipe can make
+/// progress while the other one is blocked.
+fn start_io(mut pty: Pty, wake: impl Fn() + Send + 'static) -> windows::core::Result<TerminalIo> {
+    let reader = pty.take_reader().expect("new console has a reader");
+    let writer = pty.take_writer().expect("new console has a writer");
+    let wake = Arc::new(Wake {
+        posted: AtomicBool::new(false),
+        post: Mutex::new(Box::new(wake)),
+    });
+    let (sender, output) = sync_channel(OUTPUT_SLOTS);
+    let read_wake = wake.clone();
+    thread::Builder::new()
+        .name("rfnedit-terminal-read".to_owned())
         .spawn(move || {
             let mut buffer = vec![0_u8; CHUNK];
-            loop {
-                // **Blocking, and that is the point**: nothing here spins,
-                // and a shell that says nothing for an hour costs nothing.
-                let read = match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => read,
-                };
-                if sender.send(buffer[..read].to_vec()).is_err() {
+            let mut delivering = true;
+            while let Ok(n @ 1..) = reader.read(&mut buffer) {
+                if delivering {
+                    delivering = sender.send(buffer[..n].to_vec()).is_ok();
+                    read_wake.notify();
+                }
+            }
+            // Make EOF visible before posting the wake.
+            drop(sender);
+            read_wake.notify();
+        })
+        .map_err(|error| {
+            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
+        })?;
+    let (input, receive) = sync_channel::<Vec<u8>>(INPUT_SLOTS);
+    let write_wake = wake.clone();
+    thread::Builder::new()
+        .name("rfnedit-terminal-write".to_owned())
+        .spawn(move || {
+            while let Ok(bytes) = receive.recv() {
+                write_wake.notify();
+                if writer.write(&bytes).is_err() {
                     break;
                 }
-                wake();
             }
-        });
-    if spawned.is_err() {
-        return Err(windows::core::Error::new(
-            windows::Win32::Foundation::E_FAIL,
-            "the terminal's reading thread could not be started",
-        ));
-    }
-    Ok(output)
+        })
+        .map_err(|error| {
+            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
+        })?;
+    let process = pty.take_process().expect("new console has a process");
+    let size = Arc::new(Mutex::new((1, 1)));
+    let requested = size.clone();
+    let (resized, resize) = sync_channel(1);
+    thread::Builder::new()
+        .name("rfnedit-terminal-console".to_owned())
+        .spawn(move || {
+            while resize.recv().is_ok() {
+                let (columns, rows) = *requested.lock().unwrap();
+                let _ = pty.resize(columns, rows);
+            }
+            // ClosePseudoConsole may wait for the output pipe to drain.
+            drop(pty);
+        })
+        .map_err(|error| {
+            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
+        })?;
+    Ok(TerminalIo {
+        console: Console {
+            process,
+            size,
+            resized,
+        },
+        input,
+        output,
+        wake,
+    })
 }
 
 /// RFN01-99: the icon for a shell started with `command` (see
@@ -741,6 +868,11 @@ pub fn restored_screen(lines: &[String], when: &str) -> Vec<u8> {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.stop_file_log();
+        // Release the bounded queues before closing the console.
+        self.input = None;
+        let (_, empty) = channel();
+        drop(std::mem::replace(&mut self.output, empty));
+        self.console = None;
     }
 }
 
@@ -1317,5 +1449,58 @@ mod running_a_program {
         settle(&mut less, 800);
         assert_ne!(less.screen().row_text(0), first, "the wheel scrolled less");
         less.type_text("q");
+    }
+}
+
+#[cfg(test)]
+mod backpressure_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "starts real ConPTY processes; run explicitly"]
+    fn burst_output_reaches_its_tail_and_blocked_input_does_not_hold_close() {
+        let mut burst = TerminalSession::start(
+            "cmd",
+            "cmd.exe /d /q /c for /L %i in (1,1,2500) do @echo RFN-BURST-%i",
+            80,
+            24,
+            || {},
+        )
+        .unwrap();
+        burst.set_history_limit(3000);
+        thread::sleep(Duration::from_millis(150));
+        let until = Instant::now() + Duration::from_secs(10);
+        while !burst.finished() && Instant::now() < until {
+            burst.wait(Duration::from_millis(15));
+        }
+        let lines = burst.output_lines(3000);
+        assert!(burst.finished());
+        let first = lines
+            .iter()
+            .position(|line| line.contains("RFN-BURST-1"))
+            .unwrap();
+        let last = lines
+            .iter()
+            .position(|line| line.contains("RFN-BURST-2500"))
+            .unwrap();
+        assert!(last > first);
+
+        let mut blocked = TerminalSession::start(
+            "PowerShell",
+            "powershell.exe -NoProfile -Command Start-Sleep -Seconds 5",
+            80,
+            24,
+            || {},
+        )
+        .unwrap();
+        let payload = vec![b'x'; MAX_INPUT_BYTES];
+        let started = Instant::now();
+        for _ in 0..INPUT_SLOTS + 3 {
+            blocked.send(&payload);
+        }
+        blocked.resize(90, 26);
+        drop(blocked);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
