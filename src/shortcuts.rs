@@ -890,11 +890,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
             crate::tree_actions::queue(&app, &tree_live, crate::menu_commands::Target::for_tree(&app, &tree_live), *action);
             return true;
         }
-        let global = resolve(&bindings, 0, &text, control, alt, shift);
-        if matches!(usize::try_from(global).ok().and_then(command_at), Some(Command::CommandPalette(_))) {
-            return app.invoke_shortcut_key(text, control, alt, shift);
-        }
-        app.invoke_left_field_shortcut(text, control, alt, shift)
+        app.invoke_shortcut_key(text, control, alt, shift)
     });
     let weak = app.as_weak();
     let keyed_live = live.clone();
