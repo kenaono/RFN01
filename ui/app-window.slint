@@ -1479,6 +1479,9 @@ export component AppWindow inherits Window {
     property <bool> settings-searching: root.settings-query != "";
     /// RFN01-107: パレットの鍵の印が入れた語。検索の語がこれと同じあいだは、Keysの行だけを出す。
     in-out property <string> settings-keys-query;
+    /// RFN01-114: パレットの鍵の印から来たときの、その操作の行（アクションの表の位置）。-1は絞らない。
+    /// 検索の語を書き換えれば解く。
+    in-out property <int> shortcut-only: -1;
     /// 語が名前のどれかに含まれるか（大文字小文字・全角半角を問わない）。Rustが答える。
     pure callback settings-match(string, [string]) -> bool;
     /// 行・見出しを出すか。`labels`はその行の名前と、属する見出し。
@@ -1504,6 +1507,9 @@ export component AppWindow inherits Window {
     }
     // Keysの一覧も同じ語で絞る（「Search by action」の欄はこの欄にまとめた）。
     changed settings-query => {
+        if (root.settings-query != root.settings-keys-query) {
+            root.shortcut-only = -1;
+        }
         root.shortcut-query = root.settings-query;
         root.shortcut-filter();
     }
@@ -3390,7 +3396,6 @@ export component AppWindow inherits Window {
                         }
                         // E4: 出すのはRust——**開いた瞬間に「1〜128行」と言う**
                         // には、その文書に何行あるかを知っていなければならない。
-                        shortcut-keys: root.shortcut-keys;
                         insert-rows: root.insert-rows;
                         insert-children: root.insert-children;
                         insert-chosen(number) => { root.pane-insert-chosen(pane.id, number); }

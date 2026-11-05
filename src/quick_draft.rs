@@ -176,14 +176,19 @@ pub(crate) fn wire_shortcuts(owner: &AppWindow, window: &QuickDraft) {
             let Some(draft) = weak.upgrade() else {
                 return;
             };
-            match command {
-                38 => draft.invoke_copy_all(),
-                39 => {
+            // RFN01-114: Quick Draftの中の操作は、アクションの表のIDで見分ける。
+            let id = usize::try_from(command)
+                .ok()
+                .and_then(|at| crate::actions::all().get(at))
+                .map_or("", |action| action.id.as_str());
+            match id {
+                "draft.copy-all" => draft.invoke_copy_all(),
+                "draft.copy-and-close" => {
                     draft.invoke_copy_all();
                     draft.invoke_copy_and_close();
                 }
-                40 => draft.invoke_clear_requested(),
-                41 => draft.invoke_send_requested(),
+                "draft.clear" => draft.invoke_clear_requested(),
+                "draft.paste-to-tab" => draft.invoke_send_requested(),
                 _ => {}
             }
         });

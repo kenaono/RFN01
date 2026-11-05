@@ -205,7 +205,6 @@ export component EditorSurface inherits Rectangle {
     callback find-requested(bool);
     callback goto-requested(bool);
     callback reopen-closed-requested();
-    in property <[string]> shortcut-keys;
     callback shortcut-key(string, bool, bool, bool) -> bool;
     callback undo-requested(bool);
     callback copy-requested(bool);
@@ -1647,7 +1646,7 @@ export component EditorSurface inherits Rectangle {
                                         }
                                         if root.writing: MenuRow {
                                             title: @tr("Undo");
-                                            shortcut: root.shortcut-keys[8];
+                                            shortcut: MenuActions.key(MenuAction.undo, MenuActions.keys-generation);
                                             enabled: root.standalone ? root.can-undo : MenuActions.allowed(MenuAction.undo, MenuActions.generation);
                                             activated => {
                                                 if (root.standalone) { root.undo-requested(false); } else { MenuActions.run(MenuAction.undo); }
@@ -1656,7 +1655,7 @@ export component EditorSurface inherits Rectangle {
                                         }
                                         if root.writing: MenuRow {
                                             title: @tr("Redo");
-                                            shortcut: root.shortcut-keys[9];
+                                            shortcut: MenuActions.key(MenuAction.redo, MenuActions.keys-generation);
                                             enabled: root.standalone ? root.can-redo : MenuActions.allowed(MenuAction.redo, MenuActions.generation);
                                             activated => {
                                                 if (root.standalone) { root.undo-requested(true); } else { MenuActions.run(MenuAction.redo); }
@@ -1922,7 +1921,7 @@ export component EditorSurface inherits Rectangle {
                                             MenuRow {
                                                 enabled: root.standalone ? true : MenuActions.allowed(MenuAction.mark, MenuActions.generation);
                                                 title: @tr("Start / Cancel Selection");
-                                                shortcut: root.shortcut-keys[25];
+                                                shortcut: MenuActions.key(MenuAction.mark, MenuActions.keys-generation);
                                                 activated => {
                                                     if (root.standalone) { root.mark-toggled(false); } else { MenuActions.run(MenuAction.mark); }
                                                     context-menu.close();
@@ -1931,7 +1930,7 @@ export component EditorSurface inherits Rectangle {
                                             MenuRow {
                                                 enabled: root.standalone ? true : MenuActions.allowed(MenuAction.mark-rect, MenuActions.generation);
                                                 title: @tr("Start / Cancel Rectangle Selection");
-                                                shortcut: root.shortcut-keys[26];
+                                                shortcut: MenuActions.key(MenuAction.mark-rect, MenuActions.keys-generation);
                                                 activated => {
                                                     if (root.standalone) { root.mark-toggled(true); } else { MenuActions.run(MenuAction.mark-rect); }
                                                     context-menu.close();
@@ -1964,7 +1963,7 @@ export component EditorSurface inherits Rectangle {
                                         if !root.standalone: MenuRow {
                                             enabled: MenuActions.allowed(MenuAction.below, MenuActions.generation);
                                             title: root.terminal ? @tr("Editor Panel") : @tr("Terminal Panel");
-                                            shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
+                                            shortcut: root.terminal ? "Ctrl+`" : MenuActions.key(MenuAction.below, MenuActions.keys-generation);
                                             activated => {
                                                 MenuActions.run(MenuAction.below);
                                                 context-menu.close();
@@ -1973,7 +1972,7 @@ export component EditorSurface inherits Rectangle {
                                         if !root.standalone: MenuRow {
                                             enabled: MenuActions.allowed(MenuAction.draft, MenuActions.generation);
                                             title: @tr("Quick Draft…");
-                                            shortcut: root.shortcut-keys[10];
+                                            shortcut: MenuActions.key(MenuAction.draft, MenuActions.keys-generation);
                                             activated => {
                                                 MenuActions.run(MenuAction.draft);
                                                 context-menu.close();
@@ -1983,7 +1982,7 @@ export component EditorSurface inherits Rectangle {
                                         if !root.standalone: MenuRow {
                                             enabled: MenuActions.allowed(MenuAction.back, MenuActions.generation);
                                             title: @tr("Back");
-                                            shortcut: root.shortcut-keys[19];
+                                            shortcut: MenuActions.key(MenuAction.back, MenuActions.keys-generation);
                                             activated => {
                                                 MenuActions.run(MenuAction.back);
                                                 context-menu.close();
@@ -1992,7 +1991,7 @@ export component EditorSurface inherits Rectangle {
                                         if !root.standalone: MenuRow {
                                             enabled: MenuActions.allowed(MenuAction.forward, MenuActions.generation);
                                             title: @tr("Forward");
-                                            shortcut: root.shortcut-keys[20];
+                                            shortcut: MenuActions.key(MenuAction.forward, MenuActions.keys-generation);
                                             activated => {
                                                 MenuActions.run(MenuAction.forward);
                                                 context-menu.close();

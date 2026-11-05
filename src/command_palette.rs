@@ -7,10 +7,11 @@
 //!
 //! - **Files** come from the Workspace's index while a Workspace is open, and
 //!   from the Explorer's folder otherwise; the files opened lately come first.
-//! - **Operations** are the title bar's menus, read as they would open now
-//!   (`menu_commands::menu_snapshot`), and the operations that only have a key
-//!   (`shortcuts::palette_actions`). An operation runs exactly as from the menu
-//!   or the key — the same command, on the pane that was in front.
+//! - **Operations** are the rows of the action table (`crate::actions`, RFN01-114)
+//!   that can run now, each with its title and its description under it, and
+//!   the rows of the writer's own data (templates, recent folders, word check
+//!   modes, shells). An operation runs through the one entry
+//!   (`menu_commands::run`), on the pane that was in front.
 //!
 //! What the palette was opened over is caught when it opens: the keyboard is
 //! in the field by then, and the pane it acts on is the one the writer was in.
@@ -31,14 +32,34 @@ struct Palette {
     pane: PaneId,
     /// Files in the order an empty search lists them: recent first.
     files: Option<Vec<FileCandidate>>,
-    menu: Option<menu_commands::MenuSnapshot>,
-    actions: Vec<shortcuts::PaletteAction>,
+    /// RFN01-114: the operations that can run now, read when first asked.
+    operations: Option<Vec<Operation>>,
     /// RFN01-88: the templates of the Workspace in use, read when first asked.
     templates: Option<Vec<crate::template::Template>>,
-    /// RFN01-88: opened from Insert ▸ Template…, the list is the templates
-    /// and nothing else.
-    only_templates: bool,
+    /// RFN01-88・114: opened to choose one of a list (Insert ▸ Template…, or a
+    /// generic action such as Open Recent Folder…), the list and nothing else.
+    only: Option<List>,
     shown: Vec<Shown>,
+}
+
+/// RFN01-114（書き手と合意 2026-11-05）: 選ぶ一覧。データで中身が変わる項目は、汎用の
+/// アクションがこの一覧をパレットに出す（キーはそのアクションに割り当てる）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum List {
+    Templates,
+    Recent,
+    WordModes,
+    Shells,
+}
+
+/// パレットの1行の操作。
+struct Operation {
+    title: (String, String),
+    description: (String, String),
+    key: String,
+    command: menu_commands::Command,
+    /// アクションの表の行（キーを割り当てられる）。データの行は`None`。
+    action: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -57,8 +78,7 @@ struct FileCandidate {
 #[derive(Clone, Copy)]
 enum Shown {
     File(usize),
-    Menu(usize),
-    Action(usize),
+    Operation(usize),
     Template(usize),
     /// RFN01-107: 設定をこの語で探す行。
     Settings,
@@ -113,17 +133,16 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
             *held.borrow_mut() = Some(Palette {
                 pane,
                 files: None,
-                menu: None,
-                actions: Vec::new(),
+                operations: None,
                 templates: None,
-                only_templates: false,
+                only: None,
                 shown: Vec::new(),
             })
         });
     }
     PALETTE.with(|held| {
         if let Some(palette) = held.borrow_mut().as_mut() {
-            palette.only_templates = false;
+            palette.only = None;
         }
     });
     let text = if commands { "> " } else { "" };
@@ -136,6 +155,16 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
 /// RFN01-88 (Insert ▸ Template…): the palette with the templates only, for
 /// `pane` — the one the template goes into.
 pub fn open_templates(window: &AppWindow, live: &Live, pane: PaneId) {
+    open_list_for(window, live, pane, List::Templates);
+}
+
+/// RFN01-114: the palette with one list only (Open Recent Folder…, Choose Word
+/// Check Mode…, New Terminal (Choose Shell)…), for the pane in front.
+pub(crate) fn open_list(window: &AppWindow, live: &Live, list: List) {
+    open_list_for(window, live, focused_pane(window), list);
+}
+
+fn open_list_for(window: &AppWindow, live: &Live, pane: PaneId, list: List) {
     if window.get_title_menu_visible() {
         window.invoke_title_menu_dismissed();
     }
@@ -143,10 +172,9 @@ pub fn open_templates(window: &AppWindow, live: &Live, pane: PaneId) {
         *held.borrow_mut() = Some(Palette {
             pane,
             files: None,
-            menu: None,
-            actions: Vec::new(),
+            operations: None,
             templates: None,
-            only_templates: true,
+            only: Some(list),
             shown: Vec::new(),
         })
     });
@@ -183,33 +211,29 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
     let rows = PALETTE.with(|held| {
         let mut held = held.borrow_mut();
         let palette = held.as_mut()?;
-        if palette.only_templates {
-            let templates = palette
-                .templates
-                .get_or_insert_with(|| crate::templates_in_use(live));
-            let (rows, shown) = template_rows(templates, text.trim(), false);
+        if let Some(list) = palette.only {
+            if list == List::Templates {
+                let templates = palette
+                    .templates
+                    .get_or_insert_with(|| crate::templates_in_use(live));
+                let (rows, shown) = template_rows(templates, text.trim(), false);
+                palette.shown = shown;
+                return Some(rows);
+            }
+            let operations = palette
+                .operations
+                .get_or_insert_with(|| data_operations(window, live, Some(list)));
+            let (rows, shown) = operation_rows(operations, text.trim());
             palette.shown = shown;
             return Some(rows);
         }
         Some(match text.strip_prefix('>') {
             Some(query) => {
-                if palette.menu.is_none() {
-                    palette.menu = Some(menu_commands::menu_snapshot(window, live));
-                    palette.actions = shortcuts::palette_actions(window);
-                    // RFN01-107: 下段のTABを閉じるは、下段にTABがあるときだけ。
-                    let owner = crate::zoom_owner(window, palette.pane);
-                    let strip = crate::has_strip_tab(live, owner);
-                    palette
-                        .actions
-                        .retain(|action| strip || !shortcuts::closes_strip(action.id));
-                    // RFN01-66 第2弾: メニューの行と同じく、いま押せない操作は並べない。
-                    palette.actions.retain(|action| {
-                        menu_commands::key_allowed(window, live, palette.pane, action.id)
-                            == menu_commands::Allowed::Yes
-                    });
-                }
-                let menu = palette.menu.as_ref()?;
-                let (mut rows, mut shown) = command_rows(menu, &palette.actions, query.trim());
+                let pane = palette.pane;
+                let operations = palette
+                    .operations
+                    .get_or_insert_with(|| operations_now(window, live, pane));
+                let (mut rows, mut shown) = operation_rows(operations, query.trim());
                 // RFN01-88: each template is an operation of its own here.
                 let templates = palette
                     .templates
@@ -267,8 +291,13 @@ fn accept(window: &AppWindow, live: &Live) {
         let shown = *palette.shown.get(usize::try_from(selected).ok()?)?;
         let chosen = match shown {
             Shown::File(at) => Chosen::File(palette.files.as_ref()?.get(at)?.path.clone()),
-            Shown::Menu(at) => Chosen::Menu(at),
-            Shown::Action(at) => Chosen::Action(palette.actions.get(at)?.id),
+            Shown::Operation(at) => {
+                let operation = palette.operations.as_ref()?.get(at)?;
+                Chosen::Operation(
+                    operation.command.clone(),
+                    crate::i18n::pick(&operation.title.0, &operation.title.1).to_owned(),
+                )
+            }
             Shown::Template(at) => {
                 Chosen::Template(palette.templates.as_ref()?.get(at)?.path.clone())
             }
@@ -284,9 +313,6 @@ fn accept(window: &AppWindow, live: &Live) {
     }) else {
         return;
     };
-    // The menu snapshot holds the pane it was made for, so it is taken out
-    // before the palette is put away.
-    let menu = PALETTE.with(|held| held.borrow_mut().as_mut().and_then(|p| p.menu.take()));
     close(window);
     let weak = window.as_weak();
     let live = live.clone();
@@ -297,12 +323,10 @@ fn accept(window: &AppWindow, live: &Live) {
         };
         match chosen {
             Chosen::File(path) => open_path_in_focused_pane(&window, &live, &path, Opening::Kept),
-            Chosen::Menu(at) => {
-                if let Some(menu) = &menu {
-                    menu.run(&window, &live, at);
-                }
+            Chosen::Operation(command, name) => {
+                let target = menu_commands::Target::for_pane(&window, &live, pane);
+                menu_commands::run(&window, &live, &target, command, &name);
             }
-            Chosen::Action(id) => shortcuts::run_command(&window, &live, pane, id),
             Chosen::Template(path) => crate::insert_template(&window, &live, pane, &path),
             Chosen::Settings(query) => {
                 crate::open_settings_searching(&window, &live, &query, false)
@@ -313,29 +337,30 @@ fn accept(window: &AppWindow, live: &Live) {
 
 /// RFN01-107（書き手と合意 2026-11-05）: 行の鍵の印。設定のKeysを、その操作の名前で絞って開く
 /// ——割り当ては今のKeysの画面で行う（VS Codeの歯車と同じ考え方）。
+///
+/// RFN01-114: **その操作の行だけ**に絞って開く（名前の字で探し直さない）。
 fn assign(window: &AppWindow, live: &Live, index: i32) {
-    let name = usize::try_from(index)
+    let id = usize::try_from(index)
         .ok()
         .and_then(|at| window.get_palette_rows().row_data(at))
         .map(|row| row.assign.to_string())
         .unwrap_or_default();
-    if name.is_empty() {
+    let Some(at) = crate::actions::index_of(&id) else {
         return;
-    }
+    };
     close(window);
     let weak = window.as_weak();
     let live = live.clone();
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         if let Some(window) = weak.upgrade() {
-            crate::open_settings_searching(&window, &live, &name, true);
+            crate::open_keys_for(&window, &live, at);
         }
     });
 }
 
 enum Chosen {
     File(PathBuf),
-    Menu(usize),
-    Action(i32),
+    Operation(menu_commands::Command, String),
     Template(PathBuf),
     Settings(String),
 }
@@ -573,12 +598,6 @@ pub(crate) fn score(query: &str, text: &str) -> Option<i64> {
     Some(points)
 }
 
-/// 同じ操作かを名前で見るときの形。**末尾の「…」は見ない**——メニューの「行へ移動…」と
-/// キーの一覧の「行へ移動」は同じ操作である。
-fn same_name(text: &str) -> String {
-    fold(text.trim_end_matches(['…', '.']))
-}
-
 fn fold(text: &str) -> String {
     text.chars()
         .map(|c| match c {
@@ -638,58 +657,130 @@ fn file_rows(files: &[FileCandidate], query: &str) -> (Vec<PaletteRow>, Vec<Show
     )
 }
 
-fn command_rows(
-    menu: &menu_commands::MenuSnapshot,
-    actions: &[shortcuts::PaletteAction],
-    query: &str,
-) -> (Vec<PaletteRow>, Vec<Shown>) {
-    let mut found: Vec<(i64, Shown, PaletteRow)> = Vec::new();
-    let mut names = std::collections::HashSet::new();
-    for (at, entry) in menu.entries.iter().enumerate() {
-        // RFN01-107: 倍率の刻み（50%〜240%）は並べない。拡大・縮小・既定に戻すで足りる。
-        if !entry.enabled || menu.zoom_step(at) {
-            continue;
-        }
-        let leaf = entry.title.rsplit(" › ").next().unwrap_or(&entry.title);
-        names.insert(same_name(leaf));
-        let other_leaf = entry.other.rsplit(" › ").next().unwrap_or(&entry.other);
-        let points = score(query, &entry.title)
-            .or_else(|| score(query, &entry.other))
-            .or_else(|| alias_score(query, leaf, other_leaf));
-        if let Some(points) = points {
-            let (upper, lower) = two_lines(&entry.title, &entry.other);
-            found.push((
-                points,
-                Shown::Menu(at),
-                PaletteRow {
-                    title: upper.into(),
-                    detail: lower.into(),
-                    key: entry.key.clone().into(),
-                    assign: assign_name(leaf).into(),
-                },
-            ));
+/// RFN01-114: いま実行できる操作。アクションの表の行（Quick Draftの中の操作を除く）と、
+/// 書き手のデータの行。**前提は1つの答え**（`menu_commands::allowed_for`）。
+fn operations_now(window: &AppWindow, live: &Live, pane: PaneId) -> Vec<Operation> {
+    let mut found: Vec<Operation> = crate::actions::all()
+        .iter()
+        .enumerate()
+        .filter_map(|(at, action)| {
+            let command = action.command.clone()?;
+            (menu_commands::allowed_for(window, live, pane, &command)
+                == menu_commands::Allowed::Yes)
+                .then(|| Operation {
+                    title: action.title.clone(),
+                    description: action.description.clone(),
+                    key: shortcuts::label(window, at),
+                    command,
+                    action: Some(at),
+                })
+        })
+        .collect();
+    found.extend(
+        data_operations(window, live, None)
+            .into_iter()
+            .filter(|operation| {
+                menu_commands::allowed_for(window, live, pane, &operation.command)
+                    == menu_commands::Allowed::Yes
+            }),
+    );
+    found
+}
+
+/// 書き手のデータの行：最近のフォルダ・単語チェックのモード・シェル（テンプレートは別に並べる）。
+/// `only`なら、その一覧だけ。
+fn data_operations(window: &AppWindow, live: &Live, only: Option<List>) -> Vec<Operation> {
+    let wants = |list| only.is_none() || only == Some(list);
+    let mut found = Vec::new();
+    if wants(List::Recent) {
+        for path in crate::offered_folders(live) {
+            let name = path.display().to_string();
+            found.push(Operation {
+                title: (
+                    format!("最近のフォルダ：{name}"),
+                    format!("Recent Folder: {name}"),
+                ),
+                description: (
+                    "このフォルダを作業フォルダにします。".to_owned(),
+                    "Makes this folder the work folder.".to_owned(),
+                ),
+                key: String::new(),
+                command: menu_commands::Command::Recent(path),
+                action: None,
+            });
         }
     }
-    for (at, action) in actions.iter().enumerate() {
-        if names.contains(&same_name(&action.title)) {
+    if wants(List::WordModes) {
+        for mode in crate::word_modes_now() {
+            found.push(Operation {
+                title: (
+                    format!("単語チェック：{}", mode.name),
+                    format!("Word Check: {}", mode.name),
+                ),
+                description: (
+                    "いまの文書の単語チェックを、このモードにします。".to_owned(),
+                    "Uses this word check mode for the current document.".to_owned(),
+                ),
+                key: String::new(),
+                command: menu_commands::Command::Word(mode.id),
+                action: None,
+            });
+        }
+    }
+    if wants(List::Shells) {
+        for (at, shell) in crate::configured_shells(window).iter().enumerate() {
+            found.push(Operation {
+                title: (
+                    format!("新しいTerminal：{}", shell.name),
+                    format!("New Terminal: {}", shell.name),
+                ),
+                description: (
+                    "このシェルで、新しいTerminalのTABを開きます。".to_owned(),
+                    "Opens a new Terminal tab with this shell.".to_owned(),
+                ),
+                key: String::new(),
+                command: menu_commands::Command::NewTerminal(at as i32),
+                action: None,
+            });
+        }
+    }
+    found
+}
+
+/// 「Title（Description）」を、上の段に日本語・下の段に英語で（書き手の求め 2026-11-05：説明を
+/// 出し、英語でも探せるように）。英語の画面では英語の1段だけ（`two_lines`）。探すのはTitleの両方の
+/// 言葉と、別名。
+fn operation_rows(operations: &[Operation], query: &str) -> (Vec<PaletteRow>, Vec<Shown>) {
+    let mut found: Vec<(i64, Shown, PaletteRow)> = Vec::new();
+    for (at, operation) in operations.iter().enumerate() {
+        let (ja, en) = (&operation.title.0, &operation.title.1);
+        let points = score(query, ja)
+            .or_else(|| score(query, en))
+            .or_else(|| alias_score(query, ja, en));
+        let Some(points) = points else {
             continue;
-        }
-        let points = score(query, &action.title)
-            .or_else(|| score(query, &action.other))
-            .or_else(|| alias_score(query, &action.title, &action.other));
-        if let Some(points) = points {
-            let (upper, lower) = two_lines(&action.title, &action.other);
-            found.push((
-                points,
-                Shown::Action(at),
-                PaletteRow {
-                    title: upper.into(),
-                    detail: lower.into(),
-                    key: action.key.clone().into(),
-                    assign: assign_name(&action.title).into(),
-                },
-            ));
-        }
+        };
+        let japanese = format!("{ja}（{}）", operation.description.0.trim_end_matches('。'));
+        let english = format!("{en} ({})", operation.description.1.trim_end_matches('.'));
+        let (upper, lower) = if crate::i18n::japanese() {
+            two_lines(&japanese, &english)
+        } else {
+            two_lines(&english, &japanese)
+        };
+        found.push((
+            points,
+            Shown::Operation(at),
+            PaletteRow {
+                title: upper.into(),
+                detail: lower.into(),
+                key: operation.key.clone().into(),
+                assign: operation
+                    .action
+                    .map(|at| crate::actions::all()[at].id.clone())
+                    .unwrap_or_default()
+                    .into(),
+            },
+        ));
     }
     if !query.is_empty() {
         found.sort_by_key(|(points, _, _)| std::cmp::Reverse(*points));
@@ -699,15 +790,6 @@ fn command_rows(
         .into_iter()
         .map(|(_, shown, row)| (row, shown))
         .unzip()
-}
-
-/// RFN01-107: 鍵の印を出すなら、Keysを絞る名前（いまの言語の表示）。出さないなら空。
-fn assign_name(name: &str) -> String {
-    if shortcuts::assignable(name) {
-        name.to_owned()
-    } else {
-        String::new()
-    }
 }
 
 /// RFN01-107（書き手の求め 2026-11-05）: **名前に無い言葉でも引けるように。**「Terminalを

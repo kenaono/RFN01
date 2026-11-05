@@ -806,16 +806,28 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
             .all(|tab| !Rc::ptr_eq(&tab.document, &deleting))
     );
     crate::shortcuts::wire(&window, &live);
-    window.set_shortcut_selected(1);
+    // RFN01-114: Keysの行の番号はアクションの表の位置（IDから引く）。
+    let id = |name: &str| crate::actions::index_of(name).unwrap() as i32;
+    let save_id = id("file.save");
+    window.set_shortcut_selected(save_id);
     window.set_shortcut_edit("Ctrl+O".into());
     window.invoke_shortcut_save(false);
     assert!(window.get_shortcut_status().contains("割り当て済み"));
     window.invoke_shortcut_capture("s".into(), true, true, false);
     assert_eq!(window.get_shortcut_edit(), "Ctrl+Alt+S");
-    assert_eq!(window.get_shortcut_keys().row_data(1).unwrap(), "Ctrl+S");
+    assert_eq!(
+        window
+            .get_shortcut_keys()
+            .row_data(save_id as usize)
+            .unwrap(),
+        "Ctrl+S"
+    );
     window.invoke_shortcut_save(false);
     assert_eq!(
-        window.get_shortcut_keys().row_data(1).unwrap(),
+        window
+            .get_shortcut_keys()
+            .row_data(save_id as usize)
+            .unwrap(),
         "Ctrl+Alt+S"
     );
     let saves = Rc::new(Cell::new(0));
@@ -834,7 +846,13 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     slint::platform::update_timers_and_animations();
     assert_eq!(saves.get(), 1, "new binding dispatches save");
     window.invoke_shortcut_save(true);
-    assert_eq!(window.get_shortcut_keys().row_data(1).unwrap(), "Ctrl+S");
+    assert_eq!(
+        window
+            .get_shortcut_keys()
+            .row_data(save_id as usize)
+            .unwrap(),
+        "Ctrl+S"
+    );
     window.set_shortcut_query("".into());
     window.invoke_shortcut_filter();
     let keys_in = |category: i32| {
@@ -844,13 +862,13 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
             .filter(|row| !row.header && row.category == category)
             .count()
     };
-    assert_eq!(keys_in(5), 12);
+    assert_eq!(keys_in(7), 8);
     // A folded group keeps its heading and hides its keys.
-    window.invoke_shortcut_fold(5);
-    assert_eq!(keys_in(5), 0);
-    window.invoke_shortcut_fold(5);
-    assert_eq!(keys_in(5), 12);
-    window.set_shortcut_selected(24);
+    window.invoke_shortcut_fold(7);
+    assert_eq!(keys_in(7), 0);
+    window.invoke_shortcut_fold(7);
+    assert_eq!(keys_in(7), 8);
+    window.set_shortcut_selected(id("edit.kill-line"));
     window.invoke_shortcut_capture("k".into(), true, true, false);
     window.invoke_shortcut_save(false);
     let kills = Rc::new(Cell::new(0));
@@ -866,7 +884,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     slint::platform::update_timers_and_animations();
     assert_eq!(kills.get(), 1);
     window.invoke_shortcut_save(true);
-    window.set_shortcut_selected(10);
+    window.set_shortcut_selected(id("view.quick-draft"));
     window.invoke_shortcut_capture("q".into(), true, true, false);
     window.invoke_shortcut_save(false);
     let drafts = Rc::new(Cell::new(0));
@@ -876,7 +894,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     slint::platform::update_timers_and_animations();
     assert_eq!(drafts.get(), 1);
     window.invoke_shortcut_save(true);
-    window.set_shortcut_selected(1);
+    window.set_shortcut_selected(save_id);
     let modes = Rc::new(RefCell::new(Vec::new()));
     let received = modes.clone();
     window.on_pane_direction_toggled(move |_| received.borrow_mut().push("direction"));
@@ -884,7 +902,11 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     window.on_pane_preview_toggled(move |_| received.borrow_mut().push("preview"));
     let received = modes.clone();
     window.on_pane_viewer_toggled(move |_| received.borrow_mut().push("viewer"));
-    for (command, key) in [(42, "r"), (43, "p"), (44, "v")] {
+    for (command, key) in [
+        (id("layout.toggle-direction"), "r"),
+        (id("view.toggle-preview"), "p"),
+        (id("view.toggle-viewer"), "v"),
+    ] {
         window.set_shortcut_selected(command);
         window.invoke_shortcut_capture(key.into(), true, true, false);
         window.invoke_shortcut_save(false);
@@ -911,7 +933,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     assert_eq!(&*modes.borrow(), &["direction", "preview", "viewer"]);
     let pane = focused_pane(&window);
     live.states.of(pane).borrow_mut().viewer = true;
-    window.set_shortcut_selected(43);
+    window.set_shortcut_selected(id("view.toggle-preview"));
     window.invoke_shortcut_capture("p".into(), true, true, false);
     window.invoke_shortcut_save(false);
     assert!(window.invoke_shortcut_key("p".into(), true, true, false));
@@ -926,7 +948,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     draft_window.on_copied(move || received.borrow_mut().push("copied"));
     let received = copied_then_closed.clone();
     draft_window.on_copy_and_close(move || received.borrow_mut().push("closed"));
-    window.set_shortcut_selected(39);
+    window.set_shortcut_selected(id("draft.copy-and-close"));
     window.invoke_shortcut_capture("q".into(), true, true, false);
     window.invoke_shortcut_save(false);
     assert!(draft_window.invoke_shortcut_key("q".into(), true, true, false));
@@ -934,17 +956,17 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     assert_eq!(&*copied_then_closed.borrow(), &["copied", "closed"]);
     window.invoke_shortcut_save(true);
     assert!(!draft_window.invoke_shortcut_key("q".into(), true, true, false));
-    window.set_shortcut_selected(1);
+    window.set_shortcut_selected(save_id);
     window.set_shortcut_query("保存".into());
     window.invoke_shortcut_filter();
-    assert_eq!(
-        window
-            .get_shortcut_rows()
-            .iter()
-            .filter(|row| !row.header)
-            .count(),
-        2
-    );
+    let named: Vec<_> = window
+        .get_shortcut_rows()
+        .iter()
+        .filter(|row| !row.header)
+        .map(|row| row.name.to_string())
+        .collect();
+    assert!(named.iter().all(|name| name.contains("保存")), "{named:?}");
+    assert!(named.contains(&"保存".to_owned()) && named.contains(&"名前を付けて保存…".to_owned()));
     // Pressing a key finds what it is bound to, fixed keys included.
     window.set_shortcut_query("".into());
     window.invoke_shortcut_key_search("o".into(), true, false, false);
@@ -954,7 +976,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
         .filter(|row| !row.header)
         .map(|row| row.name.to_string())
         .collect();
-    assert_eq!(found, ["ファイルを開く"]);
+    assert_eq!(found, ["ファイルを開く…"]);
     window.invoke_shortcut_key_search("v".into(), true, false, false);
     assert_eq!(
         window

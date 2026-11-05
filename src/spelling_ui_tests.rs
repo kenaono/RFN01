@@ -138,13 +138,13 @@ fn spelling_is_checked_marked_and_fixed_from_the_right_click() {
     assert_eq!(selected(live), "the", "wraps back to the end");
 
     // 既定のキーはF8／Shift+F8（設定のKeysで変えられる、メニューの行にも併記する）。
-    use crate::menu_commands::ShortcutAction;
+    use crate::menu_commands::Command;
     assert_eq!(
-        crate::shortcuts::action_label(window, ShortcutAction::SpellingStep(false)),
+        crate::shortcuts::label_of(window, &Command::SpellingStep(false)),
         "F8"
     );
     assert_eq!(
-        crate::shortcuts::action_label(window, ShortcutAction::SpellingStep(true)),
+        crate::shortcuts::label_of(window, &Command::SpellingStep(true)),
         "Shift+F8"
     );
 

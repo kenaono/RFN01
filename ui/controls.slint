@@ -300,6 +300,7 @@ export enum MenuAction {
     find-terminal, latest, save-output, clear-screen, clear-history,
     selection-to-panel, history-to-panel, last-output-to-panel, copy-last-output,
     file-log, panel-log,
+    toggle-direction, toggle-preview, toggle-viewer,
 }
 
 /// RFN01-66 第2弾: 上の操作の窓口。**メニューを開く直前に`refresh()`**（対象は前にあるペイン）、
@@ -309,6 +310,10 @@ export global MenuActions {
     callback refresh();
     callback run(MenuAction);
     pure callback allowed(MenuAction, int) -> bool;
+    /// RFN01-114: 行に併記するキー（アクションの表の割り当て）。`keys-generation`は割り当てが
+    /// 変わるたびに進む——引数に渡して、読み直させる。
+    in-out property <int> keys-generation: 0;
+    pure callback key(MenuAction, int) -> string;
 }
 
 /// 「終わりまで」を表す選択の終端（`Field`）。**位置ではなく合図**なので、
