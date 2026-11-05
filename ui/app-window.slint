@@ -38,12 +38,18 @@ export { BookmarkRow } from "bookmark-view.slint";
 /// 数えられない——一覧の中では見出しとして立つ。
 /// RFN01-87: コマンドパレットの候補の1行。ファイルなら名前とフォルダ、操作なら
 /// メニューの道と割り当て済みのキー。
+export struct PalettePart {
+    text: string,
+    matched: bool,
+}
 export struct PaletteRow {
     title: string,
     detail: string,
     key: string,
     /// RFN01-107: キーに割り当てられる操作なら、Keysを絞る名前。空なら鍵の印を出さない。
     assign: string,
+    title-parts: [PalettePart],
+    detail-parts: [PalettePart],
 }
 // Keys の面の1行（書き手の求め 2026-09-15）。分類の見出しか、キーの行か。
 export struct ShortcutItem {
@@ -140,6 +146,60 @@ export struct LeftRow {
     // header above the rows is not a valid drop target while any root row is
     // shown. Only the tree ever sets this; the other panels leave it false.
     is-root: bool,
+}
+
+component PaletteLine inherits Rectangle {
+    in property <string> value;
+    in property <[PalettePart]> parts;
+    in property <color> ink;
+    in property <length> size;
+
+    if root.parts.length == 0: Text {
+        x: 0px; y: 0px;
+        width: parent.width;
+        height: parent.height;
+        text: root.value;
+        color: root.ink;
+        font-size: root.size;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    if root.parts.length > 0: Rectangle {
+        x: 0px; y: 0px;
+        width: parent.width;
+        height: parent.height;
+        property <bool> clipped: runs.preferred-width > self.width;
+        Rectangle {
+            x: 0px; y: 0px;
+            width: max(0px, parent.width - (parent.clipped ? dots.preferred-width : 0px));
+            height: parent.height;
+            clip: true;
+            runs := HorizontalLayout {
+                x: 0px; y: 0px;
+                width: self.preferred-width;
+                height: parent.height;
+                alignment: start;
+                spacing: 0px;
+                for part in root.parts: Text {
+                    text: part.text;
+                    color: part.matched ? Tok.accent-strong : root.ink;
+                    font-size: root.size;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        dots := Text {
+            x: parent.width - self.preferred-width;
+            width: self.preferred-width;
+            height: parent.height;
+            text: "…";
+            color: root.ink;
+            font-size: root.size;
+            vertical-alignment: center;
+            visible: parent.clipped;
+        }
+    }
 }
 
 export component AppWindow inherits Window {
@@ -7397,25 +7457,23 @@ export component AppWindow inherits Window {
                 width: parent.width;
                 border-radius: 4px;
                 background: index == root.palette-selected ? Tok.accent-soft : (palette-row-touch.has-hover ? Tok.accent-faint : transparent);
-                Text {
+                PaletteLine {
                     x: 10px; y: 2px;
                     width: parent.width - 20px - (row.key != "" ? 110px : 0px) - (row.assign != "" ? 28px : 0px);
                     height: row.detail != "" ? 17px : parent.height - 4px;
-                    text: row.title;
-                    color: Tok.ink;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    overflow: elide;
+                    value: row.title;
+                    parts: row.title-parts;
+                    ink: Tok.ink;
+                    size: 12px;
                 }
-                if row.detail != "": Text {
+                if row.detail != "": PaletteLine {
                     x: 10px; y: 18px;
                     width: parent.width - 20px - (row.key != "" ? 110px : 0px) - (row.assign != "" ? 28px : 0px);
                     height: 14px;
-                    text: row.detail;
-                    color: Tok.ink-faint;
-                    font-size: 10px;
-                    vertical-alignment: center;
-                    overflow: elide;
+                    value: row.detail;
+                    parts: row.detail-parts;
+                    ink: Tok.ink-faint;
+                    size: 10px;
                 }
                 if row.key != "": Text {
                     x: parent.width - 120px - (row.assign != "" ? 28px : 0px); width: 110px; height: parent.height;

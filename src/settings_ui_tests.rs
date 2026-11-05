@@ -1767,23 +1767,57 @@ fn the_palette_shows_titles_and_descriptions_from_the_action_table() {
     };
     command_palette::open(window, live, true);
     let found = rows("> 名前を付けて保存");
+    if let Ok(path) = std::env::var("EDITOR_PALETTE_SNAPSHOT") {
+        window.set_custom_title(true);
+        window.set_palette_text("> 名前を付けて保存".into());
+        window.show().unwrap();
+        slint::platform::update_timers_and_animations();
+        window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+        harness.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1000);
+        });
+        let mut ppm = b"P6\n1000 740\n255\n".to_vec();
+        for pixel in pixels {
+            ppm.extend([pixel.r, pixel.g, pixel.b]);
+        }
+        std::fs::write(path, ppm).unwrap();
+        window.hide().unwrap();
+    }
     let save_as = found
         .iter()
-        .find(|row| row.title.starts_with("名前を付けて保存…（"))
+        .find(|row| row.title.starts_with("ファイル: 名前を付けて保存…（"))
         .expect("Save As is listed");
     // 上の段は日本語の「Title（Description）」、下の段は英語（書き手の求め 2026-11-05）。
     assert!(save_as.title.contains("名前と場所"), "{}", save_as.title);
     assert!(
-        save_as.detail.starts_with("Save As… ("),
+        save_as.detail.starts_with("File: Save As… ("),
         "{}",
         save_as.detail
     );
-    assert!(!save_as.title.contains('›'), "no menu path");
+    assert!(!save_as.title.contains('›'), "one category");
+    assert!(
+        save_as
+            .title_parts
+            .iter()
+            .any(|part| { part.matched && part.text.as_str() == "名前を付けて保存" })
+    );
+    let unfiltered = rows(">");
+    let categories: Vec<_> = unfiltered
+        .iter()
+        .filter_map(|row| {
+            let (category, _) = row.title.split_once(": ")?;
+            crate::actions::Category::ALL
+                .iter()
+                .position(|candidate| candidate.title().0 == category)
+        })
+        .collect();
+    assert!(categories.len() > 1 && categories.is_sorted());
     // 英語でも探せる。
     assert!(
         rows("> save as")
             .iter()
-            .any(|row| row.title.starts_with("名前を付けて保存…"))
+            .any(|row| row.title.starts_with("ファイル: 名前を付けて保存…"))
     );
     assert_eq!(save_as.assign.as_str(), "file.save-as");
     assert_eq!(save_as.key.as_str(), "Ctrl+Shift+S");
@@ -1792,7 +1826,7 @@ fn the_palette_shows_titles_and_descriptions_from_the_action_table() {
     assert!(
         utf8.iter().any(|row| row
             .title
-            .starts_with("文字コードを指定して開き直す：UTF-8（")),
+            .starts_with("ファイル: 文字コードを指定して開き直す：UTF-8（")),
         "{:?}",
         utf8.iter()
             .map(|row| row.title.to_string())
