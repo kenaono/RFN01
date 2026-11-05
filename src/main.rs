@@ -574,6 +574,15 @@ fn zoom_owner(window: &AppWindow, id: PaneId) -> PaneId {
     }
 }
 
+/// RFN01-107: このペインの前に出ているTABに、下段のTAB（Editor Panel・Terminal Panel）があるか。
+pub(crate) fn has_strip_tab(live: &Live, id: PaneId) -> bool {
+    live.tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| !tab.below.entries.is_empty() || tab.below.shell.is_some())
+}
+
 /// 倍率を、そのペインで前に出ているTABへ書き込む（書き手の求め 2026-11-05）。
 ///
 /// **変えたその場で。**TABの見え方は切り替えるときに写し取るが、前に出ているTABを
@@ -13382,6 +13391,31 @@ fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
 /// Otherwise it opens in the pane the writer is in — and **a New Tab becomes
 /// it** rather than gaining a neighbour, for the reason a shell or a file does
 /// (追加要件 2026-09-07).
+/// RFN01-107（書き手と合意 2026-11-05）: 設定のTABを、この語で探した状態で開く。設定の検索は
+/// 設定のTABで開いた検索欄の語なので（`settings-query`）、TABを開いてその欄に語を入れて開く。
+/// パレットの「設定で…を探す」と、行の鍵の印（Keysをその操作で絞る）が使う。
+pub(crate) fn open_settings_searching(window: &AppWindow, live: &Live, query: &str) {
+    open_settings(window, live);
+    let id = focused_pane(window);
+    if !live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| tab.settings)
+    {
+        return;
+    }
+    id.update_screen(window, |screen| {
+        screen.find_needle = query.into();
+    });
+    window.set_find_pane(id.index());
+    window.set_find_replacing(false);
+    window.set_find_focus(true);
+    window.set_find_open(true);
+    window.set_find_generation(window.get_find_generation() + 1);
+}
+
 fn open_settings(window: &AppWindow, live: &Live) {
     if focused_pane(window).is_panel() {
         window.set_focused_pane(focused_pane(window).screen(window).panel_owner);

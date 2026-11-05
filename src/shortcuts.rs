@@ -392,6 +392,29 @@ const TEXT_ACTIONS: &[MenuAction] = &[
         ShortcutAction::Palette(true)
     ),
 ];
+/// RFN01-107（書き手の求め 2026-11-05）: 下段の操作。Pane・TABの分類に並べるが、**idは
+/// いちばん後ろ**——`PANE_ACTIONS`に足すと、後ろの`TEXT_ACTIONS`の割り当てがずれる。
+const STRIP_ACTIONS: &[MenuAction] = &[menu_action!(
+    "下段のTABを閉じる",
+    "Close Strip Tab",
+    "",
+    ShortcutAction::CloseStripTab
+)];
+
+/// RFN01-107: この操作が「下段のTABを閉じる」か（パレットは下段が無ければ出さない）。
+pub(crate) fn closes_strip(id: i32) -> bool {
+    usize::try_from(id)
+        .ok()
+        .and_then(menu_at)
+        .is_some_and(|(action, _)| action.action == ShortcutAction::CloseStripTab)
+}
+
+/// RFN01-107: この名前（いまの言語の表示）の操作がキーに割り当てられるか。パレットの行に
+/// 鍵の印を出すかを決める。メニューの行は道の最後の名前で訊く。
+pub(crate) fn assignable(name: &str) -> bool {
+    (0..count()).any(|id| scope_at(id) == 0 && shown(name_at(id)) == name)
+}
+
 /// ファイルの分類に並べる、メニューから来た操作。
 ///
 /// **新規文書だけは既定を持つ**（`Ctrl+N`、書き手の合意 2026-09-21）——Windowsの
@@ -526,6 +549,7 @@ fn count() -> usize {
         + RUN_ACTIONS.len()
         + PANE_ACTIONS.len()
         + TEXT_ACTIONS.len()
+        + STRIP_ACTIONS.len()
 }
 /// idがメニューから来たものなら、その1つと分類の番号。
 fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
@@ -555,6 +579,16 @@ fn menu_at(id: usize) -> Option<(&'static MenuAction, i32)> {
             TEXT_ACTIONS
                 .get(index - before)
                 .map(|action| (action, TEXT_CATEGORY))
+        })
+        .or_else(|| {
+            let before = FILE_ACTIONS.len()
+                + INSERT_ACTIONS.len()
+                + RUN_ACTIONS.len()
+                + PANE_ACTIONS.len()
+                + TEXT_ACTIONS.len();
+            STRIP_ACTIONS
+                .get(index - before)
+                .map(|action| (action, PANE_CATEGORY))
         })
 }
 fn name_at(id: usize) -> (&'static str, &'static str) {

@@ -1577,3 +1577,6 @@ msgstr "既定の倍率"
 
 msgid "Explorer isn't available while a Workspace is in use"
 msgstr "Workspaceを使用中はExplorerを使えません"
+
+msgid "Change Keyboard Shortcut"
+msgstr "キーの割り当てを変える"
