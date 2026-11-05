@@ -909,14 +909,15 @@ pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shif
 /// because a fold hiding the one match is a search that found nothing.
 pub fn publish(app: &AppWindow) {
     let keys = bindings(&app.get_shortcut_bindings());
-    let query = app.get_shortcut_query().to_lowercase();
+    // 書き手の報告 2026-11-05: 設定の項目と同じそろえ方で（全角・半角、大文字・小文字）。
+    let query = crate::fold_for_search(app.get_shortcut_query().trim());
     let key_query = app.get_shortcut_key_query().to_string();
     let folded = app.get_shortcut_folded();
     let searching = !query.is_empty() || !key_query.is_empty();
     let matches = |name: &str, key: &str| {
         (query.is_empty()
-            || name.to_lowercase().contains(&query)
-            || key.to_lowercase().contains(&query))
+            || crate::fold_for_search(name).contains(&query)
+            || crate::fold_for_search(key).contains(&query))
             && (key_query.is_empty() || key == key_query)
     };
     let mut rows = Vec::new();

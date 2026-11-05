@@ -1738,3 +1738,28 @@ fn the_palette_lists_operations_by_other_words_and_offers_settings() {
     assert!(window.get_find_open());
     assert_eq!(id.screen(window).find_needle.as_str(), "倍率");
 }
+
+/// 書き手の報告 2026-11-05: 設定の検索でIMEから打った「閉じたＴＡＢ」（全角）が、キーの一覧で
+/// 見つからなかった。項目の名前と同じく、全角・半角と大文字・小文字をそろえて探す。
+#[test]
+fn the_key_list_is_searched_with_full_width_letters_too() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("keys-width");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
+    let window = &harness.window;
+    for query in ["閉じたＴＡＢ", "閉じたtab", " 閉じたTAB "] {
+        window.set_shortcut_query(query.into());
+        shortcuts::publish(window);
+        let names: Vec<String> = window
+            .get_shortcut_rows()
+            .iter()
+            .map(|row| row.name.to_string())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|name| name.contains("閉じたTABを開き直す")),
+            "{query:?}: {names:?}"
+        );
+    }
+}

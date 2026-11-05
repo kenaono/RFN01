@@ -4470,7 +4470,13 @@ export component AppWindow inherits Window {
                                         // 黒地で使う人が多く、要件9のシート（原稿の紙）と同じ値で決める
                                         // ものではない。書字方向も持たないので、シートを選ぶ釦はここにも
                                         // 無い。
-                                        if root.shows-group(1, []): VerticalLayout {
+                                        // 書き手の報告 2026-11-05: **探しているあいだは、名前が合うときだけ。**ラベルを
+                                        // 渡していなかったので、どの語で探してもこの面がまるごと出て、結果を埋めていた。
+                                        if root.shows-group(1, ["Terminal", "Editor Panel", "Terminal Panel", "WSL", "PowerShell", "cmd",
+                                                @tr("Profile name"), @tr("Executable"), @tr("Arguments"), @tr("Start folder"), @tr("Default"),
+                                                @tr("Confirm multiline paste"), @tr("Confirm shell termination"), @tr("Restore output after restart"),
+                                                @tr("History lines"), @tr("Timestamp format"), @tr("Background"), @tr("Font"), @tr("Size"),
+                                                @tr("Text Color"), @tr("Transparency"), @tr("Bold"), @tr("Italic"), @tr("Underline")]): VerticalLayout {
                                             spacing: 8px; alignment: start; vertical-stretch: 0;
                                             ComboBox {
                                                 width: 260px; height: 30px; horizontal-stretch: 0; vertical-stretch: 0;

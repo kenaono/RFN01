@@ -5585,17 +5585,22 @@ impl StatusBar for AppWindow {
 ///
 /// **大文字小文字と全角半角を問わない**——英語の画面で`font`と打っても`Font`に、日本語の画面で
 /// 全角の`Ｈ１`と打っても`H1`に当たる。語の前後の空白は見ない。
+/// 設定を探すときの字のそろえ方：全角の英数字・記号と全角空白を半角へ、大文字を小文字へ。
+/// 書き手の報告 2026-11-05: **キーの一覧も同じそろえ方で探す**（`shortcuts::publish`）。IMEで
+/// 打った「閉じたＴＡＢ」が、項目の名前は見つかるのにキーの一覧では見つからなかった。
+pub(crate) fn fold_for_search(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            _ => c,
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 fn settings_match(query: &str, labels: impl IntoIterator<Item = SharedString>) -> bool {
-    let fold = |text: &str| -> String {
-        text.chars()
-            .map(|c| match c {
-                '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
-                '\u{3000}' => ' ',
-                _ => c,
-            })
-            .flat_map(char::to_lowercase)
-            .collect()
-    };
+    let fold = fold_for_search;
     let query = fold(query.trim());
     query.is_empty()
         || labels
