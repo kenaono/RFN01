@@ -251,8 +251,11 @@ pub(crate) fn ime_around(state: &EditorState, source: &str) -> (ime::Around, usi
     let from = floor_boundary(source, caret.saturating_sub(IME_REACH).max(line_start));
     let to = ceil_boundary(source, (caret + IME_REACH).min(line_end));
     let units = |text: &str| text.encode_utf16().count() as u32;
+    // 書き手の報告 2026-11-05（起動に失敗する）: 選択の端も、キャレットと同じく境目へそろえて
+    // から切り出す。保存されていた位置が文字の途中や本文の外を指していると、ここで落ちていた。
     let selection = selection_source_range(state)
-        .filter(|(start, end)| *start >= from && *end <= to)
+        .map(|(start, end)| (floor_boundary(source, start), ceil_boundary(source, end)))
+        .filter(|(start, end)| *start >= from && *end <= to && start < end)
         .map(|(start, end)| (units(&source[from..start]), units(&source[from..end])));
     let around = ime::Around {
         text: source[from..to].to_owned(),
@@ -325,6 +328,21 @@ mod ime_tests {
             selection_anchor_source_byte: anchor,
             ..Default::default()
         }
+    }
+
+    /// 書き手の報告 2026-11-05（起動に失敗する）: 保存されていた選択の端が文字の途中や本文の外を
+    /// 指していても、IMEに渡す文字列を作るところで落ちない。キャレットと同じく境目にそろえる。
+    #[test]
+    fn a_selection_end_inside_a_character_does_not_crash() {
+        let source = "あいうえお\nかきくけこ";
+        // 4は「い」（3..6）の途中。
+        let (around, _) = ime_around(&state_at(9, Some(4)), source);
+        assert_eq!(around.text, "あいうえお");
+        let (around, _) = ime_around(&state_at(4, Some(10)), source);
+        assert!(around.text.starts_with("あいうえお"));
+        // 本文より先を指していても。
+        let (around, _) = ime_around(&state_at(3, Some(400)), source);
+        assert_eq!(around.caret, 1);
     }
 
     #[test]
