@@ -1636,6 +1636,7 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
                             tab.provisional.set(false);
                         }
                         publish_tabs(&window, &live);
+                        restore_editor_focus(&window);
                     } else {
                         let active = live.tabs.borrow().of(id).active;
                         duplicate_tab(&window, &live, id, active);
@@ -1656,7 +1657,11 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
                         .iter()
                         .any(|tab| tab.document.file.borrow().path() == Some(path.as_path()))
                 });
+                let tree_focused = window.get_tree_focused();
                 activate_left_row(&window, &live, index);
+                if tree_focused {
+                    crate::tree_actions::restore_focus(&window);
+                }
                 // RFN01-92: **a first click that opened nothing leaves nothing to
                 // double.** A file outside the Workspace in use is refused, and
                 // the second click of its double would otherwise be taken for
@@ -1710,6 +1715,11 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
                 }
                 drop(tabs);
                 publish_tabs(&window, &live);
+                if LeftTab::from_index(window.get_left_tab()) == LeftTab::Workspace
+                    && !window.get_tree_searching()
+                {
+                    restore_editor_focus(&window);
+                }
             }
         });
     });

@@ -14152,6 +14152,13 @@ fn ask_question(
     // Described before it is handed over: a question carries a path now, so
     // storing it moves it.
     let described = question.diagnostic_name();
+    window.set_question_return_to_tree(
+        window.get_tree_focused()
+            && matches!(
+                &question,
+                Question::RenameEntry(_) | Question::DeleteEntry(_) | Question::DeleteEdited(..)
+            ),
+    );
     window.set_question_enter_sends(matches!(&question, Question::TerminalInput(_)));
     window.set_question_is_clone(matches!(&question, Question::CloneWorkspaceUrl));
     window.set_question_is_bookmark(matches!(&question, Question::AddBookmark { .. }));
@@ -14225,7 +14232,11 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     }
     window.set_question_open(false);
     // The question took the keyboard away from the pane to ask (6.14).
-    restore_editor_focus(window);
+    if window.get_question_return_to_tree() {
+        tree_actions::restore_focus(window);
+    } else {
+        restore_editor_focus(window);
+    }
     live.cache.borrow_mut().log_diag(
         "answer",
         &format!("{} choice={choice}", question.diagnostic_name()),

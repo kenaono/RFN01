@@ -86,52 +86,84 @@ impl slint::platform::Platform for Offscreen {
 }
 
 #[test]
-fn file_tree_focus_receives_keys_and_escape_returns_them_to_the_editor() {
-    use crate::saving::{Harness, open_under, scratch_directory};
+fn file_tree_keeps_focus_through_file_open_and_confirmation() {
+    use crate::saving::{Harness, scratch_directory};
     use slint::platform::{Key, PointerEventButton, WindowEvent};
 
     let root = scratch_directory("tree-key-focus");
-    let (harness, _) = Harness::new(|window| open_under(&root, "example.md", "", window));
+    let notes = root.join("notes");
+    std::fs::create_dir(&notes).unwrap();
+    let first = notes.join("one.md");
+    let second = notes.join("two.md");
+    std::fs::write(&first, "First document").unwrap();
+    std::fs::write(&second, "Second document").unwrap();
+    let (harness, untitled) = Harness::new(|window| OpenDocument::untitled(1, window));
     let window = &harness.window;
+    let live = &harness.live;
+    live.folder.borrow_mut().root = Some(root);
     window.set_tree_open(true);
-    window.set_work_folder("example".into());
-    window.set_left_rows(ModelRc::new(VecModel::from(vec![LeftRow {
-        name: "notes".into(),
-        parent: -1,
-        folder: true,
-        ..Default::default()
-    }])));
+    publish_left(window, live);
+    wiring::wire_left_panel(window, live);
+    shortcuts::wire(window, live);
+    let weak = window.as_weak();
+    let answered = live.clone();
+    window.on_question_answered(move |choice| {
+        let weak = weak.clone();
+        let live = answered.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                answer_question(&window, &live, choice);
+            }
+        });
+    });
     window.show().unwrap();
-    let draw = || {
+    let settle = || {
+        slint::platform::update_timers_and_animations();
         harness.surface.draw_if_needed(|renderer| {
             let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
             renderer.render(&mut pixels, 1000);
         });
     };
-    draw();
-    let received = Rc::new(RefCell::new(Vec::new()));
-    let events = received.clone();
-    window.on_tree_shortcut(move |key, _, _, _| {
-        events.borrow_mut().push(key);
-        true
-    });
+    settle();
     let click = |x, y| {
         let position = slint::LogicalPosition::new(x, y);
         let button = PointerEventButton::Left;
         window.window().dispatch_event(WindowEvent::PointerPressed { position, button });
         window.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+        settle();
     };
     let press = |key: Key| {
         window.window().dispatch_event(WindowEvent::KeyPressed { text: key.into() });
         window.window().dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        settle();
     };
+
     click(100.0, 57.0);
     press(Key::Tab);
     press(Key::DownArrow);
-    assert_eq!(*received.borrow(), vec![SharedString::from(Key::DownArrow)]);
+    press(Key::RightArrow);
+    press(Key::DownArrow);
+    assert_eq!(live.folder.borrow().selected.as_ref(), Some(&first));
+    press(Key::Return);
+    assert_eq!(live.active(window).file.borrow().path(), Some(first.as_path()));
+    assert!(untitled.text.borrow().is_empty());
+    assert!(window.get_tree_focused());
+
+    click(100.0, 131.0);
+    assert_eq!(live.folder.borrow().selected.as_ref(), Some(&second));
+    assert_eq!(live.active(window).file.borrow().path(), Some(second.as_path()));
+    assert!(window.get_tree_focused());
+    press(Key::F2);
+    assert!(matches!(&*live.pending.borrow(), Some(Question::RenameEntry(path)) if *path == second));
     press(Key::Escape);
+    assert!(window.get_tree_focused());
     press(Key::Delete);
-    assert_eq!(received.borrow().len(), 1);
+    assert!(matches!(&*live.pending.borrow(), Some(Question::DeleteEntry(path)) if *path == second));
+    press(Key::Escape);
+    assert!(window.get_tree_focused());
+    press(Key::Escape);
+    assert!(!window.get_tree_focused());
+    assert!(second.is_file());
 }
 
 #[test]

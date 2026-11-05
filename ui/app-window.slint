@@ -498,6 +498,8 @@ export component AppWindow inherits Window {
     callback tree-shortcut(string, bool, bool, bool) -> bool;
     in property <[TreeMenuItem]> tree-context-items;
     in-out property <int> tree-key-reveal;
+    in-out property <int> tree-focus-generation;
+    out property <bool> tree-focused;
     callback explorer-command(int);
     in-out property <int> tree-reveal-generation;
     /// Choose a row without acting on it (要件 5.2). What a right click does
@@ -583,9 +585,8 @@ export component AppWindow inherits Window {
     callback tree-search-toggled();
 
     /// RFN01-76 (`Ctrl+Shift+E`): the keyboard to the Explore pane — its
-    /// filter field, the one thing in it that takes keys (the tree has no
-    /// keyboard of its own). A Workspace showing stays; anything else is
-    /// replaced by the Explorer.
+    /// filter field. Tab moves from there to the tree. A Workspace showing
+    /// stays; anything else is replaced by the Explorer.
     public function focus-explore() {
         root.close-tree-search();
         if !root.tree-open || (root.left-tab != 0 && root.left-tab != 4) {
@@ -879,6 +880,7 @@ export component AppWindow inherits Window {
     in property <[string]> question-choices;
     in property <bool> question-enter-sends;
     in property <bool> question-open: false;
+    in property <bool> question-return-to-tree;
     // A question answered by typing a name rather than by pressing one of
     // several buttons (要件 5.2). The same overlay: a name is still a question,
     // and a second way of asking one would be a second thing to keep clear of
@@ -2664,7 +2666,12 @@ export component AppWindow inherits Window {
                         height: 0px;
                         enabled: (root.left-tab == 0 || (root.left-tab == 4 && root.workspace-active))
                             && !root.tree-searching && root.tree-new-index < 0;
+                        focus-on-tab-navigation: !root.question-open;
+                        property <int> requested-focus: root.tree-focus-generation;
+                        changed requested-focus => { if self.enabled && !root.question-open { self.focus(); } }
+                        changed has-focus => { root.tree-focused = self.has-focus; }
                         key-pressed(event) => {
+                            if root.question-open { return reject; }
                             if event.text == Key.Escape {
                                 root.left-field-escaped();
                                 return accept;
@@ -2895,7 +2902,7 @@ export component AppWindow inherits Window {
                                                 root.tree-drop-hand = -2;
                                                 root.tree-drop-into = -2;
                                             } else if (tree-row.pressing) {
-                                                if tree-keys.enabled && row.folder {
+                                                if tree-keys.enabled {
                                                     tree-keys.focus();
                                                     if root.left-tab == 4 && row.is-root {
                                                         root.tree-selected = index;

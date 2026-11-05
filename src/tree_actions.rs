@@ -123,8 +123,13 @@ pub(crate) fn execute(
                 Action::Activate if row.is_root => {}
                 Action::Activate if row.folder => set_expanded(window, live, target, !row.open),
                 Action::Activate => {
+                    let had_focus = window.get_tree_focused();
                     activate_tree_row(window, live, at);
-                    restore_editor_focus(window);
+                    if had_focus {
+                        restore_focus(window);
+                    } else {
+                        restore_editor_focus(window);
+                    }
                 }
                 Action::Left if row.folder && row.open && !row.is_root => {
                     set_expanded(window, live, target, false)
@@ -144,6 +149,10 @@ pub(crate) fn execute(
             }
         }
     }
+}
+
+pub(crate) fn restore_focus(window: &AppWindow) {
+    window.set_tree_focus_generation(window.get_tree_focus_generation().wrapping_add(1));
 }
 
 fn select(window: &AppWindow, live: &Live, at: usize) {

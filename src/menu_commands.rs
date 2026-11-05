@@ -2783,11 +2783,12 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
     }
 }
 
-/// キーボードを自分で取る操作（パレット・選ぶ一覧・左ペインの欄・設定）。
+/// キーボードを自分で扱う操作。実行前に本文へフォーカスを戻さない。
 fn takes_keyboard(command: &Command) -> bool {
     matches!(
         command,
         Command::CommandPalette(_)
+            | Command::Tree(_)
             | Command::TemplatePicker
             | Command::RecentPicker
             | Command::WordModePicker
