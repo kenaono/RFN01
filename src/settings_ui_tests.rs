@@ -1778,17 +1778,30 @@ fn the_palette_shows_titles_and_descriptions_from_the_action_table() {
     let found = rows("> 名前を付けて保存");
     let save_as = found
         .iter()
-        .find(|row| row.title == "名前を付けて保存…")
+        .find(|row| row.title.starts_with("名前を付けて保存…（"))
         .expect("Save As is listed");
-    assert!(save_as.detail.contains("名前と場所"), "{}", save_as.detail);
-    assert!(!save_as.detail.contains('›'), "no menu path");
+    // 上の段は日本語の「Title（Description）」、下の段は英語（書き手の求め 2026-11-05）。
+    assert!(save_as.title.contains("名前と場所"), "{}", save_as.title);
+    assert!(
+        save_as.detail.starts_with("Save As… ("),
+        "{}",
+        save_as.detail
+    );
+    assert!(!save_as.title.contains('›'), "no menu path");
+    // 英語でも探せる。
+    assert!(
+        rows("> save as")
+            .iter()
+            .any(|row| row.title.starts_with("名前を付けて保存…"))
+    );
     assert_eq!(save_as.assign.as_str(), "file.save-as");
     assert_eq!(save_as.key.as_str(), "Ctrl+Shift+S");
     // 下の段の項目も、それだけで分かる名前で。
     let utf8 = rows("> UTF-8");
     assert!(
-        utf8.iter()
-            .any(|row| row.title == "文字コードを指定して開き直す：UTF-8"),
+        utf8.iter().any(|row| row
+            .title
+            .starts_with("文字コードを指定して開き直す：UTF-8（")),
         "{:?}",
         utf8.iter()
             .map(|row| row.title.to_string())

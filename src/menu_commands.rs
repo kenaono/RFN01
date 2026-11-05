@@ -2513,7 +2513,11 @@ pub(crate) fn tell_unavailable(window: &AppWindow, name: &str) {
 }
 
 fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
-    restore_input(window, t.id, t.field);
+    // 書き手の報告 2026-11-05（Ctrl+Shift+Pで開いたパレットに打てない）: **キーボードを自分で
+    // 取る操作は、本文へ戻さない**——戻す合図があとから届き、開いた欄から取り返してしまう。
+    if !takes_keyboard(&command) {
+        restore_input(window, t.id, t.field);
+    }
     if t.field > 0 {
         let kind = match command {
             Command::Undo(false) => Some(0),
@@ -2743,6 +2747,24 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
             }
         }
     }
+}
+
+/// キーボードを自分で取る操作（パレット・選ぶ一覧・左ペインの欄・設定）。
+fn takes_keyboard(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::CommandPalette(_)
+            | Command::TemplatePicker
+            | Command::RecentPicker
+            | Command::WordModePicker
+            | Command::ShellPicker
+            | Command::FolderFind
+            | Command::FolderReplace
+            | Command::ExplorePane
+            | Command::ToggleLeftPane
+            | Command::ShowLeftTab(_)
+            | Command::OpenSettings
+    )
 }
 
 fn ui_action(window: &AppWindow, pane: PaneId, kind: i32) {
@@ -3262,6 +3284,31 @@ mod tests {
         window.set_left_tab(0);
         run(window, live, &target, Command::FolderReplace, "");
         assert!(window.get_tree_searching() && window.get_tree_replacing());
+    }
+
+    /// 書き手の報告 2026-11-05: Ctrl+Shift+Pで開いたパレットに打てなかった。キーボードを自分で
+    /// 取る操作は、本文へキーボードを戻す合図（`ui_action`）を出さない。
+    #[test]
+    fn opening_the_palette_does_not_send_the_keyboard_back_to_the_text() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        crate::command_palette::install(window, live);
+        let target = Target::for_shortcut(window, live);
+        let before = window.get_menu_generation();
+        run(window, live, &target, Command::CommandPalette(true), "");
+        assert!(window.get_palette_open());
+        assert_eq!(
+            window.get_menu_generation(),
+            before,
+            "no call back to the text"
+        );
+        crate::command_palette::close(window);
+        run(window, live, &target, Command::Save(false), "");
+        assert_ne!(
+            window.get_menu_generation(),
+            before,
+            "other actions still do"
+        );
     }
 
     /// RFN01-66 第3弾: **入口は`run`1つで、実行の直前に前提を確かめる。**パレットを開いたあとで

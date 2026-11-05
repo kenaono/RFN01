@@ -747,8 +747,9 @@ fn data_operations(window: &AppWindow, live: &Live, only: Option<List>) -> Vec<O
     found
 }
 
-/// 1行目にTitle、2行目にDescription（書き手のコメント 2026-11-05：メニューの道ではなく説明を）。
-/// 探すのはTitleの両方の言葉と、別名。
+/// 「Title（Description）」を、上の段に日本語・下の段に英語で（書き手の求め 2026-11-05：説明を
+/// 出し、英語でも探せるように）。英語の画面では英語の1段だけ（`two_lines`）。探すのはTitleの両方の
+/// 言葉と、別名。
 fn operation_rows(operations: &[Operation], query: &str) -> (Vec<PaletteRow>, Vec<Shown>) {
     let mut found: Vec<(i64, Shown, PaletteRow)> = Vec::new();
     for (at, operation) in operations.iter().enumerate() {
@@ -759,13 +760,19 @@ fn operation_rows(operations: &[Operation], query: &str) -> (Vec<PaletteRow>, Ve
         let Some(points) = points else {
             continue;
         };
+        let japanese = format!("{ja}（{}）", operation.description.0.trim_end_matches('。'));
+        let english = format!("{en} ({})", operation.description.1.trim_end_matches('.'));
+        let (upper, lower) = if crate::i18n::japanese() {
+            two_lines(&japanese, &english)
+        } else {
+            two_lines(&english, &japanese)
+        };
         found.push((
             points,
             Shown::Operation(at),
             PaletteRow {
-                title: crate::i18n::pick(ja, en).into(),
-                detail: crate::i18n::pick(&operation.description.0, &operation.description.1)
-                    .into(),
+                title: upper.into(),
+                detail: lower.into(),
                 key: operation.key.clone().into(),
                 assign: operation
                     .action
