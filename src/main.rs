@@ -7,6 +7,7 @@
 mod draft_editor;
 mod editor_interaction;
 mod editor_render;
+use editor_render::{CachedTile, PaneGraphics, PaneLayout};
 mod input_platform;
 use input_platform::{double_click_time, shift_really_held};
 mod actions;
@@ -168,8 +169,7 @@ use std::{
 use buffer::DocumentFile;
 use diag::{DiagLog, RollingLog as PerfLog};
 use directwrite_render::{
-    CaretGeometry, ClauseLook, ImeClause, LineFit, SelectionRect, TextEngine, TileSink,
-    WritingMode, cells,
+    CaretGeometry, ImeClause, LineFit, SelectionRect, TextEngine, TileSink, WritingMode, cells,
 };
 use document::{PreviewDocument, caret_place};
 use i18n::pick;
@@ -1134,61 +1134,6 @@ impl FrameProbe {
             // No frames at all reads better as zero than as infinity.
             min_ms: summary.min_ms.min(summary.max_ms),
             ..summary
-        }
-    }
-}
-
-/// A rendered tile, held under the fingerprint of what it drew.
-///
-/// The cache is content addressed: the key is the fingerprint, which says what
-/// the pixels are and nothing about where they go. An edit changes one block, so
-/// every other tile on screen is found again under the same key however far the
-/// layout has slid it, and the placement comes from the current plan each time.
-#[derive(Clone)]
-struct CachedTile {
-    image: Image,
-    /// The pixels behind that image, kept so the buffer can be drawn into again
-    /// once the image is gone (`take_spare`). **A tile is about two megabytes,
-    /// and allocating that costs more than drawing it does** (技術検証 7.8).
-    pixels: SharedPixelBuffer<Rgba8Pixel>,
-    /// Where this image was last placed on the flow axis, for ranking evictions
-    /// by distance.
-    last_flow: i32,
-}
-
-/// What one pane draws with.
-///
-/// **Bound to the thread that made it.** These are DirectWrite and Direct2D
-/// objects; whether several threads may lay text out at once is exactly the
-/// question 技術検証 7.3 leaves open. Nothing here can be handed to a worker
-/// until that is understood, which is why it is kept apart from [`PaneView`]
-/// rather than mixed with it (ペイン分割設計 7.3).
-struct PaneGraphics {
-    engine: TextEngine,
-    tiles: BTreeMap<u64, CachedTile>,
-    /// Buffers of evicted tiles, waiting to be drawn into again.
-    ///
-    /// **Held for their memory, not their contents.** Two megabytes is more
-    /// expensive to allocate than to draw (技術検証 7.8), and pages already
-    /// touched cost nothing to write again. Taking one back is safe whatever
-    /// else may still hold it: `make_mut_slice` copies rather than share
-    /// (Slint's `SharedVector::detach`), so the worst case is what allocating
-    /// cost anyway.
-    spare: Vec<SharedPixelBuffer<Rgba8Pixel>>,
-    /// Pixel bytes of the images handed to Slint since the last log line. Every
-    /// one of them is a new texture the renderer has to upload.
-    uploaded_bytes: usize,
-}
-
-impl PaneGraphics {
-    /// Hand written because the engine has to be told its writing mode; every
-    /// other field is empty until the first refresh.
-    fn new(mode: WritingMode) -> Self {
-        Self {
-            engine: TextEngine::new(mode),
-            tiles: BTreeMap::new(),
-            spare: Vec::new(),
-            uploaded_bytes: 0,
         }
     }
 }
@@ -5027,13 +4972,20 @@ impl PaneTab {
 
     /// A tab showing a document this pane has not looked at yet.
     fn showing(window: &AppWindow, id: PaneId, document: Rc<OpenDocument>) -> Self {
+        // Inherit the pane's word mode and view when a document is opened.
+        Self::with_view(
+            document,
+            id.screen(window).word_mode as u32,
+            TabView::for_pane(window, id),
+        )
+    }
+
+    fn with_view(document: Rc<OpenDocument>, word_mode: u32, view: TabView) -> Self {
         Self {
             identity: Rc::new(()),
-            // 要件 7.9: **開いた面のモードを継ぐ。**同じ作品の次の章を開いて
-            // 選び直させるのは、書く手を止めることである（要件 3）。
-            word_mode: id.screen(window).word_mode as u32,
+            word_mode,
             document,
-            view: TabView::for_pane(window, id),
+            view,
             terminal: None,
             below: TabBelow::default(),
             empty: false,
@@ -5109,6 +5061,19 @@ impl From<&PaneTab> for NavigationPlace {
 }
 
 impl PaneTabs {
+    fn can_select(&self, index: usize) -> bool {
+        index < self.tabs.len() && index != self.active
+    }
+
+    /// Change the selected tab without publishing any view state.
+    fn select(&mut self, index: usize) -> Option<PaneTab> {
+        if !self.can_select(index) {
+            return None;
+        }
+        self.active = index;
+        self.current().cloned()
+    }
+
     /// The tab this pane is showing, if it has one.
     ///
     /// **A pane off screen can have an empty strip** — that is what closing its
@@ -5117,6 +5082,45 @@ impl PaneTabs {
     fn current(&self) -> Option<&PaneTab> {
         self.tabs
             .get(self.active.min(self.tabs.len().saturating_sub(1)))
+    }
+}
+
+#[cfg(test)]
+mod tab_selection_tests {
+    use super::*;
+
+    #[test]
+    fn selecting_a_tab_validates_the_strip_without_touching_the_views() {
+        let document =
+            OpenDocument::with_events(DocumentFile::untitled(1), String::new(), Default::default());
+        let mut strip = PaneTabs {
+            tabs: vec![
+                PaneTab::with_view(
+                    document.clone(),
+                    0,
+                    TabView {
+                        zoom: 110,
+                        ..TabView::default()
+                    },
+                ),
+                PaneTab::with_view(
+                    document,
+                    0,
+                    TabView {
+                        zoom: 130,
+                        ..TabView::default()
+                    },
+                ),
+            ],
+            ..PaneTabs::default()
+        };
+        assert!(strip.select(0).is_none());
+        assert!(strip.select(2).is_none());
+        assert_eq!(strip.active, 0);
+        let selected = strip.select(1).unwrap();
+        assert!(Rc::ptr_eq(&selected.identity, &strip.tabs[1].identity));
+        assert_eq!(selected.view.zoom, 130);
+        assert_eq!(strip.select(0).unwrap().view.zoom, 110);
     }
 }
 
@@ -13216,25 +13220,19 @@ fn settings_tab_name() -> &'static str {
 
 /// Show another tab in one pane (要件 6.3).
 fn switch_to_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize) {
-    {
-        let tabs = live.tabs.borrow();
-        let strip = tabs.of(id);
-        if index >= strip.tabs.len() || index == strip.active {
-            return;
-        }
+    if !live.tabs.borrow().of(id).can_select(index) {
+        return;
     }
     // The tab being left has its work copy brought up to date here rather than
     // at the next tick, so that nothing is riding on the timer across a switch.
     write_work_copy_now(window, live);
     sync_active_tab(window, live);
-    let Some(incoming) = ({
-        let mut tabs = live.tabs.borrow_mut();
-        let Some(strip) = tabs.of_mut(id) else {
-            return;
-        };
-        strip.active = index;
-        strip.current().cloned()
-    }) else {
+    let Some(incoming) = live
+        .tabs
+        .borrow_mut()
+        .of_mut(id)
+        .and_then(|strip| strip.select(index))
+    else {
         return;
     };
     live.cache
@@ -19560,30 +19558,6 @@ fn evict_distant_tiles(
     }
 }
 
-/// What laying one pane out produced.
-struct PaneLayout {
-    comparison_note: String,
-    /// The caret in the shown text, after the IME's string was spliced in.
-    render_caret: Option<u32>,
-    /// The place the view is being held on, in the shown text (要件 8.5).
-    anchor_utf16: Option<u32>,
-    selection: Vec<(u32, u32)>,
-    /// The same runs in the document's bytes, for the status bar's count.
-    selection_source: Vec<(usize, usize)>,
-    /// 見えている一致（E1、書き手の求め 2026-09-09：「ヒットした語がすべて
-    /// ハイライトされた上で、対象が動く」）。**組んだ本文の「始まりと長さ」**
-    /// ——選択の走りと同じ形で、同じ道で矩形になる。
-    matches: Vec<(u32, u32)>,
-    /// 範囲内検索の範囲（E1、書き手の求め 2026-09-09）。**検索が選択を動かす
-    /// ので、範囲は選択では見えない**——だから別に出す。
-    scope: Option<(u32, u32)>,
-    /// 書き手の求め 2026-09-22: the bookmarked section, lit until it is let go.
-    mark: Option<(u32, u32)>,
-    measured: directwrite_render::UpdateCost,
-    preview_ms: f64,
-    layout_ms: f64,
-}
-
 /// Lay one pane out: choose its text, map the positions into it, splice the
 /// IME's string, and measure.
 ///
@@ -19628,15 +19602,17 @@ fn lay_out_pane(
     match editor_render::layout(
         &mut pane.graphics,
         &mut pane.view,
-        document,
-        source,
-        line_fit,
-        typography,
-        active_line_start,
-        caret_source_byte,
-        selection,
-        preedit,
-        &options,
+        editor_render::LayoutRequest {
+            document,
+            source,
+            line_fit,
+            typography,
+            active_line_start,
+            caret_source_byte,
+            selection,
+            preedit,
+            options: &options,
+        },
     ) {
         Ok(layout) => {
             id.update_screen(window, |screen| {
@@ -24918,7 +24894,7 @@ fn watch_ime(
                 }
             }),
         };
-        std::mem::forget(ime::ImeWatch::install(window.window(), host));
+        ime::ImeWatch::install(window.window(), host);
     });
 }
 

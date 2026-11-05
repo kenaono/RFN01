@@ -61,6 +61,34 @@ impl OwnedHandle {
             Err(_) => Ok(0),
         }
     }
+    pub fn exited(&self) -> bool {
+        // SAFETY: the process handle stays live and the zero timeout never waits.
+        let waited =
+            unsafe { windows::Win32::System::Threading::WaitForSingleObject(self.raw(), 0) };
+        waited == windows::Win32::Foundation::WAIT_OBJECT_0
+    }
+
+    pub fn write(&self, mut bytes: &[u8]) -> windows::core::Result<()> {
+        while !bytes.is_empty() {
+            let mut written = 0;
+            // SAFETY: the pipe handle and input slice stay alive for WriteFile.
+            unsafe {
+                windows::Win32::Storage::FileSystem::WriteFile(
+                    self.0,
+                    Some(bytes),
+                    Some(&mut written),
+                    None,
+                )
+            }?;
+            if written == 0 {
+                return Err(windows::core::Error::from(
+                    windows::Win32::Foundation::E_FAIL,
+                ));
+            }
+            bytes = &bytes[written as usize..];
+        }
+        Ok(())
+    }
 }
 
 impl Drop for OwnedHandle {
@@ -76,12 +104,15 @@ impl Drop for OwnedHandle {
 pub struct Pty {
     console: HPCON,
     /// Our end of the shell's standard input.
-    writer: OwnedHandle,
+    writer: Option<OwnedHandle>,
     /// Our end of the shell's output. **Taken out to be read on a thread**, so
     /// this is `None` once somebody has it.
     reader: Option<OwnedHandle>,
-    process: OwnedHandle,
+    process: Option<OwnedHandle>,
 }
+
+// SAFETY: HPCON and the pipe and process handles are process-wide handles.
+unsafe impl Send for Pty {}
 
 impl Pty {
     /// Start `command` on a console `columns` by `rows` in size.
@@ -205,9 +236,9 @@ impl Pty {
             let _ = CloseHandle(spawned.hThread);
             Ok(Self {
                 console,
-                writer: input_write,
+                writer: Some(input_write),
                 reader: Some(output_read),
-                process: OwnedHandle(spawned.hProcess),
+                process: Some(OwnedHandle(spawned.hProcess)),
             })
         }
     }
@@ -220,17 +251,20 @@ impl Pty {
         self.reader.take()
     }
 
-    /// Send keystrokes to the shell.
+    pub fn take_writer(&mut self) -> Option<OwnedHandle> {
+        self.writer.take()
+    }
+
+    #[cfg(test)]
     pub fn write(&self, bytes: &[u8]) -> windows::core::Result<()> {
-        let mut written = 0_u32;
-        unsafe {
-            windows::Win32::Storage::FileSystem::WriteFile(
-                self.writer.raw(),
-                Some(bytes),
-                Some(&mut written),
-                None,
-            )
-        }
+        self.writer
+            .as_ref()
+            .expect("the test owns the writer")
+            .write(bytes)
+    }
+
+    pub fn take_process(&mut self) -> Option<OwnedHandle> {
+        self.process.take()
     }
 
     /// Tell the shell the screen changed size (要件 6.4: a pane can be dragged).
@@ -242,22 +276,12 @@ impl Pty {
         unsafe { ResizePseudoConsole(self.console, size) }
     }
 
-    /// The shell has exited.
-    ///
-    /// **The pipe cannot answer this.** A pseudo console holds its own end of
-    /// the output pipe until it is closed, so end-of-file arrives when *we* let
-    /// go of the console — never when the shell does. What says the shell is
-    /// gone is the process, and only the process.
-    pub fn exited(&self) -> bool {
-        let waited = unsafe {
-            windows::Win32::System::Threading::WaitForSingleObject(self.process.raw(), 0)
-        };
-        waited == windows::Win32::Foundation::WAIT_OBJECT_0
-    }
-
     #[cfg(test)]
     pub fn process(&self) -> HANDLE {
-        self.process.raw()
+        self.process
+            .as_ref()
+            .expect("the test owns the process")
+            .raw()
     }
 }
 

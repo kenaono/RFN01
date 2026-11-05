@@ -1,0 +1,100 @@
+import { CheckBox, ComboBox } from "std-widgets.slint";
+import { PanelStyleEditor } from "panel-style-editor.slint";
+import { PanelStyle } from "editor-pane.slint";
+import { Field, TextButton } from "controls.slint";
+import { Tok } from "tokens.slint";
+
+export component TerminalSettings inherits VerticalLayout {
+    in property <bool> show-profiles;
+    in property <bool> show-paste;
+    in property <bool> show-close;
+    in property <bool> show-restore;
+    in property <bool> show-history;
+    in property <bool> show-timestamp;
+    in property <bool> show-terminal-style;
+    in property <bool> show-editor-panel-style;
+    in property <[string]> shell-profile-names;
+    in property <int> shell-profile-index;
+    in-out property <bool> shell-profile-default;
+    in-out property <string> shell-profile-name;
+    in-out property <string> shell-profile-executable;
+    in-out property <string> shell-profile-arguments;
+    in-out property <string> shell-profile-directory;
+    in-out property <bool> terminal-confirm-paste;
+    in-out property <bool> terminal-confirm-close;
+    in-out property <bool> terminal-restore-output;
+    in-out property <int> terminal-history-limit;
+    in-out property <string> terminal-timestamp-format;
+    in property <[string]> font-names;
+    in property <PanelStyle> terminal-style;
+    in property <PanelStyle> editor-panel-style;
+    callback shell-profile-action(int, int);
+    pure callback terminal-timestamp-sample(string) -> string;
+    callback font-list-requested();
+    callback terminal-style-edited(PanelStyle);
+    callback editor-panel-style-edited(PanelStyle);
+
+    spacing: 8px; alignment: start; vertical-stretch: 0;
+    if root.show-profiles: VerticalLayout {
+        spacing: 8px;
+        ComboBox {
+            width: 260px; height: 30px; horizontal-stretch: 0; vertical-stretch: 0;
+            model: root.shell-profile-names;
+            current-index: root.shell-profile-index;
+            selected(value) => { root.shell-profile-action(0, self.current-index); }
+        }
+        HorizontalLayout {
+            Text { text: @tr("Profile name"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; }
+            spacing: 8px; height: 30px; vertical-stretch: 0;
+            Field { width: 260px; horizontal-stretch: 0; placeholder: @tr("Name"); text <=> root.shell-profile-name; }
+            CheckBox { text: @tr("Default"); checked <=> root.shell-profile-default; toggled => { root.shell-profile-action(7, 0); } }
+        }
+        HorizontalLayout { Text { text: @tr("Executable"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Executable"); text <=> root.shell-profile-executable; } }
+        HorizontalLayout { Text { text: @tr("Arguments"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Arguments"); text <=> root.shell-profile-arguments; } }
+        HorizontalLayout { Text { text: @tr("Start folder"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Start folder"); text <=> root.shell-profile-directory; } }
+        HorizontalLayout {
+            TextButton { title: @tr("Apply"); clicked => { root.shell-profile-action(1, 0); } }
+            TextButton { title: @tr("Add"); clicked => { root.shell-profile-action(2, 0); } }
+            TextButton { title: @tr("Duplicate"); clicked => { root.shell-profile-action(3, 0); } }
+            TextButton { title: "↑"; clicked => { root.shell-profile-action(4, 0); } }
+            TextButton { title: "↓"; clicked => { root.shell-profile-action(5, 0); } }
+            TextButton { title: @tr("Remove"); clicked => { root.shell-profile-action(6, 0); } }
+        }
+    }
+
+    if root.show-paste: CheckBox {
+        text: @tr("Confirm multiline paste");
+        checked <=> root.terminal-confirm-paste;
+    }
+    if root.show-close: CheckBox {
+        text: @tr("Confirm shell termination");
+        checked <=> root.terminal-confirm-close;
+    }
+    if root.show-restore: CheckBox {
+        text: @tr("Restore output after restart");
+        checked <=> root.terminal-restore-output;
+    }
+    if root.show-history: HorizontalLayout {
+        spacing: 12px;
+        Text { text: @tr("History lines"); color: Tok.ink; vertical-alignment: center; }
+        Field { width: 100px; horizontal-stretch: 0; text: root.terminal-history-limit;
+            accepted => { if self.text.is-float() { root.terminal-history-limit = round(clamp(self.text.to-float(), 0, 1000000)); } }
+            focus-lost => { if self.text.is-float() { root.terminal-history-limit = round(clamp(self.text.to-float(), 0, 1000000)); } }
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    if root.show-timestamp: HorizontalLayout {
+        spacing: 12px;
+        Text { text: @tr("Timestamp format"); color: Tok.ink; vertical-alignment: center; }
+        Field { width: 220px; horizontal-stretch: 0; placeholder: "[yyyy-MM-dd HH:mm:ss] "; text <=> root.terminal-timestamp-format; }
+        Text { text: root.terminal-timestamp-sample(root.terminal-timestamp-format) + "…"; color: Tok.ink-faint; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    if root.show-timestamp: Text {
+        text: @tr("yyyy MM dd HH mm ss fff are replaced; everything else is written as it is.");
+        color: Tok.ink-faint;
+        font-size: 11px;
+    }
+    if root.show-terminal-style: PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Terminal"; style: root.terminal-style; changed style => { root.terminal-style-edited(self.style); } defaults: true; }
+    if root.show-editor-panel-style: PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Editor Panel"; style: root.editor-panel-style; changed style => { root.editor-panel-style-edited(self.style); } defaults: true; underline-allowed: false; }
+}

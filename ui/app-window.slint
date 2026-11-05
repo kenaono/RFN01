@@ -1,4 +1,5 @@
 import { CheckBox, ComboBox, HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
+import { TerminalSettings } from "terminal-settings.slint";
 import { PanelStyleEditor } from "panel-style-editor.slint";
 import { PanelStyle, EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece, WordModeRow } from "editor-pane.slint";
 // RFN01-47: 本文の右クリックメニューへ出す挿入の行（中身はRustが作る）。
@@ -4287,72 +4288,35 @@ export component AppWindow inherits Window {
                                         // 黒地で使う人が多く、要件9のシート（原稿の紙）と同じ値で決める
                                         // ものではない。書字方向も持たないので、シートを選ぶ釦はここにも
                                         // 無い。
-                                        // 書き手の報告 2026-11-05: **探しているあいだは、名前が合うときだけ。**ラベルを
-                                        // 渡していなかったので、どの語で探してもこの面がまるごと出て、結果を埋めていた。
-                                        if root.shows-group(1): VerticalLayout {
-                                            spacing: 8px; alignment: start; vertical-stretch: 0;
-                                            if root.shows-setting("terminal.profiles", -1): VerticalLayout {
-                                                spacing: 8px;
-                                                ComboBox {
-                                                    width: 260px; height: 30px; horizontal-stretch: 0; vertical-stretch: 0;
-                                                    model: root.shell-profile-names;
-                                                    current-index: root.shell-profile-index;
-                                                    selected(value) => { root.shell-profile-action(0, self.current-index); }
-                                                }
-                                                HorizontalLayout {
-                                                    Text { text: @tr("Profile name"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; }
-                                                    spacing: 8px; height: 30px; vertical-stretch: 0;
-                                                    Field { width: 260px; horizontal-stretch: 0; placeholder: @tr("Name"); text <=> root.shell-profile-name; }
-                                                    CheckBox { text: @tr("Default"); checked <=> root.shell-profile-default; toggled => { root.shell-profile-action(7, 0); } }
-                                                }
-                                                HorizontalLayout { Text { text: @tr("Executable"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Executable"); text <=> root.shell-profile-executable; } }
-                                                HorizontalLayout { Text { text: @tr("Arguments"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Arguments"); text <=> root.shell-profile-arguments; } }
-                                                HorizontalLayout { Text { text: @tr("Start folder"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Start folder"); text <=> root.shell-profile-directory; } }
-                                                HorizontalLayout {
-                                                    TextButton { title: @tr("Apply"); clicked => { root.shell-profile-action(1, 0); } }
-                                                    TextButton { title: @tr("Add"); clicked => { root.shell-profile-action(2, 0); } }
-                                                    TextButton { title: @tr("Duplicate"); clicked => { root.shell-profile-action(3, 0); } }
-                                                    TextButton { title: "↑"; clicked => { root.shell-profile-action(4, 0); } }
-                                                    TextButton { title: "↓"; clicked => { root.shell-profile-action(5, 0); } }
-                                                    TextButton { title: @tr("Remove"); clicked => { root.shell-profile-action(6, 0); } }
-                                                }
-                                            }
-
-                                            if root.shows-setting("terminal.paste", -1): CheckBox {
-                                                text: @tr("Confirm multiline paste");
-                                                checked <=> root.terminal-confirm-paste;
-                                            }
-                                            if root.shows-setting("terminal.close", -1): CheckBox {
-                                                text: @tr("Confirm shell termination");
-                                                checked <=> root.terminal-confirm-close;
-                                            }
-                                            if root.shows-setting("terminal.restore", -1): CheckBox {
-                                                text: @tr("Restore output after restart");
-                                                checked <=> root.terminal-restore-output;
-                                            }
-                                            if root.shows-setting("terminal.history", -1): HorizontalLayout {
-                                                spacing: 12px;
-                                                Text { text: @tr("History lines"); color: Tok.ink; vertical-alignment: center; }
-                                                Field { width: 100px; horizontal-stretch: 0; text: root.terminal-history-limit;
-                                                    accepted => { if self.text.is-float() { root.terminal-history-limit = round(clamp(self.text.to-float(), 0, 1000000)); } }
-                                                    focus-lost => { if self.text.is-float() { root.terminal-history-limit = round(clamp(self.text.to-float(), 0, 1000000)); } }
-                                                }
-                                                Rectangle { horizontal-stretch: 1; }
-                                            }
-                                            if root.shows-setting("terminal.timestamp", -1): HorizontalLayout {
-                                                spacing: 12px;
-                                                Text { text: @tr("Timestamp format"); color: Tok.ink; vertical-alignment: center; }
-                                                Field { width: 220px; horizontal-stretch: 0; placeholder: "[yyyy-MM-dd HH:mm:ss] "; text <=> root.terminal-timestamp-format; }
-                                                Text { text: root.terminal-timestamp-sample(root.terminal-timestamp-format) + "…"; color: Tok.ink-faint; vertical-alignment: center; }
-                                                Rectangle { horizontal-stretch: 1; }
-                                            }
-                                            if root.shows-setting("terminal.timestamp", -1): Text {
-                                                text: @tr("yyyy MM dd HH mm ss fff are replaced; everything else is written as it is.");
-                                                color: Tok.ink-faint;
-                                                font-size: 11px;
-                                            }
-                                            if root.shows-setting("style.terminal", -1): PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Terminal"; style: root.panel-defaults[0]; changed style => { root.panel-defaults[0] = self.style; root.terminal-settings-edited(); } defaults: true; }
-                                            if root.shows-setting("style.editor-panel", -1): PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Editor Panel"; style: root.panel-defaults[1]; changed style => { root.panel-defaults[1] = self.style; root.terminal-settings-edited(); } defaults: true; underline-allowed: false; }
+                                        if root.shows-group(1): TerminalSettings {
+                                            show-profiles: root.shows-setting("terminal.profiles", -1);
+                                            show-paste: root.shows-setting("terminal.paste", -1);
+                                            show-close: root.shows-setting("terminal.close", -1);
+                                            show-restore: root.shows-setting("terminal.restore", -1);
+                                            show-history: root.shows-setting("terminal.history", -1);
+                                            show-timestamp: root.shows-setting("terminal.timestamp", -1);
+                                            show-terminal-style: root.shows-setting("style.terminal", -1);
+                                            show-editor-panel-style: root.shows-setting("style.editor-panel", -1);
+                                            shell-profile-names : root.shell-profile-names;
+                                            shell-profile-index : root.shell-profile-index;
+                                            shell-profile-default <=> root.shell-profile-default;
+                                            shell-profile-name <=> root.shell-profile-name;
+                                            shell-profile-executable <=> root.shell-profile-executable;
+                                            shell-profile-arguments <=> root.shell-profile-arguments;
+                                            shell-profile-directory <=> root.shell-profile-directory;
+                                            terminal-confirm-paste <=> root.terminal-confirm-paste;
+                                            terminal-confirm-close <=> root.terminal-confirm-close;
+                                            terminal-restore-output <=> root.terminal-restore-output;
+                                            terminal-history-limit <=> root.terminal-history-limit;
+                                            terminal-timestamp-format <=> root.terminal-timestamp-format;
+                                            font-names : root.font-names;
+                                            terminal-style: root.panel-defaults[0];
+                                            editor-panel-style: root.panel-defaults[1];
+                                            shell-profile-action(action, index) => { root.shell-profile-action(action, index); }
+                                            terminal-timestamp-sample(format) => { root.terminal-timestamp-sample(format) }
+                                            font-list-requested => { root.font-list-requested(); }
+                                            terminal-style-edited(style) => { root.panel-defaults[0] = style; root.terminal-settings-edited(); }
+                                            editor-panel-style-edited(style) => { root.panel-defaults[1] = style; root.terminal-settings-edited(); }
                                         }
 
                                         if root.shows-group(7): VerticalLayout {

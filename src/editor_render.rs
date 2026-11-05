@@ -1,5 +1,72 @@
 //! Shared text layout and tile rendering. Hosts supply values and publish results.
-use super::*;
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
+
+use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
+
+use crate::directwrite_render::{self, ClauseLook, ImeClause, LineFit, TextEngine, WritingMode};
+use crate::text_blocks::{StyledText, TileSpan, Typography};
+use crate::{
+    MAX_SHOWN_MATCHES, OpenDocument, PaneSelection, PaneText, PaneView, PreviewTile, TileImages,
+    document, elapsed_ms, evict_distant_tiles, find, held_view, marks_without_line, pick, say,
+    text_with_composition, word_marks,
+};
+
+/// A rendered tile, held under the fingerprint of what it drew.
+///
+/// The cache is content addressed: the key is the fingerprint, which says what
+/// the pixels are and nothing about where they go. An edit changes one block, so
+/// every other tile on screen is found again under the same key however far the
+/// layout has slid it, and the placement comes from the current plan each time.
+#[derive(Clone)]
+pub(crate) struct CachedTile {
+    pub(crate) image: Image,
+    /// The pixels behind that image, kept so the buffer can be drawn into again
+    /// once the image is gone (`take_spare`). **A tile is about two megabytes,
+    /// and allocating that costs more than drawing it does** (技術検証 7.8).
+    pub(crate) pixels: SharedPixelBuffer<Rgba8Pixel>,
+    /// Where this image was last placed on the flow axis, for ranking evictions
+    /// by distance.
+    pub(crate) last_flow: i32,
+}
+
+/// What one pane draws with.
+///
+/// **Bound to the thread that made it.** These are DirectWrite and Direct2D
+/// objects; whether several threads may lay text out at once is exactly the
+/// question 技術検証 7.3 leaves open. Nothing here can be handed to a worker
+/// until that is understood, which is why it is kept apart from [`PaneView`]
+/// rather than mixed with it (ペイン分割設計 7.3).
+pub(crate) struct PaneGraphics {
+    pub(crate) engine: TextEngine,
+    pub(crate) tiles: BTreeMap<u64, CachedTile>,
+    /// Buffers of evicted tiles, waiting to be drawn into again.
+    ///
+    /// **Held for their memory, not their contents.** Two megabytes is more
+    /// expensive to allocate than to draw (技術検証 7.8), and pages already
+    /// touched cost nothing to write again. Taking one back is safe whatever
+    /// else may still hold it: `make_mut_slice` copies rather than share
+    /// (Slint's `SharedVector::detach`), so the worst case is what allocating
+    /// cost anyway.
+    pub(crate) spare: Vec<SharedPixelBuffer<Rgba8Pixel>>,
+    /// Pixel bytes of the images handed to Slint since the last log line. Every
+    /// one of them is a new texture the renderer has to upload.
+    pub(crate) uploaded_bytes: usize,
+}
+
+impl PaneGraphics {
+    /// Hand written because the engine has to be told its writing mode; every
+    /// other field is empty until the first refresh.
+    pub(crate) fn new(mode: WritingMode) -> Self {
+        Self {
+            engine: TextEngine::new(mode),
+            tiles: BTreeMap::new(),
+            spare: Vec::new(),
+            uploaded_bytes: 0,
+        }
+    }
+}
 
 pub(crate) struct LayoutOptions {
     pub reading: document::Reading,
@@ -17,20 +84,58 @@ pub(crate) struct LayoutOptions {
     pub mark: Option<(usize, usize)>,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What laying one pane out produced.
+pub(crate) struct PaneLayout {
+    pub(crate) comparison_note: String,
+    /// The caret in the shown text, after the IME's string was spliced in.
+    pub(crate) render_caret: Option<u32>,
+    /// The place the view is being held on, in the shown text (要件 8.5).
+    pub(crate) anchor_utf16: Option<u32>,
+    pub(crate) selection: Vec<(u32, u32)>,
+    /// The same runs in the document's bytes, for the status bar's count.
+    pub(crate) selection_source: Vec<(usize, usize)>,
+    /// 見えている一致（E1、書き手の求め 2026-09-09：「ヒットした語がすべて
+    /// ハイライトされた上で、対象が動く」）。**組んだ本文の「始まりと長さ」**
+    /// ——選択の走りと同じ形で、同じ道で矩形になる。
+    pub(crate) matches: Vec<(u32, u32)>,
+    /// 範囲内検索の範囲（E1、書き手の求め 2026-09-09）。**検索が選択を動かす
+    /// ので、範囲は選択では見えない**——だから別に出す。
+    pub(crate) scope: Option<(u32, u32)>,
+    /// 書き手の求め 2026-09-22: the bookmarked section, lit until it is let go.
+    pub(crate) mark: Option<(u32, u32)>,
+    pub(crate) measured: directwrite_render::UpdateCost,
+    pub(crate) preview_ms: f64,
+    pub(crate) layout_ms: f64,
+}
+
+pub(crate) struct LayoutRequest<'a> {
+    pub(crate) document: &'a OpenDocument,
+    pub(crate) source: &'a str,
+    pub(crate) line_fit: LineFit,
+    pub(crate) typography: &'a Typography,
+    pub(crate) active_line_start: Option<usize>,
+    pub(crate) caret_source_byte: Option<usize>,
+    pub(crate) selection: PaneSelection,
+    pub(crate) preedit: &'a str,
+    pub(crate) options: &'a LayoutOptions,
+}
+
 pub(crate) fn layout(
     graphics: &mut PaneGraphics,
     view: &mut PaneView,
-    document: &OpenDocument,
-    source: &str,
-    line_fit: LineFit,
-    typography: &Typography,
-    active_line_start: Option<usize>,
-    caret_source_byte: Option<usize>,
-    selection: PaneSelection,
-    preedit: &str,
-    options: &LayoutOptions,
+    request: LayoutRequest<'_>,
 ) -> windows::core::Result<PaneLayout> {
+    let LayoutRequest {
+        document,
+        source,
+        line_fit,
+        typography,
+        active_line_start,
+        caret_source_byte,
+        selection,
+        preedit,
+        options,
+    } = request;
     let mut counts = document.counts.borrow_mut();
     let styles = counts.get(source, options.reading).line_styles();
 

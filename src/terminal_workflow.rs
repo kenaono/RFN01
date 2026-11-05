@@ -74,16 +74,30 @@ pub(crate) fn send(window: &AppWindow, live: &Live, input: Input) {
         if entry.view.borrow().viewer {
             return;
         }
-        input.session.borrow_mut().send_draft(&input.text);
+        if !input.session.borrow_mut().send_draft(&input.text) {
+            tell_send_busy(window);
+            return;
+        }
         // Do not delete edits made while confirmation was showing.
         if *entry.document.text.borrow() == input.text {
             entry.document.text.borrow_mut().clear();
         }
-    } else {
-        input.session.borrow_mut().paste(&input.text);
+    } else if !input.session.borrow_mut().paste(&input.text) {
+        tell_send_busy(window);
+        return;
     }
     terminal_panels::drain(window, live);
     refresh_terminal_panes(window, live);
+}
+
+fn tell_send_busy(window: &AppWindow) {
+    window.tell(
+        crate::pick(
+            "Terminalに送信できません。入力が詰まっているか、送信するテキストが大きすぎます",
+            "Cannot send to Terminal. Input is backed up or the text is too large",
+        )
+        .into(),
+    );
 }
 
 pub(crate) fn needs_close(window: &AppWindow, tab: &PaneTab) -> bool {

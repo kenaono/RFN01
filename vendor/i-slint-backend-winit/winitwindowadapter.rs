@@ -794,6 +794,11 @@ impl WinitWindowAdapter {
                 attributes.inner_size = Some(physical_size_to_winit(self.size.get()).into());
                 attributes.position = last_window_rc.outer_position().ok().map(|pos| pos.into());
                 *winit_window_or_none = WinitWindowOrNone::None(attributes.into());
+                drop(winit_window_or_none);
+
+                #[cfg(target_os = "windows")]
+                crate::tsf::detach(&last_window_rc);
+
 
                 // Note: Don't register the window in inactive_windows for re-creation later, as creating the window
                 // on wayland implies making it visible. Unfortunately, winit won't allow creating a window on wayland
@@ -2347,6 +2352,10 @@ impl WindowAdapterInternal for WinitWindowAdapter {
 
 impl Drop for WinitWindowAdapter {
     fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
+        if let Some(window) = self.winit_window_or_none.get_mut().as_window() {
+            crate::tsf::detach(&window);
+        }
         self.shared_backend_data.unregister_window(
             self.winit_window_or_none.borrow().as_window().map(|winit_window| winit_window.id()),
         );

@@ -843,3 +843,30 @@ fn items() -> Vec<Item> {
     );
     items
 }
+
+#[cfg(test)]
+mod terminal_routes {
+    use super::*;
+
+    #[test]
+    fn every_terminal_setting_has_a_row_and_search_can_reveal_it() {
+        let ui = include_str!("../ui/app-window.slint");
+        let component = include_str!("../ui/terminal-settings.slint");
+        let section = ui
+            .split_once("if root.shows-group(1): TerminalSettings {")
+            .unwrap()
+            .1
+            .split_once("if root.shows-group(7)")
+            .unwrap()
+            .0;
+        for item in Item::all().filter(|item| item.tab == 1) {
+            let row = section
+                .lines()
+                .find(|line| line.contains(&format!("root.shows-setting(\"{}\", -1)", item.group)))
+                .unwrap_or_else(|| panic!("Missing Terminal row for {}", item.id));
+            let (visibility, _) = row.trim().split_once(':').unwrap();
+            assert!(component.contains(&format!("if root.{visibility}:")));
+            assert!(shows(item.group, -1, "", &item.id, [false; 3]));
+        }
+    }
+}
