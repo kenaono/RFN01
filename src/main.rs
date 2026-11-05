@@ -372,17 +372,10 @@ fn publish_shells(window: &AppWindow) {
 /// 1か所で作れば、そのずれ方が起きない。
 ///
 /// 16色は選ばせず、背景の明るさから決める（`palette_for`）。
+///
+/// RFN01-66（2026-11-05）: **Terminalの外観の既定から作る**（古いTerminalの値は外した）。
 fn terminal_look(window: &AppWindow) -> cells::TerminalLook {
-    let paper = channels(window.get_terminal_paper());
-    let (low, high) = TERMINAL_SIZE_RANGE;
-    cells::TerminalLook {
-        family: window.get_terminal_font().to_string(),
-        font_size: window.get_terminal_size().clamp(low, high) as f32,
-        paper,
-        ink: channels(window.get_terminal_ink()),
-        palette: cells::TerminalLook::palette_for(paper),
-        ..cells::TerminalLook::default()
-    }
+    terminal_appearance::look_of(&terminal_appearance::default_style(window, 0))
 }
 
 /// Whether a program is somewhere on `PATH`.
@@ -16231,13 +16224,8 @@ fn reset_left_look(window: &AppWindow) {
 const TERMINAL_INK_SETTING: &str = "terminal.ink";
 const TERMINAL_FONT_SETTING: &str = "terminal.font";
 const TERMINAL_SIZE_SETTING: &str = "terminal.size";
-/// 端末の字の大きさの幅。**紙より狭い**——升目が壊れるほど大きくしても読めない。
-const TERMINAL_SIZE_RANGE: (i32, i32) = (9, 32);
-/// What the terminal is set in until the writer says otherwise — the values
-/// `app-window.slint` starts with, and what Terminal's Reset puts back.
-const TERMINAL_FONT_DEFAULT: &str = "Consolas";
-/// 書き手の決定 2026-11-05: Editorの本文と同じ14px（10.5pt）。以前は15px。
-const TERMINAL_SIZE_DEFAULT: i32 = 14;
+// RFN01-66（2026-11-05）: 上の3つ（と`TERMINAL_PAPER_SETTING`）は**古い設定ファイルを読むためだけ**
+// に残す。読めば外観の既定へ移し（`terminal_appearance::migrate_legacy`）、もう書かない。
 
 thread_local! {
     /// 鍵盤を持っている素の欄の数（書き手の報告 2026-09-08）。
@@ -17209,10 +17197,6 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
             .join(","),
     ));
     values.push((
-        TERMINAL_PAPER_SETTING.to_owned(),
-        hex_colour(window.get_terminal_paper()),
-    ));
-    values.push((
         LEFT_SIZE_SETTING.to_owned(),
         window.get_left_size().to_string(),
     ));
@@ -17238,18 +17222,6 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
     values.push((
         LEFT_FILE_SETTING.to_owned(),
         own(window.get_left_file_own(), window.get_left_file_ink()),
-    ));
-    values.push((
-        TERMINAL_INK_SETTING.to_owned(),
-        hex_colour(window.get_terminal_ink()),
-    ));
-    values.push((
-        TERMINAL_FONT_SETTING.to_owned(),
-        window.get_terminal_font().to_string(),
-    ));
-    values.push((
-        TERMINAL_SIZE_SETTING.to_owned(),
-        window.get_terminal_size().to_string(),
     ));
     for kind in 0..3 {
         values.push((
@@ -17495,9 +17467,17 @@ fn apply_settings(
                 .set_recent(ModelRc::new(VecModel::from(recent)));
             continue;
         }
-        if written == TERMINAL_PAPER_SETTING {
+        // RFN01-66: 古いTerminalの値は外観の既定へ移す（3つとも）。
+        if written == TERMINAL_PAPER_SETTING || written == TERMINAL_INK_SETTING {
             if let Some(rgb) = parse_hex_colour(value) {
-                window.set_terminal_paper(slint_colour(rgb));
+                let paper = written == TERMINAL_PAPER_SETTING;
+                terminal_appearance::migrate_legacy(window, |_, style| {
+                    if paper {
+                        style.paper = slint_colour(rgb);
+                    } else {
+                        style.ink = slint_colour(rgb);
+                    }
+                });
             }
             continue;
         }
@@ -17529,15 +17509,12 @@ fn apply_settings(
             }
             continue;
         }
-        if written == TERMINAL_INK_SETTING {
-            if let Some(rgb) = parse_hex_colour(value) {
-                window.set_terminal_ink(slint_colour(rgb));
-            }
-            continue;
-        }
         if written == TERMINAL_FONT_SETTING {
             if !value.trim().is_empty() {
-                window.set_terminal_font(value.into());
+                let family: SharedString = value.trim().into();
+                terminal_appearance::migrate_legacy(window, |_, style| {
+                    style.family = family.clone();
+                });
             }
             continue;
         }
@@ -17581,10 +17558,14 @@ fn apply_settings(
             }
             continue;
         }
+        // 古い大きさはTerminalとTerminal Panelのもの（Editor Panelは14のままだった）。
         if written == TERMINAL_SIZE_SETTING {
             if let Ok(size) = value.trim().parse::<i32>() {
-                let (low, high) = TERMINAL_SIZE_RANGE;
-                window.set_terminal_size(size.clamp(low, high));
+                terminal_appearance::migrate_legacy(window, |kind, style| {
+                    if kind != 1 {
+                        style.size = size.clamp(9, 32);
+                    }
+                });
             }
             continue;
         }

@@ -1097,8 +1097,6 @@ export component AppWindow inherits Window {
     // 書き手の求め 2026-11-05: 既定の倍率（新しいTABと Reset の戻り先）。開いているTABは変えない。
     in-out property <int> default-zoom: 120;
     callback default-zoom-stepped(int);
-    in-out property <color> terminal-paper: #fffefa;
-    in-out property <color> terminal-ink: #24211e;
     in-out property <[PanelStyle]> panel-defaults;
     callback terminal-settings-edited();
     in-out property <bool> appearance-open;
@@ -1135,16 +1133,10 @@ export component AppWindow inherits Window {
     pure callback terminal-timestamp-sample(string) -> string;
     /// The timestamp checkbox of the log's save dialog, as it was last left.
     in-out property <bool> terminal-log-stamp-file: false;
-    in-out property <string> terminal-font: "Consolas";
-    in-out property <int> terminal-size: 14;
-    callback terminal-font-picked();
     /// 書体の一覧は要件 9 のものと同じ`font-menu`を使う。**どちらの欄のために
     /// 開いたか**を、開いた側がここで言う——戻る先だけが違う。
-    in-out property <bool> font-for-terminal: false;
-    callback terminal-size-stepped(int);
     /// 黒地／紙のひとまとめの選択。**背景と文字を一度に置く**——片方だけ変えた状態は
     /// 読めない画面で、そこを通らせない。
-    callback terminal-theme-chosen(bool);
     /// 追加要件 2026-09-08: 要件 8.1 の自動退避を働かせるかどうか。
     ///
     /// **既定はOn。**何も言っていない書き手は、未保存の中身を捨ててくれとは

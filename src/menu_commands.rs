@@ -2073,16 +2073,9 @@ fn build(
                 (12, "行番号", "Line Numbers"),
                 (54, "空白・改行記号", "Spaces and Line Breaks"),
             ] {
-                let shared = Setting::from_index(setting)
-                    .is_some_and(|s| shared_sheet(window, 1, s.page()) == 0);
-                let suffix = if shared {
-                    pick("縦横共通", "horizontal and vertical, shared")
-                } else if t.id.vertical(window) {
-                    pick("縦書き共通", "vertical, shared")
-                } else {
-                    pick("横書き共通", "horizontal, shared")
-                };
-                let name = format!("{} ({suffix})", pick(ja, en));
+                // RFN01-66（書き手の判断 2026-11-05）: 今のペインの向きの設定を切り替える入口。
+                // 「（横書き共通）」の注記は外した——設定のLayoutと同じ値を、ここからも切り替えるだけ。
+                let name = pick(ja, en).to_owned();
                 let on = Setting::from_index(setting)
                     .is_some_and(|s| s.read(window, usize::from(t.id.vertical(window))) != 0);
                 row(

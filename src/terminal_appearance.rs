@@ -17,18 +17,42 @@ pub(crate) fn default_style(window: &AppWindow, kind: usize) -> PanelStyle {
     window
         .get_panel_defaults()
         .row_data(kind)
-        .unwrap_or_else(|| PanelStyle {
-            paper_own: true,
-            paper: window.get_terminal_paper(),
-            ink: window.get_terminal_ink(),
-            family: window.get_terminal_font(),
-            size: if kind == 1 {
-                14
-            } else {
-                window.get_terminal_size()
-            },
-            ..Default::default()
+        // RFN01-66（2026-11-05）: 外観の既定がまだ無いときは初期の外観。以前は古いTerminalの値
+        // （`terminal.paper/ink/font/size`）を代わりに読んでいたが、画面から変えられない値だった。
+        .unwrap_or_else(|| {
+            let _ = kind;
+            initial_style()
         })
+}
+
+/// 外観から、升目を組む見た目を作る（倍率は掛けない）。
+pub(crate) fn look_of(style: &PanelStyle) -> cells::TerminalLook {
+    let paper = channels(style.paper);
+    cells::TerminalLook {
+        family: style.family.to_string(),
+        font_size: style.size.clamp(8, 72) as f32,
+        paper,
+        ink: channels(style.ink),
+        palette: cells::TerminalLook::palette_for(paper),
+        transparent: style.transparency > 0,
+        bold: style.bold,
+        italic: style.italic,
+        underline: style.underline,
+        ..Default::default()
+    }
+}
+
+/// RFN01-66: 古い設定ファイルのTerminalの値（地・字・書体・大きさ）を外観の既定へ移す。
+/// 外観の値（`terminal.appearance.N`）はファイルでこれより後ろにあり、あればそちらが勝つ。
+pub(crate) fn migrate_legacy(window: &AppWindow, edit: impl Fn(usize, &mut PanelStyle)) {
+    let defaults: Vec<_> = (0..3)
+        .map(|kind| {
+            let mut style = default_style(window, kind);
+            edit(kind, &mut style);
+            style
+        })
+        .collect();
+    window.set_panel_defaults(ModelRc::new(VecModel::from(defaults)));
 }
 
 pub(crate) fn random_style(window: &AppWindow, kind: usize) -> Option<PanelStyle> {
@@ -94,24 +118,13 @@ pub(crate) fn look(window: &AppWindow, id: PaneId, spot: TerminalSpot) -> cells:
     } else {
         screen.panel_style
     };
-    if style.size == 0 {
-        let mut look = terminal_look(window);
-        look.font_size = zoomed_size(look.font_size, zoom);
-        return look;
-    }
-    let paper = channels(style.paper);
-    cells::TerminalLook {
-        family: style.family.to_string(),
-        font_size: zoomed_size(style.size.clamp(8, 72) as f32, zoom),
-        paper,
-        ink: channels(style.ink),
-        palette: cells::TerminalLook::palette_for(paper),
-        transparent: style.transparency > 0,
-        bold: style.bold,
-        italic: style.italic,
-        underline: style.underline,
-        ..Default::default()
-    }
+    let mut look = if style.size == 0 {
+        terminal_look(window)
+    } else {
+        look_of(&style)
+    };
+    look.font_size = zoomed_size(look.font_size, zoom);
+    look
 }
 
 pub(crate) fn clear_paper(tab: &mut PaneTab) {
