@@ -2,7 +2,7 @@ import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
 import { LinkCompletion } from "link-completion.slint";
 import { TablePicker } from "table-picker.slint";
-import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, Role, Slider, Tab, TerminalLinks, TextButton, ToggleChip } from "controls.slint";
+import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, MenuRow, MenuSep, MenuActions, MenuAction, Role, Slider, Tab, TerminalLinks, TextButton, ToggleChip } from "controls.slint";
 import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
 
 // The shared text surface: tiles, selection, IME, scrolling and body actions.
@@ -1373,6 +1373,7 @@ export component EditorSurface inherits Rectangle {
                                     root.bullet-rows-open = false;
                                     root.insert-open = -1;
                                     root.insert-rows-open = false;
+                                    MenuActions.refresh();
                                     context-menu.show();
                                     return;
                                 }
@@ -1647,27 +1648,28 @@ export component EditorSurface inherits Rectangle {
                                         if root.writing: MenuRow {
                                             title: @tr("Undo");
                                             shortcut: root.shortcut-keys[8];
-                                            enabled: root.can-undo;
+                                            enabled: root.standalone ? root.can-undo : MenuActions.allowed(MenuAction.undo, MenuActions.generation);
                                             activated => {
-                                                root.undo-requested(false);
+                                                if (root.standalone) { root.undo-requested(false); } else { MenuActions.run(MenuAction.undo); }
                                                 context-menu.close();
                                             }
                                         }
                                         if root.writing: MenuRow {
                                             title: @tr("Redo");
                                             shortcut: root.shortcut-keys[9];
-                                            enabled: root.can-redo;
+                                            enabled: root.standalone ? root.can-redo : MenuActions.allowed(MenuAction.redo, MenuActions.generation);
                                             activated => {
-                                                root.undo-requested(true);
+                                                if (root.standalone) { root.undo-requested(true); } else { MenuActions.run(MenuAction.redo); }
                                                 context-menu.close();
                                             }
                                         }
                                         if root.writing: MenuSep { }
                                         if root.writing: MenuRow {
+                                            enabled: root.standalone ? true : MenuActions.allowed(MenuAction.cut, MenuActions.generation);
                                             title: @tr("Cut");
                                             shortcut: "Ctrl+X";
                                             activated => {
-                                                root.copy-requested(true);
+                                                if (root.standalone) { root.copy-requested(true); } else { MenuActions.run(MenuAction.cut); }
                                                 context-menu.close();
                                             }
                                         }
@@ -1677,14 +1679,16 @@ export component EditorSurface inherits Rectangle {
                                         // Rustが前に出ているものを見て決める。
                                         // 綴じ目だけが違うので、そこは文言で言う。
                                         MenuRow {
+                                            enabled: root.standalone ? true : MenuActions.allowed(MenuAction.copy, MenuActions.generation);
                                             title: @tr("Copy");
                                             shortcut: root.terminal ? "Ctrl+Shift+C" : "Ctrl+C";
                                             activated => {
                                                 context-menu.close();
-                                                root.copy-requested(false);
+                                                if (root.standalone) { root.copy-requested(false); } else { MenuActions.run(MenuAction.copy); }
                                             }
                                         }
                                         MenuRow {
+                                            enabled: root.standalone || MenuActions.allowed(MenuAction.paste, MenuActions.generation);
                                             title: @tr("Paste");
                                             shortcut: "Ctrl+V";
                                             activated => {
@@ -1697,38 +1701,44 @@ export component EditorSurface inherits Rectangle {
                                                 ime-input.paste();
                                             }
                                         }
-                                        if root.terminal || root.embedded-panel: MenuRow { title: @tr("Appearance…"); activated => { root.appearance-requested(false); context-menu.close(); } }
-                                        if root.terminal: MenuRow { title: @tr("Find in Terminal…"); activated => { root.terminal-action(0, 0); context-menu.close(); } }
-                                        if root.terminal: MenuRow { title: @tr("Latest"); activated => { root.terminal-action(0, 4); context-menu.close(); } }
-                                        if root.terminal: MenuRow { title: @tr("Save Output…"); activated => { root.terminal-action(0, 7); context-menu.close(); } }
-                                        if root.terminal: MenuRow { title: @tr("Clear Screen"); activated => { root.terminal-action(0, 5); context-menu.close(); } }
-                                        if root.terminal: MenuRow { title: @tr("Clear History"); activated => { root.terminal-action(0, 6); context-menu.close(); } }
+                                        if root.terminal || root.embedded-panel: MenuRow { title: @tr("Appearance…"); enabled: MenuActions.allowed(MenuAction.appearance, MenuActions.generation); activated => { root.appearance-requested(false); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Find in Terminal…"); enabled: MenuActions.allowed(MenuAction.find-terminal, MenuActions.generation); activated => { MenuActions.run(MenuAction.find-terminal); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Latest"); enabled: MenuActions.allowed(MenuAction.latest, MenuActions.generation); activated => { MenuActions.run(MenuAction.latest); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Save Output…"); enabled: MenuActions.allowed(MenuAction.save-output, MenuActions.generation); activated => { MenuActions.run(MenuAction.save-output); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Clear Screen"); enabled: MenuActions.allowed(MenuAction.clear-screen, MenuActions.generation); activated => { MenuActions.run(MenuAction.clear-screen); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: @tr("Clear History"); enabled: MenuActions.allowed(MenuAction.clear-history, MenuActions.generation); activated => { MenuActions.run(MenuAction.clear-history); context-menu.close(); } }
                                         if root.terminal: MenuRow {
+                                            enabled: MenuActions.allowed(MenuAction.selection-to-panel, MenuActions.generation);
                                             title: @tr("Selection to Editor Panel");
-                                            activated => { root.panel-action(9, 0); context-menu.close(); }
+                                            activated => { MenuActions.run(MenuAction.selection-to-panel); context-menu.close(); }
                                         }
                                         if root.terminal: MenuRow {
+                                            enabled: MenuActions.allowed(MenuAction.history-to-panel, MenuActions.generation);
                                             title: @tr("History to Editor Panel");
-                                            activated => { root.panel-action(8, 0); context-menu.close(); }
+                                            activated => { MenuActions.run(MenuAction.history-to-panel); context-menu.close(); }
                                         }
                                         // RFN01-96: the last command's output, without its command.
                                         if root.terminal: MenuRow {
+                                            enabled: MenuActions.allowed(MenuAction.last-output-to-panel, MenuActions.generation);
                                             title: @tr("Last Output to Editor Panel");
-                                            activated => { root.panel-action(15, 0); context-menu.close(); }
+                                            activated => { MenuActions.run(MenuAction.last-output-to-panel); context-menu.close(); }
                                         }
                                         if root.terminal: MenuRow {
+                                            enabled: MenuActions.allowed(MenuAction.copy-last-output, MenuActions.generation);
                                             title: @tr("Copy Last Output");
-                                            activated => { root.terminal-action(0, 22); context-menu.close(); }
+                                            activated => { MenuActions.run(MenuAction.copy-last-output); context-menu.close(); }
                                         }
-                                        if root.terminal: MenuRow { title: root.terminal-file-logging ? @tr("Stop File Log") : @tr("Capture Log to File…"); activated => { root.panel-action(root.terminal-file-logging ? 14 : 10, 0); context-menu.close(); } }
+                                        if root.terminal: MenuRow { title: root.terminal-file-logging ? @tr("Stop File Log") : @tr("Capture Log to File…"); enabled: MenuActions.allowed(MenuAction.file-log, MenuActions.generation); activated => { MenuActions.run(MenuAction.file-log); context-menu.close(); } }
                                         if root.terminal: MenuRow {
+                                            enabled: MenuActions.allowed(MenuAction.panel-log, MenuActions.generation);
                                             title: root.terminal-capturing ? @tr("Stop Panel Log") : @tr("Capture Log to Editor Panel");
-                                            activated => { root.panel-action(root.terminal-capturing ? 13 : 7, 0); context-menu.close(); }
+                                            activated => { MenuActions.run(MenuAction.panel-log); context-menu.close(); }
                                         }
                                         if root.writing: MenuRow {
+                                            enabled: root.standalone ? true : MenuActions.allowed(MenuAction.copy-body, MenuActions.generation);
                                             title: @tr("Copy Text Only");
                                             activated => {
-                                                root.copy-body-requested();
+                                                if (root.standalone) { root.copy-body-requested(); } else { MenuActions.run(MenuAction.copy-body); }
                                                 context-menu.close();
                                             }
                                         }
@@ -1910,18 +1920,20 @@ export component EditorSurface inherits Rectangle {
                                             MenuSep { }
 
                                             MenuRow {
+                                                enabled: root.standalone ? true : MenuActions.allowed(MenuAction.mark, MenuActions.generation);
                                                 title: @tr("Start / Cancel Selection");
                                                 shortcut: root.shortcut-keys[25];
                                                 activated => {
-                                                    root.mark-toggled(false);
+                                                    if (root.standalone) { root.mark-toggled(false); } else { MenuActions.run(MenuAction.mark); }
                                                     context-menu.close();
                                                 }
                                             }
                                             MenuRow {
+                                                enabled: root.standalone ? true : MenuActions.allowed(MenuAction.mark-rect, MenuActions.generation);
                                                 title: @tr("Start / Cancel Rectangle Selection");
                                                 shortcut: root.shortcut-keys[26];
                                                 activated => {
-                                                    root.mark-toggled(true);
+                                                    if (root.standalone) { root.mark-toggled(true); } else { MenuActions.run(MenuAction.mark-rect); }
                                                     context-menu.close();
                                                 }
                                             }
@@ -1931,6 +1943,7 @@ export component EditorSurface inherits Rectangle {
                                             // 追加要件 2026-09-15（書き手）: **本文の紙の上の右クリックで背景。**
                                             // このTABの紙の色（見えている向き）。
                                             if !root.standalone: MenuRow {
+                                                enabled: MenuActions.allowed(MenuAction.text-background, MenuActions.generation);
                                                 title: @tr("Background") + "…";
                                                 activated => {
                                                     root.paper-target = 0;
@@ -1949,35 +1962,39 @@ export component EditorSurface inherits Rectangle {
                                         }
                                         if !root.standalone: MenuSep { }
                                         if !root.standalone: MenuRow {
+                                            enabled: MenuActions.allowed(MenuAction.below, MenuActions.generation);
                                             title: root.terminal ? @tr("Editor Panel") : @tr("Terminal Panel");
                                             shortcut: root.terminal ? "Ctrl+`" : root.shortcut-keys[17];
                                             activated => {
-                                                root.below-toggled();
+                                                MenuActions.run(MenuAction.below);
                                                 context-menu.close();
                                             }
                                         }
                                         if !root.standalone: MenuRow {
+                                            enabled: MenuActions.allowed(MenuAction.draft, MenuActions.generation);
                                             title: @tr("Quick Draft…");
                                             shortcut: root.shortcut-keys[10];
                                             activated => {
-                                                root.quick-draft-requested();
+                                                MenuActions.run(MenuAction.draft);
                                                 context-menu.close();
                                             }
                                         }
                                         if !root.standalone: MenuSep { }
                                         if !root.standalone: MenuRow {
+                                            enabled: MenuActions.allowed(MenuAction.back, MenuActions.generation);
                                             title: @tr("Back");
                                             shortcut: root.shortcut-keys[19];
                                             activated => {
-                                                root.navigate-requested(false);
+                                                MenuActions.run(MenuAction.back);
                                                 context-menu.close();
                                             }
                                         }
                                         if !root.standalone: MenuRow {
+                                            enabled: MenuActions.allowed(MenuAction.forward, MenuActions.generation);
                                             title: @tr("Forward");
                                             shortcut: root.shortcut-keys[20];
                                             activated => {
-                                                root.navigate-requested(true);
+                                                MenuActions.run(MenuAction.forward);
                                                 context-menu.close();
                                             }
                                         }

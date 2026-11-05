@@ -572,6 +572,7 @@ impl Harness {
         let live = Live {
             preview: Rc::default(),
             closed_tabs: Rc::default(),
+            kills: Rc::default(),
             composing: Rc::default(),
             settled: Rc::default(),
             states: crate::PaneStates::new(&document),

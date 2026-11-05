@@ -1,5 +1,6 @@
 //! Main menu: immutable invocation target, native popup lifetime, existing commands.
 use super::*;
+use std::cell::OnceCell;
 use windows::{
     Win32::{
         Foundation::{LPARAM, POINT, WPARAM},
@@ -10,7 +11,7 @@ use windows::{
 };
 
 #[derive(Clone)]
-enum Command {
+pub(crate) enum Command {
     NewFile,
     /// RFN01-88: 新規文書をテンプレートから（名前で）。
     NewFromTemplate(String),
@@ -955,20 +956,6 @@ impl Popup {
         std::mem::forget(child); // Parent owns submenu after successful append.
         Ok(())
     }
-    /// 日本語と英語の名前を持つ下の段。表示はいまの言葉で、パレットが読むときだけ
-    /// もう一方の言葉を控える（RFN01-87、`menu_snapshot`）。
-    fn child_named(&self, ja: &str, en: &str, child: Popup) -> windows::core::Result<()> {
-        let shown = pick(ja, en);
-        OTHER_MENUS.with(|menus| {
-            if let Some(menus) = menus.borrow_mut().as_mut() {
-                menus.insert(
-                    shown.to_owned(),
-                    if shown == ja { en } else { ja }.to_owned(),
-                );
-            }
-        });
-        self.child(shown, child)
-    }
 }
 impl Drop for Popup {
     fn drop(&mut self) {
@@ -1010,112 +997,75 @@ const GROUP_TITLES: [Title; MENU_GROUPS as usize] = [
     ("ヘルプ", "Help"),
 ];
 
-pub(crate) fn menu_snapshot(
-    window: &AppWindow,
-    live: &Live,
-    kills: &Rc<RefCell<Kills>>,
-) -> MenuSnapshot {
+pub(crate) fn menu_snapshot(window: &AppWindow, live: &Live) -> MenuSnapshot {
     let target = Target::for_shortcut(window, live);
     let mut commands = Vec::new();
     let mut entries = Vec::new();
-    let mut others = Vec::new();
-    OTHER_MENUS.with(|menus| *menus.borrow_mut() = Some(Default::default()));
-    let mut groups = Vec::new();
-    for group in 0..MENU_GROUPS {
-        OTHER_NAMES.with(|names| *names.borrow_mut() = Some(Vec::new()));
-        let built = build(window, live, kills, &target, group);
-        let group_others = OTHER_NAMES
-            .with(|names| names.borrow_mut().take())
-            .unwrap_or_default();
-        let Ok(Some((root, group_commands))) = built else {
-            continue;
-        };
-        let offset = commands.len();
-        let (ja, en) = GROUP_TITLES[group as usize];
-        let shown = pick(ja, en);
-        groups.push((
-            shown.to_owned(),
-            if shown == ja { en } else { ja }.to_owned(),
-        ));
-        read_menu(root.handle, &[shown.to_owned()], offset, &mut entries);
-        commands.extend(group_commands);
-        others.extend(group_others);
-    }
-    let menus = OTHER_MENUS
-        .with(|menus| menus.borrow_mut().take())
-        .unwrap_or_default();
-    for entry in &mut entries {
-        // **もう一方の言葉の道**：分類と下の段は控えた名前で、行は`menu_row`が控えた
-        // 名前で。控えの無いものは、表示の名前のまま。
-        let leaf = entry
-            .id
-            .checked_sub(1)
-            .and_then(|at| others.get(at))
-            .cloned();
-        let mut parts: Vec<String> = entry.title.split(" › ").map(str::to_owned).collect();
-        let last = parts.len() - 1;
-        for (at, part) in parts.iter_mut().enumerate() {
-            let other = if at == 0 {
-                groups
-                    .iter()
-                    .find(|(shown, _)| shown == part)
-                    .map(|(_, other)| other.clone())
-            } else if at == last {
-                leaf.clone()
-            } else {
-                menus.get(part.as_str()).cloned()
-            };
-            if let Some(other) = other.filter(|other| !other.is_empty()) {
-                *part = other;
+    // RFN01-66 第2弾: Windowsのメニューは作らず、中身をそのまま読む。両方の言葉の道も中身が持つ。
+    fn walk(
+        window: &AppWindow,
+        items: Vec<Item>,
+        path: &[(String, String)],
+        commands: &mut Vec<Command>,
+        entries: &mut Vec<MenuEntry>,
+    ) {
+        for item in items {
+            match item {
+                Item::Row {
+                    ja,
+                    en,
+                    command,
+                    enabled,
+                    ..
+                } => {
+                    let mut here = path.to_vec();
+                    here.push((ja, en));
+                    let (shown, other): (Vec<_>, Vec<_>) = here
+                        .iter()
+                        .map(|(ja, en)| {
+                            let shown = pick(ja, en);
+                            (shown, if shown == ja { en } else { ja })
+                        })
+                        .unzip();
+                    entries.push(MenuEntry {
+                        title: shown.join(" › "),
+                        key: shortcut(window, &command, false),
+                        enabled,
+                        other: other
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" › "),
+                        id: commands.len() + 1,
+                    });
+                    commands.push(command);
+                }
+                Item::Sep => {}
+                Item::Child { ja, en, items } => {
+                    let mut here = path.to_vec();
+                    here.push((ja, en));
+                    walk(window, items, &here, commands, entries);
+                }
             }
         }
-        entry.other = parts.join(" › ");
+    }
+    for group in 0..MENU_GROUPS {
+        let Some(items) = build(window, live, &target, group) else {
+            continue;
+        };
+        let (ja, en) = GROUP_TITLES[group as usize];
+        walk(
+            window,
+            items,
+            &[(ja.to_owned(), en.to_owned())],
+            &mut commands,
+            &mut entries,
+        );
     }
     MenuSnapshot {
         target,
         commands,
         entries,
-    }
-}
-
-/// 組んだメニューを上から読む。**項目のidは`commands`の並び（1から）**——`menu_row`が
-/// 足すときにそう決めている。
-fn read_menu(menu: HMENU, path: &[String], offset: usize, out: &mut Vec<MenuEntry>) {
-    // SAFETY: `menu` is a live menu `build` made, read only while it is held.
-    let count = unsafe { GetMenuItemCount(Some(menu)) };
-    for position in 0..count.max(0) as u32 {
-        let mut text = vec![0u16; 512];
-        let mut info = MENUITEMINFOW {
-            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
-            fMask: MIIM_STRING | MIIM_ID | MIIM_STATE | MIIM_SUBMENU | MIIM_FTYPE,
-            dwTypeData: windows::core::PWSTR(text.as_mut_ptr()),
-            cch: text.len() as u32 - 1,
-            ..Default::default()
-        };
-        // SAFETY: the buffer outlives the call and `cch` leaves room for the end.
-        if unsafe { GetMenuItemInfoW(menu, position, true, &mut info) }.is_err() {
-            continue;
-        }
-        if info.fType.contains(MFT_SEPARATOR) {
-            continue;
-        }
-        let written = String::from_utf16_lossy(&text[..info.cch as usize]).replace("&&", "&");
-        let (title, key) = written
-            .split_once('\t')
-            .map_or((written.as_str(), ""), |(title, key)| (title, key));
-        let mut here = path.to_vec();
-        here.push(title.to_owned());
-        if !info.hSubMenu.is_invalid() {
-            read_menu(info.hSubMenu, &here, offset, out);
-            continue;
-        }
-        out.push(MenuEntry {
-            title: here.join(" › "),
-            key: key.to_owned(),
-            enabled: !info.fState.contains(MFS_DISABLED),
-            other: String::new(),
-            id: offset + info.wID as usize,
-        });
     }
 }
 
@@ -1162,79 +1112,9 @@ fn step_openable(from: i32, delta: i32, openable: &[bool; MENU_GROUPS as usize])
 }
 
 /// 押せる末端の行が1つでもあるか（RFN01-38）。
-fn any_enabled(menu: HMENU) -> bool {
-    let count = unsafe { GetMenuItemCount(Some(menu)) };
-    if count <= 0 {
-        return false;
-    }
-    for index in 0..count {
-        let mut item = MENUITEMINFOW {
-            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
-            fMask: MIIM_STATE | MIIM_SUBMENU,
-            ..Default::default()
-        };
-        if unsafe { GetMenuItemInfoW(menu, index as u32, true, &mut item) }.is_err() {
-            continue;
-        }
-        if !item.hSubMenu.0.is_null() {
-            if any_enabled(item.hSubMenu) {
-                return true;
-            }
-        } else if item.fState.0 & MFS_DISABLED.0 == 0 {
-            return true;
-        }
-    }
-    false
-}
-
-/// この分類を開けるか（RFN01-38）。**子が全部無効なら親も無効**——書き手の決定
-/// 2026-09-21。タイトルバーの分類を灰色にするために、本文を見て答える。
-pub fn menu_opens(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>, group: i32) -> bool {
+pub fn menu_opens(window: &AppWindow, live: &Live, group: i32) -> bool {
     let target = Target::capture(window, live);
-    match build(window, live, kills, &target, group) {
-        Ok(Some((root, _))) => any_enabled(root.handle),
-        _ => false,
-    }
-}
-
-/// メニューの1行を足す。**番号は押されたときの言い方**——`commands`の並びが
-/// そのままIDになり、`execute`が同じ並びで読み返す。既定のキーがあれば行に併記する。
-#[allow(clippy::too_many_arguments)]
-fn menu_row(
-    window: &AppWindow,
-    menu: &Popup,
-    commands: &mut Vec<Command>,
-    field: bool,
-    ja: &str,
-    en: &str,
-    command: Command,
-    enabled: bool,
-    checked: bool,
-) -> windows::core::Result<()> {
-    let key = shortcut(window, &command, field);
-    let title = if key.is_empty() {
-        pick(ja, en).to_owned()
-    } else {
-        format!("{}\t{key}", pick(ja, en))
-    };
-    commands.push(command);
-    // RFN01-87: パレットが読むときだけ、もう一方の言葉を控える（`menu_snapshot`）。
-    OTHER_NAMES.with(|names| {
-        if let Some(names) = names.borrow_mut().as_mut() {
-            let shown = pick(ja, en);
-            names.push(if shown == ja { en } else { ja }.to_owned());
-        }
-    });
-    menu.row(&title, commands.len(), enabled, checked)
-}
-
-thread_local! {
-    /// RFN01-87: `menu_row`が足した行の、表示していない側の言葉（`commands`と同じ並び）。
-    /// `None`のあいだは控えない——ふだんのメニューは読まれないので要らない。
-    static OTHER_NAMES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
-    /// RFN01-87: 下の段の名前の、表示していない側の言葉（表示の名前から引く）。
-    static OTHER_MENUS: RefCell<Option<std::collections::HashMap<String, String>>> =
-        const { RefCell::new(None) };
+    build(window, live, &target, group).is_some_and(|items| Item::any_enabled(&items))
 }
 
 /// タイトルバーで、段落注記の中をもう1段分ける組（A案の並び）。右クリックの
@@ -1253,57 +1133,54 @@ fn title_submenu(shape: InsertShape) -> Option<Title> {
 
 /// 挿入メニューの**実行できる項目**（RFN01-38）。並び・文言・押せる条件は
 /// [`INSERT_MENU`]と[`context_insert_state`]——右クリックメニューと同じものを読む。
-#[allow(clippy::too_many_arguments)]
-fn insert_commands(
-    window: &AppWindow,
-    menu: &Popup,
-    commands: &mut Vec<Command>,
-    field: bool,
-    enabled: bool,
-    picked: bool,
-    notes: document::LineNoteState,
-    places: Places,
-) -> windows::core::Result<()> {
-    let row = |menu: &Popup,
-               commands: &mut Vec<Command>,
-               (shape, (ja, en)): (InsertShape, Title)|
-     -> windows::core::Result<()> {
-        let (allowed, checked) = context_insert_state(shape, enabled, picked, &notes, places);
-        let command = Command::Insert(shape);
-        menu_row(
-            window, menu, commands, field, ja, en, command, allowed, checked,
-        )
+fn insert_rows(scene: &Scene, root: &mut Vec<Item>) {
+    insert_rows_by(root, |shape| scene.insert_state(shape));
+}
+
+/// 挿入の行を、形ごとの「押せるか・いまの形か」（`state`）から組む。
+fn insert_rows_by(root: &mut Vec<Item>, state: impl Fn(InsertShape) -> (bool, bool)) {
+    let row = |(shape, (ja, en)): (InsertShape, Title)| {
+        let (enabled, checked) = state(shape);
+        Item::Row {
+            ja: ja.to_owned(),
+            en: en.to_owned(),
+            command: Command::Insert(shape),
+            enabled,
+            checked,
+        }
     };
     for entry in INSERT_MENU {
         match entry {
-            InsertEntry::Row(item) => row(menu, commands, *item)?,
+            InsertEntry::Row(item) => root.push(row(*item)),
             InsertEntry::Group((ja, en), items) => {
-                let group = Popup::new()?;
-                let mut nested: Option<(Title, Popup)> = None;
+                let mut group = Vec::new();
+                let mut nested: Option<(Title, Vec<Item>)> = None;
                 for item in *items {
                     let wanted = title_submenu(item.0);
                     if nested.as_ref().map(|(title, _)| *title) != wanted {
-                        if let Some(((ja, en), popup)) = nested.take() {
-                            group.child_named(ja, en, popup)?;
+                        if let Some(((ja, en), rows)) = nested.take() {
+                            group.push(Item::child(ja, en, rows));
                         }
                         if let Some(title) = wanted {
-                            nested = Some((title, Popup::new()?));
+                            nested = Some((title, Vec::new()));
                         }
                     }
-                    let into = nested.as_ref().map_or(&group, |(_, popup)| popup);
-                    row(into, commands, *item)?;
+                    match nested.as_mut() {
+                        Some((_, rows)) => rows.push(row(*item)),
+                        None => group.push(row(*item)),
+                    }
                 }
-                if let Some(((ja, en), popup)) = nested {
-                    group.child_named(ja, en, popup)?;
+                if let Some(((ja, en), rows)) = nested {
+                    group.push(Item::child(ja, en, rows));
                 }
-                menu.child_named(ja, en, group)?;
+                root.push(Item::child(ja, en, group));
             }
         }
     }
-    Ok(())
 }
 
-struct Target {
+#[derive(Clone)]
+pub(crate) struct Target {
     id: PaneId,
     parent: PaneId,
     document: Rc<OpenDocument>,
@@ -1326,7 +1203,9 @@ impl Target {
         Self::with_field(window, live, 0)
     }
     fn with_field(window: &AppWindow, live: &Live, field: i32) -> Self {
-        let id = focused_pane(window);
+        Self::of(window, live, focused_pane(window), field)
+    }
+    fn of(window: &AppWindow, live: &Live, id: PaneId, field: i32) -> Self {
         let parent = if id.is_panel() {
             PaneId::from_index(id.screen(window).panel_owner)
         } else {
@@ -1383,7 +1262,8 @@ impl Target {
     }
 }
 
-pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
+pub fn install(window: &AppWindow, live: &Live) {
+    install_menu_actions(window, live);
     let weak = window.as_weak();
     window.global::<MenuInput>().on_open_menu(move || {
         if let Some(window) = weak.upgrade() {
@@ -1419,7 +1299,6 @@ pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
     });
     let weak = window.as_weak();
     let live = live.clone();
-    let kills = kills.clone();
     window.on_title_menu_requested(move |group| {
         let Some(window) = weak.upgrade() else {
             return;
@@ -1433,25 +1312,180 @@ pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
         // **押せる行が1つも無い分類は開かない**（書き手の決定 2026-09-21）。
         // タイトルバーも同じ判定で灰色にしているが、**開くのはここ**なので、
         // ここでも断る——見た目と実際が食い違わないように、同じ答えを使う。
-        if !menu_opens(&window, &live, &kills, group) {
+        if !menu_opens(&window, &live, group) {
             return;
         }
         let target = Rc::new(Target::capture(&window, &live));
-        queue_group(&window, live.clone(), kills.clone(), target, group);
+        queue_group(&window, live.clone(), target, group);
     });
 }
 
-fn queue_group(
-    window: &AppWindow,
-    live: Live,
-    kills: Rc<RefCell<Kills>>,
-    target: Rc<Target>,
-    group: i32,
-) {
+/// RFN01-66 第2弾: ⋮・TABの右クリック・TAB帯・本文の右クリックの行（`MenuActions`）。
+/// 開く直前の`refresh`で対象（前にあるペイン）を捕まえ、行の押せるかも実行も同じ対象で行う。
+fn install_menu_actions(window: &AppWindow, live: &Live) {
+    thread_local! {
+        static TARGET: RefCell<Option<Rc<Target>>> = const { RefCell::new(None) };
+    }
+    let actions = window.global::<MenuActions>();
+    let weak = window.as_weak();
+    let refresh_live = live.clone();
+    actions.on_refresh(move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let target = Target::for_shortcut(&window, &refresh_live);
+        TARGET.with(|held| *held.borrow_mut() = Some(Rc::new(target)));
+        let actions = window.global::<MenuActions>();
+        actions.set_generation(actions.get_generation() + 1);
+    });
+    let weak = window.as_weak();
+    let allowed_live = live.clone();
+    actions.on_allowed(move |action, _| {
+        let Some(window) = weak.upgrade() else {
+            return false;
+        };
+        let Some(target) = TARGET.with(|held| held.borrow().clone()) else {
+            return false;
+        };
+        let scene = Scene::read(&window, &allowed_live, &target);
+        scene.enabled(&menu_action_command(&window, &scene, action))
+    });
+    let weak = window.as_weak();
+    let run_live = live.clone();
+    actions.on_run(move |action| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let Some(target) = TARGET.with(|held| held.borrow().clone()) else {
+            return;
+        };
+        if !target.valid(&window, &run_live) {
+            return;
+        }
+        let scene = Scene::read(&window, &run_live, &target);
+        let command = menu_action_command(&window, &scene, action);
+        if scene.enabled(&command) {
+            execute(&window, &run_live, &target, command);
+        }
+    });
+}
+
+/// 画面の配置だけを確かめる試験（`Live`を持たない窓）のための`MenuActions`。元に戻す・やり直しは
+/// 画面の行の値で、ほかの行はどれも押せ、押せば試験が見張る窓のコールバックへ渡す。
+#[cfg(test)]
+pub(crate) fn wire_bare_menu_actions(window: &AppWindow) {
+    let actions = window.global::<MenuActions>();
+    let weak = window.as_weak();
+    actions.on_allowed(move |action, _| {
+        let Some(window) = weak.upgrade() else {
+            return false;
+        };
+        let screen = PaneId::from_index(window.get_focused_pane()).screen(&window);
+        match action {
+            MenuAction::Undo => screen.can_undo,
+            MenuAction::Redo => screen.can_redo,
+            _ => true,
+        }
+    });
+    let weak = window.as_weak();
+    actions.on_run(move |action| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let p = window.get_focused_pane();
+        match action {
+            MenuAction::CopyBody => window.invoke_pane_copy_body(p),
+            MenuAction::Back => window.invoke_pane_navigate(p, false),
+            MenuAction::Forward => window.invoke_pane_navigate(p, true),
+            MenuAction::Below => window.invoke_pane_below_toggled(p),
+            MenuAction::FolderTerminal => window.invoke_shell_profile_action(8, 0),
+            MenuAction::Goto => window.invoke_goto_requested(true),
+            MenuAction::CompareSaved => window.invoke_compare_saved_requested(),
+            MenuAction::CompareHead => window.invoke_compare_head_requested(),
+            MenuAction::CompareFile => window.invoke_compare_files_requested(),
+            MenuAction::Undo => window.invoke_pane_undo(p, false),
+            MenuAction::Redo => window.invoke_pane_undo(p, true),
+            _ => {}
+        }
+    });
+}
+
+/// 行の操作を、タイトルバーのメニューと同じ[`Command`]へ。状態で行き先が変わる行（ログの開始・停止）
+/// は、いまの状態で決める。
+fn menu_action_command(window: &AppWindow, scene: &Scene, action: MenuAction) -> Command {
+    match action {
+        MenuAction::Save => Command::Save(false),
+        MenuAction::SaveAs => Command::Save(true),
+        MenuAction::FolderTerminal => Command::FolderTerminal,
+        MenuAction::Reveal => Command::Reveal,
+        MenuAction::CloseTab => Command::Close,
+        MenuAction::CloseOthers => Command::CloseOthers(true),
+        MenuAction::CloseAll => Command::CloseOthers(false),
+        MenuAction::CloseClean => Command::CloseClean,
+        MenuAction::Reopen => Command::Reopen,
+        MenuAction::SplitRight => Command::Split(true),
+        MenuAction::SplitDown => Command::Split(false),
+        MenuAction::SwapLeft => Command::Swap(0),
+        MenuAction::SwapRight => Command::Swap(1),
+        MenuAction::SwapUp => Command::Swap(2),
+        MenuAction::SwapDown => Command::Swap(3),
+        MenuAction::OtherPanes => Command::OtherPanes,
+        MenuAction::Below => Command::Below,
+        MenuAction::Goto => Command::Goto,
+        MenuAction::CompareSaved => Command::Compare(0),
+        MenuAction::CompareHead => Command::Compare(1),
+        MenuAction::CompareFile => Command::Compare(2),
+        MenuAction::Print => Command::Print,
+        MenuAction::ZoomIn => Command::Zoom(1),
+        MenuAction::ZoomOut => Command::Zoom(-1),
+        MenuAction::ZoomReset => Command::ZoomReset,
+        MenuAction::Duplicate => Command::Duplicate,
+        MenuAction::CopyPath => Command::CopyPath,
+        MenuAction::NewFile => Command::NewFile,
+        MenuAction::NewTerminal => Command::NewTerminal(window.get_default_shell()),
+        MenuAction::OpenFile => Command::Open,
+        MenuAction::Undo => Command::Undo(false),
+        MenuAction::Redo => Command::Undo(true),
+        MenuAction::Cut => Command::Copy(true),
+        MenuAction::Copy => Command::Copy(false),
+        MenuAction::Paste => Command::Paste,
+        MenuAction::CopyBody => Command::CopyBody,
+        MenuAction::Mark => Command::Mark(false),
+        MenuAction::MarkRect => Command::Mark(true),
+        MenuAction::Draft => Command::Draft,
+        MenuAction::Back => Command::Navigate(false),
+        MenuAction::Forward => Command::Navigate(true),
+        MenuAction::PaneBackground => Command::Paper(1),
+        MenuAction::TabColor => Command::Paper(2),
+        MenuAction::TextBackground => Command::Paper(0),
+        MenuAction::Appearance => Command::Appearance(1),
+        MenuAction::FindTerminal => Command::Find(false),
+        MenuAction::Latest => Command::Terminal(4),
+        MenuAction::SaveOutput => Command::Terminal(7),
+        MenuAction::ClearScreen => Command::Terminal(5),
+        MenuAction::ClearHistory => Command::Terminal(6),
+        MenuAction::SelectionToPanel => Command::Panel(9),
+        MenuAction::HistoryToPanel => Command::Panel(8),
+        MenuAction::LastOutputToPanel => Command::Panel(15),
+        MenuAction::CopyLastOutput => Command::Terminal(22),
+        MenuAction::FileLog => Command::Panel(if scene.screen.terminal_file_logging {
+            14
+        } else {
+            10
+        }),
+        MenuAction::PanelLog => Command::Panel(if scene.screen.terminal_capturing {
+            13
+        } else {
+            7
+        }),
+    }
+}
+
+fn queue_group(window: &AppWindow, live: Live, target: Rc<Target>, group: i32) {
     // **押せる行が1つも無い分類は開かない**（書き手の決定 2026-09-21）。開く道は
     // ここ1つに集まっているので、断るのもここに置く——見た目（灰色）と実際が
     // 食い違わないように、同じ問いを、答えを使う場所で聞く。
-    if !menu_opens(window, &live, &kills, group) {
+    if !menu_opens(window, &live, group) {
         return;
     }
     window.set_title_menu_open(true);
@@ -1482,8 +1516,8 @@ fn queue_group(
             );
             return;
         }
-        match show(&window, &live, &kills, &target, group) {
-            Ok(Some(next)) => queue_group(&window, live, kills, target, next),
+        match show(&window, &live, &target, group) {
+            Ok(Some(next)) => queue_group(&window, live, target, next),
             result => {
                 window.set_title_menu_open(false);
                 if let Err(error) = result {
@@ -1518,83 +1552,341 @@ fn text_state(window: &AppWindow, live: &Live, t: &Target) -> (bool, bool) {
     (text, editable)
 }
 
-/// 分類のメニューを組み立てる（RFN01-38）。
+/// RFN01-66 第2弾（書き手と合意 2026-11-05）: メニューの中身。**Windowsのメニューにする前の形**
+/// で、タイトルバーのメニュー（[`native`]）、コマンドパレット（[`menu_snapshot`]）、分類が
+/// 開けるかの判定（[`menu_opens`]）が同じものを読む。押せるかは組むときに[`Scene::enabled`]で決める。
+pub(crate) enum Item {
+    Row {
+        ja: String,
+        en: String,
+        command: Command,
+        enabled: bool,
+        checked: bool,
+    },
+    Sep,
+    Child {
+        ja: String,
+        en: String,
+        items: Vec<Item>,
+    },
+}
+impl Item {
+    fn child(ja: &str, en: &str, items: Vec<Item>) -> Self {
+        Item::Child {
+            ja: ja.to_owned(),
+            en: en.to_owned(),
+            items,
+        }
+    }
+    /// 押せる行が1つでもあるか（子の段の中も見る）。
+    fn any_enabled(items: &[Item]) -> bool {
+        items.iter().any(|item| match item {
+            Item::Row { enabled, .. } => *enabled,
+            Item::Sep => false,
+            Item::Child { items, .. } => Item::any_enabled(items),
+        })
+    }
+}
+
+/// RFN01-66 第2弾（書き手と合意 2026-11-05）: **アクションが実行できる前提の答えは、ここ1つ。**
 ///
-/// **出す前に、押せる行があるかを見るのにも使う**——子が全部無効なら親も無効に
-/// するためである（書き手の決定 2026-09-21）。
-fn build(
-    window: &AppWindow,
-    live: &Live,
-    kills: &Rc<RefCell<Kills>>,
-    t: &Target,
-    group: i32,
-) -> windows::core::Result<Option<(Popup, Vec<Command>)>> {
-    let root = Popup::new()?;
-    let mut commands = Vec::new();
-    let screen = t.id.screen(window);
-    let terminal = screen.terminal || matches!(t.spot, TerminalSpot::Below);
-    let (text, editable) = text_state(window, live, t);
-    let main = text && !t.id.is_panel();
-    // 書き手の求め 2026-11-05: 倍率は上段のTABのもので、Terminal・下段にも効く。下段から押しても
-    // 上段のTABの倍率が動く（`zoom_owner`）。
-    let zoomable = (text || terminal) && !screen.settings;
-    let zoom_now = t.parent.zoom(window);
-    let parent_screen = t.parent.screen(window);
-    let neighbours = [
-        parent_screen.swap_left,
-        parent_screen.swap_right,
-        parent_screen.swap_up,
-        parent_screen.swap_down,
-    ];
-    let tab_count = live.tabs.borrow().of(t.parent).tabs.len();
-    let can_back = {
-        let tabs = live.tabs.borrow();
-        let strip = tabs.of(t.id);
-        stepped_place(strip.history.len(), strip.at, false).is_some()
-    };
-    let can_forward = {
-        let tabs = live.tabs.borrow();
-        let strip = tabs.of(t.id);
-        stepped_place(strip.history.len(), strip.at, true).is_some()
-    };
-    let path = t.document.file.borrow().path().is_some();
-    // RFN01-61: バックアップが無ければ「Backup History…」を淡く出す。
-    let backups = path && crate::backup_ui::has_backups(window, &t.document);
-    let selected = if terminal {
-        live.cache
-            .borrow_mut()
-            .pane(t.parent)
-            .shell(t.spot)
-            .is_some_and(|view| view.selection.is_some())
-    } else {
-        !selected_runs(&live.cache, t.id).is_empty()
-    };
-    let running = t
-        .session
-        .as_ref()
-        .is_some_and(|session| !session.borrow().finished());
-    let row = |menu: &Popup,
-               commands: &mut Vec<Command>,
-               ja: &str,
-               en: &str,
-               command,
-               enabled,
-               checked| {
-        menu_row(
+/// 場面（対象のペインとTABが何で、どんな状態か）を一度だけ読み、[`Scene::enabled`]が
+/// 操作ごとに答える。タイトルバーのメニュー・コマンドパレット・キーが同じ答えを使う
+/// ——メニューで灰色の操作はキーでも動かず、パレットにも出ない。
+///
+/// 読むのに手間のかかるもの（バックアップの有無、Gitの管理下か、いまの行に置けるもの）は、
+/// 問われたときに一度だけ読む——キー1つの判定で全部を読まないように。
+pub(crate) struct Scene<'a> {
+    window: &'a AppWindow,
+    live: &'a Live,
+    t: &'a Target,
+    screen: PaneScreen,
+    /// 対象がTerminal（上段のTerminalか、下段のTerminal Panel）。
+    terminal: bool,
+    /// 本文を出している（設定のTAB・Terminal・中身の無い新しいTABではない）。
+    text: bool,
+    /// 書き換えられる（本文を出していて、Viewer・ReadOnlyでなく、読み取り専用でなく、欄にいない）。
+    editable: bool,
+    /// 上段の本文（下段のEditor Panelではない）。
+    main: bool,
+    /// 文書が保存先のファイルを持つ。
+    path: bool,
+    /// 入力欄にいる（検索欄など）。
+    field: bool,
+    selected: OnceCell<bool>,
+    backups: OnceCell<bool>,
+    git_history: OnceCell<bool>,
+    inserts: OnceCell<(document::LineNoteState, Places)>,
+}
+impl<'a> Scene<'a> {
+    pub(crate) fn read(window: &'a AppWindow, live: &'a Live, t: &'a Target) -> Self {
+        let screen = t.id.screen(window);
+        let (text, editable) = text_state(window, live, t);
+        let terminal = screen.terminal || matches!(t.spot, TerminalSpot::Below);
+        Self {
             window,
-            menu,
-            commands,
-            t.field > 0,
-            ja,
-            en,
+            live,
+            t,
+            terminal,
+            text,
+            editable,
+            main: text && !t.id.is_panel(),
+            path: t.document.file.borrow().path().is_some(),
+            field: t.field > 0,
+            screen,
+            selected: OnceCell::new(),
+            backups: OnceCell::new(),
+            git_history: OnceCell::new(),
+            inserts: OnceCell::new(),
+        }
+    }
+    /// 本文またはTerminalで字を選んでいる。
+    fn selected(&self) -> bool {
+        *self.selected.get_or_init(|| {
+            if self.terminal {
+                self.live
+                    .cache
+                    .borrow_mut()
+                    .pane(self.t.parent)
+                    .shell(self.t.spot)
+                    .is_some_and(|view| view.selection.is_some())
+            } else {
+                !selected_runs(&self.live.cache, self.t.id).is_empty()
+            }
+        })
+    }
+    /// 対象のシェルが終わっていない。
+    fn running(&self) -> bool {
+        self.t
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.borrow().finished())
+    }
+    fn front_terminal(&self) -> bool {
+        self.terminal && matches!(self.t.spot, TerminalSpot::Front)
+    }
+    fn zoomable(&self) -> bool {
+        (self.text || self.terminal) && !self.screen.settings
+    }
+    fn neighbour(&self, side: i32) -> bool {
+        let parent = self.t.parent.screen(self.window);
+        match side {
+            0 => parent.swap_left,
+            1 => parent.swap_right,
+            2 => parent.swap_up,
+            3 => parent.swap_down,
+            _ => false,
+        }
+    }
+    fn tab_count(&self) -> usize {
+        self.live.tabs.borrow().of(self.t.parent).tabs.len()
+    }
+    fn can_navigate(&self, forward: bool) -> bool {
+        let tabs = self.live.tabs.borrow();
+        let strip = tabs.of(self.t.id);
+        stepped_place(strip.history.len(), strip.at, forward).is_some()
+    }
+    fn panel_capturing(&self) -> bool {
+        terminal_panels::current(self.live, self.t.parent)
+            .is_some_and(|panel| panel.borrow().capture.is_some())
+    }
+    fn inserts(&self) -> &(document::LineNoteState, Places) {
+        self.inserts
+            .get_or_init(|| insert_inputs(self.window, self.live, self.t.id, &self.t.document))
+    }
+    /// 挿入のひな形が押せるか（1つめ）、いまの行がその形か（2つめ）。
+    fn insert_state(&self, shape: InsertShape) -> (bool, bool) {
+        // RFN01-38: **矩形選択のときは押せない**——矩形へまとめて入れるのは別の課題（RFN01-41）。
+        let rectangular = self.live.states.of(self.t.id).borrow().rectangular;
+        let (notes, places) = self.inserts();
+        context_insert_state(
+            shape,
+            self.editable && !rectangular,
+            self.selected(),
+            notes,
+            *places,
+        )
+    }
+
+    /// その操作が、いまの場面で実行できるか。
+    pub(crate) fn enabled(&self, command: &Command) -> bool {
+        let t = self.t;
+        let window = self.window;
+        let (text, editable, main, path, field) =
+            (self.text, self.editable, self.main, self.path, self.field);
+        let panel = t.id.is_panel();
+        match command {
+            Command::NewFile
+            | Command::NewFromTemplate(_)
+            | Command::NewTerminal(_)
+            | Command::Open
+            | Command::Folder
+            | Command::Recent(_)
+            | Command::Workspaces
+            | Command::GitRepository
+            | Command::SaveAll
+            | Command::Close
+            | Command::Exit
+            | Command::Help(_)
+            | Command::FolderFind
+            | Command::Sidebar(1..)
+            | Command::Toolbar
+            | Command::Palette
+            | Command::Draft => true,
+            // RFN01-111: Workspaceを使っている間、Explorerの面は押せない（アイコン列と同じ）。
+            Command::Sidebar(_) => !window.get_workspace_active(),
+            Command::FolderTerminal
+            | Command::CopyPath
+            | Command::Reveal
+            | Command::Encoding(_) => main && path,
+            Command::Save(false) => text && !t.id.reads_only(window) && !t.document.read_only(),
+            Command::Save(true) => text && !t.document.read_only(),
+            Command::CloseOthers(_) | Command::CloseClean | Command::Reopen => !panel,
+            Command::Rename => {
+                text && path
+                    && (!panel
+                        || terminal_panels::current(self.live, t.parent)
+                            .is_some_and(|panel| panel.borrow().capture.is_none()))
+            }
+            Command::Duplicate | Command::Print => main,
+            Command::Undo(redo) => {
+                field
+                    || (editable
+                        && if *redo {
+                            self.screen.can_redo
+                        } else {
+                            self.screen.can_undo
+                        })
+            }
+            Command::Copy(true) => field || (editable && self.selected()),
+            Command::Copy(false) => field || ((text || self.terminal) && self.selected()),
+            Command::Paste => field || editable || (self.terminal && self.running()),
+            Command::SelectAll => field || text,
+            Command::CopyBody => text && !field,
+            Command::Find(false) => text || self.terminal || self.screen.settings,
+            Command::Find(true) => editable,
+            Command::Goto => text,
+            Command::Line(_) => editable,
+            Command::Mark(_) => text && !field,
+            Command::Kill(i) => match i {
+                1 => text && self.selected() && !field,
+                2 => editable && self.selected(),
+                3 => editable && !self.live.kills.borrow().ring.is_empty(),
+                4 => {
+                    editable
+                        && standing_yank(t.id, &self.live.states, &t.document, &self.live.kills)
+                            .is_some()
+                }
+                _ => editable,
+            },
+            Command::Word(_) => main,
+            Command::Insert(shape) => self.insert_state(*shape).0,
+            Command::List(0, i) => {
+                editable
+                    && document::BULLET_MARKS
+                        .get(*i as usize)
+                        .is_some_and(|mark| bullet_marks_of(window).reads(*mark))
+            }
+            Command::List(_, _) => editable && bullet_marks_of(window).first().is_some(),
+            Command::Direction(true) | Command::Preview => main && !t.id.reads_only(window),
+            Command::Direction(false) => main,
+            Command::Paper(0) => main,
+            Command::Paper(1) => !panel,
+            Command::Paper(_) => !panel && matches!(t.spot, TerminalSpot::Front),
+            Command::Appearance(_) => self.terminal || panel,
+            Command::Viewer => text && !t.document.read_only(),
+            Command::Display(_) => main,
+            Command::Split(_) => PaneId::count(window) < MAX_PANES,
+            Command::OtherPanes => PaneId::count(window) > 1,
+            Command::Swap(side) => self.neighbour(*side),
+            Command::Step(_) => !panel && self.tab_count() > 1,
+            Command::Focus(side) => {
+                self.neighbour(*side) || (*side == 3 && t.parent.screen(window).below_kind != 0)
+            }
+            Command::Navigate(forward) => text && self.can_navigate(*forward),
+            Command::Below => !self.screen.settings,
+            Command::Above => panel || matches!(t.spot, TerminalSpot::Below),
+            Command::Zoom(step) => {
+                let now = t.parent.zoom(window);
+                self.zoomable()
+                    && if *step > 0 {
+                        now < ZOOM_MAX
+                    } else {
+                        now > ZOOM_MIN
+                    }
+            }
+            Command::ZoomReset | Command::ZoomSet(_) => self.zoomable(),
+            Command::Compare(0) | Command::Compare(1) => main && path,
+            Command::Compare(3) => {
+                main && *self
+                    .backups
+                    .get_or_init(|| path && crate::backup_ui::has_backups(window, &t.document))
+            }
+            Command::Compare(4) => {
+                main && path
+                    && *self
+                        .git_history
+                        .get_or_init(|| crate::git_file_history::available(&t.document))
+            }
+            Command::Compare(_) => main,
+            Command::Spelling => {
+                if crate::spelling_ui::checking(&t.document) {
+                    main
+                } else {
+                    main && editable
+                }
+            }
+            Command::SpellingStep(_) => main && crate::spelling_ui::checking(&t.document),
+            Command::ReadAloud => {
+                crate::read_aloud::reading() || (main && window.get_speech_available())
+            }
+            // Terminalの面の操作。メニューにはTerminalが対象のときだけ出る。
+            Command::Terminal(_) | Command::Shell(_) => self.terminal,
+            Command::Panel(10) => {
+                self.front_terminal() && self.running() && !self.screen.terminal_file_logging
+            }
+            Command::Panel(14) => self.front_terminal() && self.screen.terminal_file_logging,
+            Command::Panel(7) => {
+                self.front_terminal() && self.running() && !self.screen.terminal_capturing
+            }
+            Command::Panel(13) => self.front_terminal() && self.screen.terminal_capturing,
+            Command::Panel(9) => self.front_terminal() && self.selected(),
+            Command::Panel(8) | Command::Panel(15) => self.front_terminal(),
+            Command::Panel(5) => panel && self.panel_capturing(),
+            Command::Panel(_) => self.terminal || panel,
+            Command::ScrollLine(_) | Command::SelectLine => text,
+        }
+    }
+    /// メニューの1行。押せるかは[`Scene::enabled`]が決める。
+    fn row(&self, ja: &str, en: &str, command: Command, checked: bool) -> Item {
+        let enabled = match &command {
+            // 挿入の形は、押せるかと一緒に「いまの行がその形か」も同じ答えから読む。
+            Command::Insert(shape) => self.insert_state(*shape).0,
+            command => self.enabled(command),
+        };
+        Item::Row {
+            ja: ja.to_owned(),
+            en: en.to_owned(),
             command,
             enabled,
             checked,
-        )
-    };
+        }
+    }
+}
+
+/// 分類のメニューの中身を組む（RFN01-38）。
+///
+/// **出す前に、押せる行があるかを見るのにも使う**——子が全部無効なら親も無効に
+/// するためである（書き手の決定 2026-09-21）。RFN01-66 第2弾: 押せるかは行ごとに
+/// [`Scene::enabled`]が答える（ここには書かない）。
+fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<Item>> {
+    let scene = Scene::read(window, live, t);
+    let mut root: Vec<Item> = Vec::new();
+    let terminal = scene.terminal;
+    let zoom_now = t.parent.zoom(window);
     macro_rules! add {
-        ($ja:expr,$en:expr,$cmd:expr,$enabled:expr) => {
-            row(&root, &mut commands, $ja, $en, $cmd, $enabled, false)?
+        ($ja:expr,$en:expr,$cmd:expr) => {
+            root.push(scene.row($ja, $en, $cmd, false))
         };
     }
     match group {
@@ -1603,239 +1895,122 @@ fn build(
             // 中に空の文書と各テンプレートを並べる。Ctrl+Nは空の文書のまま。
             let templates = crate::templates_in_use(live);
             if templates.is_empty() {
-                add!("新規文書", "New File", Command::NewFile, true);
+                add!("新規文書", "New File", Command::NewFile);
             } else {
-                let documents = Popup::new()?;
-                row(
-                    &documents,
-                    &mut commands,
-                    "空の文書",
-                    "Blank Document",
-                    Command::NewFile,
-                    true,
-                    false,
-                )?;
-                documents.sep()?;
+                let mut documents = Vec::new();
+                documents.push(scene.row("空の文書", "Blank Document", Command::NewFile, false));
+                documents.push(Item::Sep);
                 for template in templates {
-                    row(
-                        &documents,
-                        &mut commands,
+                    documents.push(scene.row(
                         &template.name,
                         &template.name,
                         Command::NewFromTemplate(template.name.clone()),
-                        true,
                         false,
-                    )?;
+                    ));
                 }
-                root.child_named("新規文書", "New File", documents)?;
+                root.push(Item::child("新規文書", "New File", documents));
             }
-            let shells = Popup::new()?;
+            let mut shells = Vec::new();
             for (i, shell) in configured_shells(window).iter().enumerate() {
-                row(
-                    &shells,
-                    &mut commands,
+                shells.push(scene.row(
                     &shell.name,
                     &shell.name,
                     Command::NewTerminal(i as i32),
-                    true,
                     false,
-                )?;
+                ));
             }
-            root.child_named("新しいTerminal", "New Terminal", shells)?;
+            root.push(Item::child("新しいTerminal", "New Terminal", shells));
             add!(
                 "文書のフォルダでTerminal起動",
                 "Terminal in Document Folder",
-                Command::FolderTerminal,
-                main && path
+                Command::FolderTerminal
             );
-            add!("ファイルを開く…", "Open File…", Command::Open, true);
-            add!("フォルダを開く…", "Open Folder…", Command::Folder, true);
-            let recent = Popup::new()?;
+            add!("ファイルを開く…", "Open File…", Command::Open);
+            add!("フォルダを開く…", "Open Folder…", Command::Folder);
+            let mut recent = Vec::new();
             for path in offered_folders(live) {
                 let name = path.display().to_string();
-                row(
-                    &recent,
-                    &mut commands,
-                    &name,
-                    &name,
-                    Command::Recent(path),
-                    true,
-                    false,
-                )?;
+                recent.push(scene.row(&name, &name, Command::Recent(path), false));
             }
-            root.child_named("最近のフォルダ", "Recent Folders", recent)?;
-            add!("Workspaces…", "Workspaces…", Command::Workspaces, true);
+            root.push(Item::child("最近のフォルダ", "Recent Folders", recent));
+            add!("Workspaces…", "Workspaces…", Command::Workspaces);
             // RFN01-67: 全ブランチのグラフ（Git Changes で選んでいるリポジトリ）。
-            add!(
-                "Git Repository…",
-                "Git Repository…",
-                Command::GitRepository,
-                true
-            );
-            root.sep()?;
-            add!(
-                "保存",
-                "Save",
-                Command::Save(false),
-                text && !t.id.reads_only(window) && !t.document.read_only()
-            );
-            add!(
-                "名前を付けて保存…",
-                "Save As…",
-                Command::Save(true),
-                text && !t.document.read_only()
-            );
+            add!("Git Repository…", "Git Repository…", Command::GitRepository);
+            root.push(Item::Sep);
+            add!("保存", "Save", Command::Save(false));
+            add!("名前を付けて保存…", "Save As…", Command::Save(true));
             add!(
                 "すべて保存（Editor Panelを除く）",
                 "Save All (except Editor Panels)",
-                Command::SaveAll,
-                true
+                Command::SaveAll
             );
-            root.sep()?;
-            add!("TABを閉じる", "Close Tab", Command::Close, true);
+            root.push(Item::Sep);
+            add!("TABを閉じる", "Close Tab", Command::Close);
             add!(
                 "他のTABを閉じる",
                 "Close Other Tabs",
-                Command::CloseOthers(true),
-                !t.id.is_panel()
+                Command::CloseOthers(true)
             );
             add!(
                 "すべてのTABを閉じる",
                 "Close All Tabs",
-                Command::CloseOthers(false),
-                !t.id.is_panel()
+                Command::CloseOthers(false)
             );
             add!(
                 "未編集のTABを閉じる",
                 "Close Unedited Tabs",
-                Command::CloseClean,
-                !t.id.is_panel()
+                Command::CloseClean
             );
-            add!(
-                "閉じたTABを開き直す",
-                "Reopen Closed Tab",
-                Command::Reopen,
-                !t.id.is_panel()
-            );
-            root.sep()?;
-            let renamable = text
-                && path
-                && (!t.id.is_panel()
-                    || terminal_panels::current(live, t.parent)
-                        .is_some_and(|p| p.borrow().capture.is_none()));
-            add!("名前を変更…", "Rename…", Command::Rename, renamable);
-            add!(
-                "別TABで開く",
-                "Open in Another Tab",
-                Command::Duplicate,
-                main
-            );
-            add!("パスをコピー", "Copy Path", Command::CopyPath, main && path);
-            add!(
-                "Explorerで表示",
-                "Reveal in Explorer",
-                Command::Reveal,
-                main && path
-            );
-            let enc = Popup::new()?;
+            add!("閉じたTABを開き直す", "Reopen Closed Tab", Command::Reopen);
+            root.push(Item::Sep);
+            add!("名前を変更…", "Rename…", Command::Rename);
+            add!("別TABで開く", "Open in Another Tab", Command::Duplicate);
+            add!("パスをコピー", "Copy Path", Command::CopyPath);
+            add!("Explorerで表示", "Reveal in Explorer", Command::Reveal);
+            let mut enc = Vec::new();
             for (i, name) in ["UTF-8", "UTF-16 LE", "UTF-16 BE", "CP932"]
                 .iter()
                 .enumerate()
             {
-                row(
-                    &enc,
-                    &mut commands,
-                    name,
-                    name,
-                    Command::Encoding(i as i32),
-                    main && path,
-                    false,
-                )?;
+                enc.push(scene.row(name, name, Command::Encoding(i as i32), false));
             }
-            root.child_named("文字コードを指定して開き直す", "Reopen with Encoding", enc)?;
+            root.push(Item::child(
+                "文字コードを指定して開き直す",
+                "Reopen with Encoding",
+                enc,
+            ));
             // RFN01-61（書き手の求め 2026-09-27）: バックアップの履歴は File から（今のTABのファイル）。
             add!(
                 "バックアップの履歴…",
                 "Backup History…",
-                Command::Compare(3),
-                main && backups
+                Command::Compare(3)
             );
             // RFN01-67 PR 3: Git の履歴も File から（今のTABのファイル、管理下になければ淡く）。
-            add!(
-                "Gitの履歴…",
-                "Git History…",
-                Command::Compare(4),
-                main && path && crate::git_file_history::available(&t.document)
-            );
-            add!("印刷…", "Print…", Command::Print, main);
-            root.sep()?;
-            add!("終了", "Exit", Command::Exit, true);
+            add!("Gitの履歴…", "Git History…", Command::Compare(4));
+            add!("印刷…", "Print…", Command::Print);
+            root.push(Item::Sep);
+            add!("終了", "Exit", Command::Exit);
         }
         1 => {
-            add!(
-                "元に戻す",
-                "Undo",
-                Command::Undo(false),
-                (editable && screen.can_undo) || t.field > 0
-            );
-            add!(
-                "やり直し",
-                "Redo",
-                Command::Undo(true),
-                (editable && screen.can_redo) || t.field > 0
-            );
-            root.sep()?;
-            add!(
-                "切り取り",
-                "Cut",
-                Command::Copy(true),
-                (editable && selected) || t.field > 0
-            );
-            add!(
-                "コピー",
-                "Copy",
-                Command::Copy(false),
-                ((text || terminal) && selected) || t.field > 0
-            );
-            add!(
-                "貼り付け",
-                "Paste",
-                Command::Paste,
-                editable || (terminal && running) || t.field > 0
-            );
-            add!(
-                "全選択",
-                "Select All",
-                Command::SelectAll,
-                text || t.field > 0
-            );
-            add!(
-                "本文だけをコピー",
-                "Copy Text Only",
-                Command::CopyBody,
-                text && t.field <= 0
-            );
-            root.sep()?;
-            add!(
-                "検索…",
-                "Find…",
-                Command::Find(false),
-                text || terminal || screen.settings
-            );
-            add!("置換…", "Replace…", Command::Find(true), editable);
-            add!("行へ移動…", "Go to Line…", Command::Goto, text);
-            add!(
-                "フォルダ内を検索…",
-                "Find in Folder…",
-                Command::FolderFind,
-                true
-            );
+            add!("元に戻す", "Undo", Command::Undo(false));
+            add!("やり直し", "Redo", Command::Undo(true));
+            root.push(Item::Sep);
+            add!("切り取り", "Cut", Command::Copy(true));
+            add!("コピー", "Copy", Command::Copy(false));
+            add!("貼り付け", "Paste", Command::Paste);
+            add!("全選択", "Select All", Command::SelectAll);
+            add!("本文だけをコピー", "Copy Text Only", Command::CopyBody);
+            root.push(Item::Sep);
+            add!("検索…", "Find…", Command::Find(false));
+            add!("置換…", "Replace…", Command::Find(true));
+            add!("行へ移動…", "Go to Line…", Command::Goto);
+            add!("フォルダ内を検索…", "Find in Folder…", Command::FolderFind);
             if terminal {
-                root.sep()?;
-                add!("画面をクリア", "Clear Screen", Command::Terminal(5), true);
-                add!("履歴をクリア", "Clear History", Command::Terminal(6), true);
+                root.push(Item::Sep);
+                add!("画面をクリア", "Clear Screen", Command::Terminal(5));
+                add!("履歴をクリア", "Clear History", Command::Terminal(6));
             }
-            let lines = Popup::new()?;
+            let mut lines = Vec::new();
             for (ja, en, n) in [
                 ("行を削除", "Delete Line", 4),
                 ("行を上へ移動", "Move Line Up", 0),
@@ -1843,32 +2018,20 @@ fn build(
                 ("行を上へ複製", "Duplicate Line Up", 2),
                 ("行を下へ複製", "Duplicate Line Down", 3),
             ] {
-                row(
-                    &lines,
-                    &mut commands,
-                    ja,
-                    en,
-                    Command::Line(n),
-                    editable,
-                    false,
-                )?;
+                lines.push(scene.row(ja, en, Command::Line(n), false));
             }
-            root.child_named("行操作", "Lines", lines)?;
+            root.push(Item::child("行操作", "Lines", lines));
             add!(
                 "選択を開始・解除",
                 "Start / Cancel Selection",
-                Command::Mark(false),
-                text && t.field <= 0
+                Command::Mark(false)
             );
             add!(
                 "矩形選択を開始・解除",
                 "Start / Cancel Rectangle Selection",
-                Command::Mark(true),
-                text && t.field <= 0
+                Command::Mark(true)
             );
-            let kill_menu = Popup::new()?;
-            let can_yank = !kills.borrow().ring.is_empty();
-            let can_older = standing_yank(t.id, &live.states, &t.document, kills).is_some();
+            let mut kill_menu = Vec::new();
             for (i, (ja, en)) in [
                 ("行末まで切り取り", "Cut to End of Line"),
                 ("Kill Ringへコピー", "Copy to Kill Ring"),
@@ -1879,129 +2042,59 @@ fn build(
             .iter()
             .enumerate()
             {
-                let enabled = match i {
-                    1 => text && selected && t.field <= 0,
-                    2 => editable && selected,
-                    3 => editable && can_yank,
-                    4 => editable && can_older,
-                    _ => editable,
-                };
-                row(
-                    &kill_menu,
-                    &mut commands,
-                    ja,
-                    en,
-                    Command::Kill(i as i32),
-                    enabled,
-                    false,
-                )?;
+                kill_menu.push(scene.row(ja, en, Command::Kill(i as i32), false));
             }
-            root.child("Kill Ring", kill_menu)?;
-            let words = Popup::new()?;
-            row(
-                &words,
-                &mut commands,
+            root.push(Item::child("Kill Ring", "Kill Ring", kill_menu));
+            let mut words = Vec::new();
+            words.push(scene.row(
                 "なし",
                 "None",
                 Command::Word(0),
-                main,
                 pane_word_mode(live, t.id) == 0,
-            )?;
+            ));
             for mode in word_modes_now() {
-                row(
-                    &words,
-                    &mut commands,
+                words.push(scene.row(
                     &mode.name,
                     &mode.name,
                     Command::Word(mode.id),
-                    main,
                     pane_word_mode(live, t.id) == mode.id,
-                )?;
+                ));
             }
-            root.child_named("単語チェック", "Word Check", words)?;
+            root.push(Item::child("単語チェック", "Word Check", words));
         }
         2 => {
-            // RFN01-38: リンク・ルビ・注記・行の体裁が実行できる。**矩形選択のときは
-            // 押せない**——矩形へまとめて入れるのは別の課題である（RFN01-41）。
-            let rectangular = live.states.of(t.id).borrow().rectangular;
             // **行の体裁は、いまの行が何かを読んでから出す**——押せるのに何も
-            // 起きない行を作らないため、見る側と押す側が同じ答えを使う。
-            let (notes, places) = insert_inputs(window, live, t.id, &t.document);
-            insert_commands(
-                window,
-                &root,
-                &mut commands,
-                t.field > 0,
-                editable && !rectangular,
-                selected,
-                notes,
-                places,
-            )?;
-            root.sep()?;
-            let marks = bullet_marks_of(window);
+            // 起きない行を作らないため、見る側と押す側が同じ答え（`Scene::insert_state`）を使う。
+            insert_rows(&scene, &mut root);
+            root.push(Item::Sep);
             for (i, mark) in document::BULLET_MARKS.iter().enumerate() {
                 let name = format!("{} {mark}", pick("箇条書き", "Bullet List"));
-                row(
-                    &root,
-                    &mut commands,
-                    &name,
-                    &name,
-                    Command::List(0, i as i32),
-                    editable && marks.reads(*mark),
-                    false,
-                )?;
+                root.push(scene.row(&name, &name, Command::List(0, i as i32), false));
             }
-            add!(
-                "番号付きリスト",
-                "Numbered List",
-                Command::List(1, -1),
-                editable && marks.first().is_some()
-            );
-            add!(
-                "番号を振り直す",
-                "Renumber",
-                Command::List(2, -1),
-                editable && marks.first().is_some()
-            );
+            add!("番号付きリスト", "Numbered List", Command::List(1, -1));
+            add!("番号を振り直す", "Renumber", Command::List(2, -1));
         }
         3 => {
-            row(
-                &root,
-                &mut commands,
+            root.push(scene.row(
                 "横書き",
                 "Horizontal",
                 Command::Direction(false),
-                main,
                 !t.id.vertical(window),
-            )?;
-            row(
-                &root,
-                &mut commands,
+            ));
+            root.push(scene.row(
                 "縦書き",
                 "Vertical",
                 Command::Direction(true),
-                main && !t.id.reads_only(window),
                 t.id.vertical(window),
-            )?;
-            root.sep()?;
+            ));
+            root.push(Item::Sep);
             add!(
                 "このPaneの背景…（個別色を解除）",
                 "Pane Background… (clears individual colors)",
-                Command::Paper(1),
-                !t.id.is_panel()
+                Command::Paper(1)
             );
-            add!(
-                "このTABの本文背景…",
-                "Tab Background…",
-                Command::Paper(0),
-                main
-            );
-            add!(
-                "このTAB見出しの色…",
-                "Tab Header Color…",
-                Command::Paper(2),
-                !t.id.is_panel() && matches!(t.spot, TerminalSpot::Front)
-            );
+            add!("このTABの本文背景…", "Tab Background…", Command::Paper(0));
+            add!("このTAB見出しの色…", "Tab Header Color…", Command::Paper(2));
             if terminal || t.id.is_panel() {
                 add!(
                     "このTABの外観…",
@@ -2012,64 +2105,55 @@ fn build(
                         } else {
                             1
                         }
-                    ),
-                    true
+                    )
                 );
             }
         }
         4 => {
-            let side = Popup::new()?;
+            let mut side = Vec::new();
             for (ja, en, n) in [
                 ("Workspace", "Workspace", 4),
                 ("Explorer", "Explorer", 0),
                 ("検索", "Search", 1),
                 ("履歴", "History", 2),
                 ("Outline", "Outline", 3),
+                // RFN01-66 第2弾: アイコン列と同じ面を同じ順で（BookmarksとTagsが無かった）。
+                ("ブックマーク", "Bookmarks", 5),
+                ("タグ", "Tags", 6),
                 ("Git Changes", "Git Changes", 8),
                 ("バックアップ", "Backups", 7),
             ] {
-                row(
-                    &side,
-                    &mut commands,
+                side.push(scene.row(
                     ja,
                     en,
                     Command::Sidebar(n),
-                    true,
                     window.get_tree_open() && window.get_left_tab() == n,
-                )?;
+                ));
             }
-            root.child_named("サイドバー", "Sidebar", side)?;
+            root.push(Item::child("サイドバー", "Sidebar", side));
             // 書き手の求め 2026-09-23: 挿入メニューの全部をアイコンで。**どちらか
             // 片方でも、両方でもよい**ので、2つは別の行である。
-            row(
-                &root,
-                &mut commands,
+            root.push(scene.row(
                 "ツールバー",
                 "Toolbar",
                 Command::Toolbar,
-                true,
                 window.get_format_toolbar_open(),
-            )?;
-            row(
-                &root,
-                &mut commands,
+            ));
+            root.push(scene.row(
                 "書式パレット",
                 "Format Palette",
                 Command::Palette,
-                true,
                 window.get_format_palette_open(),
-            )?;
+            ));
             add!(
                 "Source・Preview切替",
                 "Toggle Source / Preview",
-                Command::Preview,
-                main && !t.id.reads_only(window)
+                Command::Preview
             );
             add!(
                 "Viewer・ReadOnly開始／終了",
                 "Start / Exit Viewer or ReadOnly",
-                Command::Viewer,
-                text && !t.document.read_only()
+                Command::Viewer
             );
             for (setting, ja, en) in [
                 (12, "行番号", "Line Numbers"),
@@ -2080,35 +2164,12 @@ fn build(
                 let name = pick(ja, en).to_owned();
                 let on = Setting::from_index(setting)
                     .is_some_and(|s| s.read(window, usize::from(t.id.vertical(window))) != 0);
-                row(
-                    &root,
-                    &mut commands,
-                    &name,
-                    &name,
-                    Command::Display(setting),
-                    main,
-                    on,
-                )?;
+                root.push(scene.row(&name, &name, Command::Display(setting), on));
             }
-            root.sep()?;
-            add!(
-                "右へ分割",
-                "Split Right",
-                Command::Split(true),
-                PaneId::count(window) < MAX_PANES
-            );
-            add!(
-                "下へ分割",
-                "Split Down",
-                Command::Split(false),
-                PaneId::count(window) < MAX_PANES
-            );
-            add!(
-                "他のPaneを閉じる",
-                "Close Other Panes",
-                Command::OtherPanes,
-                PaneId::count(window) > 1
-            );
+            root.push(Item::Sep);
+            add!("右へ分割", "Split Right", Command::Split(true));
+            add!("下へ分割", "Split Down", Command::Split(false));
+            add!("他のPaneを閉じる", "Close Other Panes", Command::OtherPanes);
             for (n, (ja, en)) in [
                 ("左と入替", "Swap Left"),
                 ("右と入替", "Swap Right"),
@@ -2118,35 +2179,11 @@ fn build(
             .iter()
             .enumerate()
             {
-                row(
-                    &root,
-                    &mut commands,
-                    ja,
-                    en,
-                    Command::Swap(n as i32),
-                    neighbours[n],
-                    false,
-                )?;
+                root.push(scene.row(ja, en, Command::Swap(n as i32), false));
             }
-            let go = Popup::new()?;
-            row(
-                &go,
-                &mut commands,
-                "次のTAB",
-                "Next Tab",
-                Command::Step(false),
-                !t.id.is_panel() && tab_count > 1,
-                false,
-            )?;
-            row(
-                &go,
-                &mut commands,
-                "前のTAB",
-                "Previous Tab",
-                Command::Step(true),
-                !t.id.is_panel() && tab_count > 1,
-                false,
-            )?;
+            let mut go = Vec::new();
+            go.push(scene.row("次のTAB", "Next Tab", Command::Step(false), false));
+            go.push(scene.row("前のTAB", "Previous Tab", Command::Step(true), false));
             for (n, (ja, en)) in [
                 ("左のPane", "Left Pane"),
                 ("右のPane", "Right Pane"),
@@ -2156,250 +2193,203 @@ fn build(
             .iter()
             .enumerate()
             {
-                row(
-                    &go,
-                    &mut commands,
-                    ja,
-                    en,
-                    Command::Focus(n as i32),
-                    neighbours[n] || (n == 3 && parent_screen.below_kind != 0),
-                    false,
-                )?;
+                go.push(scene.row(ja, en, Command::Focus(n as i32), false));
             }
-            row(
-                &go,
-                &mut commands,
-                "戻る",
-                "Back",
-                Command::Navigate(false),
-                text && can_back,
-                false,
-            )?;
-            row(
-                &go,
-                &mut commands,
-                "進む",
-                "Forward",
-                Command::Navigate(true),
-                text && can_forward,
-                false,
-            )?;
-            root.child_named("移動", "Go To", go)?;
-            add!(
-                "下段を表示・閉じる",
-                "Show / Hide Panel",
-                Command::Below,
-                !screen.settings
-            );
+            go.push(scene.row("戻る", "Back", Command::Navigate(false), false));
+            go.push(scene.row("進む", "Forward", Command::Navigate(true), false));
+            root.push(Item::child("移動", "Go To", go));
+            add!("下段を表示・閉じる", "Show / Hide Panel", Command::Below);
             if terminal {
                 add!(
                     "最新の出力へ",
                     "Latest Terminal Output",
-                    Command::Terminal(4),
-                    true
+                    Command::Terminal(4)
                 );
             }
             if t.id.is_panel() || matches!(t.spot, TerminalSpot::Below) {
-                add!("上の領域へ", "Focus Above", Command::Above, true);
+                add!("上の領域へ", "Focus Above", Command::Above);
             }
-            add!("Quick Draft…", "Quick Draft…", Command::Draft, true);
-            root.sep()?;
-            add!(
-                "拡大",
-                "Zoom In",
-                Command::Zoom(1),
-                zoomable && zoom_now < ZOOM_MAX
-            );
-            add!(
-                "縮小",
-                "Zoom Out",
-                Command::Zoom(-1),
-                zoomable && zoom_now > ZOOM_MIN
-            );
-            add!("既定倍率に戻す", "Reset Zoom", Command::ZoomReset, zoomable);
-            let zoom = Popup::new()?;
+            add!("Quick Draft…", "Quick Draft…", Command::Draft);
+            root.push(Item::Sep);
+            add!("拡大", "Zoom In", Command::Zoom(1));
+            add!("縮小", "Zoom Out", Command::Zoom(-1));
+            add!("既定倍率に戻す", "Reset Zoom", Command::ZoomReset);
+            let mut zoom = Vec::new();
             for percent in (ZOOM_MIN..=ZOOM_MAX).step_by(ZOOM_STEP as usize) {
                 let name = format!("{percent}%");
-                row(
-                    &zoom,
-                    &mut commands,
-                    &name,
-                    &name,
-                    Command::ZoomSet(percent),
-                    zoomable,
-                    zoom_now == percent,
-                )?;
+                zoom.push(scene.row(&name, &name, Command::ZoomSet(percent), zoom_now == percent));
             }
-            root.child_named("倍率", "Zoom", zoom)?;
+            root.push(Item::child("倍率", "Zoom", zoom));
         }
         5 => {
-            add!(
-                "保存版と比較",
-                "Compare with Saved",
-                Command::Compare(0),
-                main && path
-            );
+            add!("保存版と比較", "Compare with Saved", Command::Compare(0));
             add!(
                 "Gitの最終Commitと比較",
                 "Compare with Git Last Commit",
-                Command::Compare(1),
-                main && path
+                Command::Compare(1)
             );
             add!(
                 "別ファイルと比較…",
                 "Compare with Another File…",
-                Command::Compare(2),
-                main
+                Command::Compare(2)
             );
             // RFN01-63: **アクティブな文書に対して実行する**（書き手と合意 2026-09-28）。
             // 確認しているあいだは、同じ場所が終える行になる。
-            root.sep()?;
-            let checking = crate::spelling_ui::checking(&t.document);
-            if checking {
+            root.push(Item::Sep);
+            if crate::spelling_ui::checking(&t.document) {
                 add!(
                     "スペルチェックを終了",
                     "Stop Spell Check",
-                    Command::Spelling,
-                    main
+                    Command::Spelling
                 );
             } else {
                 add!(
                     "スペルチェック（英語）",
                     "Check Spelling (English)",
-                    Command::Spelling,
-                    main && editable
+                    Command::Spelling
                 );
             }
             // 書き手と合意 2026-09-28: 誤りから誤りへ。スペルチェック中だけ押せる。
             add!(
                 "次のスペルミス",
                 "Next Spelling Error",
-                Command::SpellingStep(false),
-                main && checking
+                Command::SpellingStep(false)
             );
             add!(
                 "前のスペルミス",
                 "Previous Spelling Error",
-                Command::SpellingStep(true),
-                main && checking
+                Command::SpellingStep(true)
             );
             // RFN01-62（書き手と合意 2026-09-28）: 読み上げ。読んでいるあいだは同じ場所が
             // 止める行になる。**日本語の声が無ければ押せない。**
-            root.sep()?;
+            root.push(Item::Sep);
             if crate::read_aloud::reading() {
-                add!(
-                    "読み上げを停止",
-                    "Stop Reading Aloud",
-                    Command::ReadAloud,
-                    true
-                );
+                add!("読み上げを停止", "Stop Reading Aloud", Command::ReadAloud);
             } else {
-                add!(
-                    "読み上げ",
-                    "Read Aloud",
-                    Command::ReadAloud,
-                    main && window.get_speech_available()
-                );
+                add!("読み上げ", "Read Aloud", Command::ReadAloud);
             }
             if terminal {
-                root.sep()?;
-                add!("出力を保存…", "Save Output…", Command::Terminal(7), true);
+                root.push(Item::Sep);
+                add!("出力を保存…", "Save Output…", Command::Terminal(7));
                 if matches!(t.spot, TerminalSpot::Front) {
                     add!(
                         "ファイルへログ開始…",
                         "Capture Log to File…",
-                        Command::Panel(10),
-                        running && !screen.terminal_file_logging
+                        Command::Panel(10)
                     );
-                    add!(
-                        "ファイルログ停止",
-                        "Stop File Log",
-                        Command::Panel(14),
-                        screen.terminal_file_logging
-                    );
+                    add!("ファイルログ停止", "Stop File Log", Command::Panel(14));
                     add!(
                         "新しいEditor Panelへログ開始",
                         "Capture Log to New Editor Panel",
-                        Command::Panel(7),
-                        running && !screen.terminal_capturing
+                        Command::Panel(7)
                     );
-                    add!(
-                        "Panelログ停止",
-                        "Stop Panel Log",
-                        Command::Panel(13),
-                        screen.terminal_capturing
-                    );
+                    add!("Panelログ停止", "Stop Panel Log", Command::Panel(13));
                     add!(
                         "選択をEditor Panelへ送る",
                         "Selection to Editor Panel",
-                        Command::Panel(9),
-                        selected
+                        Command::Panel(9)
                     );
                     add!(
                         "履歴を新しいEditor Panelへ送る",
                         "History to New Editor Panel",
-                        Command::Panel(8),
-                        true
+                        Command::Panel(8)
                     );
                 }
-                let shells = Popup::new()?;
+                let mut shells = Vec::new();
                 for (i, shell) in configured_shells(window).iter().enumerate() {
-                    row(
-                        &shells,
-                        &mut commands,
+                    shells.push(scene.row(
                         &shell.name,
                         &shell.name,
                         Command::Shell(i as i32),
-                        true,
                         false,
-                    )?;
+                    ));
                 }
-                root.child_named("シェル切替", "Switch Shell", shells)?;
+                root.push(Item::child("シェル切替", "Switch Shell", shells));
             }
             if t.id.is_panel() {
                 add!(
                     "このPanelの取り込みを停止",
                     "Stop This Panel Log",
-                    Command::Panel(5),
-                    terminal_panels::current(live, t.parent)
-                        .is_some_and(|p| p.borrow().capture.is_some())
+                    Command::Panel(5)
                 );
             }
         }
         // RFN01-66（書き手の判断 2026-11-05）: ヘルプを簡単に作る。使い方はキーの一覧と
         // 紹介用のサンプル文書、RFN Editについては名前・版・著作権。
         6 => {
-            add!("キーの一覧…", "Keyboard Shortcuts…", Command::Help(0), true);
+            add!("キーの一覧…", "Keyboard Shortcuts…", Command::Help(0));
             add!(
                 "サンプル文書を開く",
                 "Open Sample Document",
-                Command::Help(1),
-                true
+                Command::Help(1)
             );
-            root.sep()?;
-            add!(
-                "RFN Editについて…",
-                "About RFN Edit…",
-                Command::Help(2),
-                true
-            );
+            root.push(Item::Sep);
+            add!("RFN Editについて…", "About RFN Edit…", Command::Help(2));
         }
-        _ => return Ok(None),
+        _ => return None,
     }
-    Ok(Some((root, commands)))
+    Some(root)
+}
+
+/// 中身から、Windowsのメニューを作る。**項目のidは`commands`の並び（1から）**。
+fn native(
+    window: &AppWindow,
+    items: Vec<Item>,
+    field: bool,
+) -> windows::core::Result<(Popup, Vec<Command>)> {
+    fn fill(
+        window: &AppWindow,
+        menu: &Popup,
+        items: Vec<Item>,
+        field: bool,
+        commands: &mut Vec<Command>,
+    ) -> windows::core::Result<()> {
+        for item in items {
+            match item {
+                Item::Row {
+                    ja,
+                    en,
+                    command,
+                    enabled,
+                    checked,
+                } => {
+                    let key = shortcut(window, &command, field);
+                    let name = pick(&ja, &en);
+                    let title = if key.is_empty() {
+                        name.to_owned()
+                    } else {
+                        format!("{name}\t{key}")
+                    };
+                    commands.push(command);
+                    menu.row(&title, commands.len(), enabled, checked)?;
+                }
+                Item::Sep => menu.sep()?,
+                Item::Child { ja, en, items } => {
+                    let child = Popup::new()?;
+                    fill(window, &child, items, field, commands)?;
+                    menu.child(pick(&ja, &en), child)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    let root = Popup::new()?;
+    let mut commands = Vec::new();
+    fill(window, &root, items, field, &mut commands)?;
+    Ok((root, commands))
 }
 
 /// 分類のメニューを出す（RFN01-38）。
 fn show(
     window: &AppWindow,
     live: &Live,
-    kills: &Rc<RefCell<Kills>>,
     t: &Target,
     group: i32,
 ) -> windows::core::Result<Option<i32>> {
-    let Some((root, commands)) = build(window, live, kills, t, group)? else {
+    let Some(items) = build(window, live, t, group) else {
         return Ok(None);
     };
+    let (root, commands) = native(window, items, t.field > 0)?;
     let Some(hwnd) = window_chrome::window_handle(window) else {
         window.tell(
             pick(
@@ -2420,7 +2410,7 @@ fn show(
     }
     // **開ける分類を、メニューの輪へも渡す**（RFN01-38）——開いている間の横移動は
     // Slintを通らないので、ここで渡さないと灰色の分類へも動いてしまう。
-    let openable = std::array::from_fn(|group| menu_opens(window, live, kills, group as i32));
+    let openable = std::array::from_fn(|group| menu_opens(window, live, group as i32));
     let navigation = Navigation::begin(hwnd, root.handle, group, scale, openable)?;
     let navigation_guard = NavigationGuard;
     let picked = unsafe {
@@ -2623,6 +2613,100 @@ unsafe extern "system" fn menu_filter(
 /// **対象は、いまフォーカスしているPane・TAB**——メニューは開いた時点で対象を
 /// 捕まえるが、キーには捕まえる瞬間が無い。押せない条件（選んだ字が要る形など）は
 /// それぞれの実行先が同じ判定を持っているので、ここでは断らない。
+/// RFN01-66 第2弾: 割り当ての一覧のid（0〜45、メニューに無いキーの操作）が、`pane`を対象に
+/// いま実行できるか。**メニューと同じ答え**（[`Scene::enabled`]）を読む。
+pub(crate) fn key_allowed(window: &AppWindow, live: &Live, pane: PaneId, id: i32) -> Allowed {
+    let target = Target::of(window, live, pane, 0);
+    let scene = Scene::read(window, live, &target);
+    let command = match id {
+        0 => Command::Open,
+        1 => Command::Save(false),
+        2 => Command::Save(true),
+        3 => Command::Close,
+        4 => Command::Find(false),
+        5 => Command::Find(true),
+        6 => Command::Goto,
+        7 => Command::Reopen,
+        8 => Command::Undo(false),
+        9 => Command::Undo(true),
+        10 => Command::Draft,
+        11 => Command::Step(false),
+        12 => Command::Step(true),
+        13..=16 => Command::Focus(id - 13),
+        17 => Command::Below,
+        19 => Command::Navigate(false),
+        20 => Command::Navigate(true),
+        // Emacs風の削除・移動・選択（メニューに無い）：消すのは書き換えられるとき、
+        // 動く・選ぶのは本文を出しているとき。
+        21 => return Allowed::from(scene.editable, false),
+        22 | 23 | 31 | 32 => return Allowed::from(scene.text, false),
+        24 => Command::Kill(0),
+        25 => Command::Mark(false),
+        26 => Command::Mark(true),
+        27..=30 => Command::Kill(id - 26),
+        33 => Command::Line(4),
+        34..=37 => Command::Line(id - 34),
+        42 => Command::Direction(!pane.vertical(window)),
+        43 => Command::Preview,
+        44 => Command::Viewer,
+        45 => Command::Print,
+        _ => match crate::shortcuts::menu_action_at(id as usize)
+            .and_then(|action| shortcut_command(window, action))
+        {
+            Some(command) => command,
+            None => return Allowed::Yes,
+        },
+    };
+    Allowed::from(scene.enabled(&command), quiet(&command))
+}
+
+/// キーで押した操作を実行できるか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Allowed {
+    Yes,
+    /// この場面では使えない。知らせる（Terminalで保存を押した、など）。
+    Tell,
+    /// いまの状態では何も起きない。知らせない（戻す履歴が無い、隣のPaneが無い、など）。
+    Quiet,
+}
+impl Allowed {
+    fn from(enabled: bool, quiet: bool) -> Self {
+        match (enabled, quiet) {
+            (true, _) => Allowed::Yes,
+            (false, true) => Allowed::Quiet,
+            (false, false) => Allowed::Tell,
+        }
+    }
+}
+
+/// RFN01-66 第2弾: 押せない理由が**場所ではなく、その時の状態**の操作。キーを押すたびに
+/// 知らせると煩いので、黙って何もしない（以前と同じ）。
+fn quiet(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Undo(_)
+            | Command::Step(_)
+            | Command::Focus(_)
+            | Command::Swap(_)
+            | Command::Navigate(_)
+            | Command::Zoom(_)
+            | Command::Kill(3 | 4)
+            | Command::SpellingStep(_)
+    )
+}
+
+/// RFN01-66 第2弾: キーで押した操作が、いまの場面では使えないことを知らせる
+/// （以前は何も起きず、知らせも無かった）。
+pub(crate) fn tell_unavailable(window: &AppWindow, name: &str) {
+    window.tell(
+        format!(
+            "{}: {name}",
+            pick("この場面では使えません", "Not available here")
+        )
+        .into(),
+    );
+}
+
 pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
     // RFN01-75/76: **the left pane's, not a document's** — no Pane or TAB is
     // acted on, so none has to be valid.
@@ -2649,7 +2733,23 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         }
         return;
     }
-    let command = match action {
+    let Some(command) = shortcut_command(window, action) else {
+        return;
+    };
+    // RFN01-66 第2弾: **メニューで押せない場面では動かさず、知らせる。**
+    if !Scene::read(window, live, &target).enabled(&command) {
+        if !quiet(&command) {
+            tell_unavailable(window, &crate::shortcuts::action_label(window, action));
+        }
+        return;
+    }
+    execute(window, live, &target, command);
+}
+
+/// 割り当てたキーの操作（メニューの操作）を、メニューと同じ[`Command`]へ落とす。
+/// 左ペイン・設定・パレット・下段のTABのように、文書の対象を持たない操作は`None`。
+fn shortcut_command(window: &AppWindow, action: ShortcutAction) -> Option<Command> {
+    Some(match action {
         ShortcutAction::NewFile => Command::NewFile,
         // **既定のシェルで開く。**シェルの一覧は設定で変わるので、キーには
         // 特定のシェルを結び付けない（書き手の合意 2026-09-21）。
@@ -2672,9 +2772,8 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         | ShortcutAction::ShowLeftTab(_)
         | ShortcutAction::OpenSettings
         | ShortcutAction::Palette(_)
-        | ShortcutAction::CloseStripTab => return,
-    };
-    execute(window, live, &target, command);
+        | ShortcutAction::CloseStripTab => return None,
+    })
 }
 
 fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
@@ -3067,6 +3166,45 @@ mod tests {
         assert_eq!(InsertShape::from_number(listed.len() as i32), None);
     }
 
+    /// 以前の`insert_commands`と同じ形で、挿入の行をWindowsのメニューへ組む（試験用）。
+    #[allow(clippy::too_many_arguments)]
+    fn insert_commands(
+        window: &AppWindow,
+        menu: &Popup,
+        commands: &mut Vec<Command>,
+        field: bool,
+        enabled: bool,
+        picked: bool,
+        notes: document::LineNoteState,
+        places: Places,
+    ) -> windows::core::Result<()> {
+        let mut items = Vec::new();
+        insert_rows_by(&mut items, |shape| {
+            context_insert_state(shape, enabled, picked, &notes, places)
+        });
+        let (built, built_commands) = native(window, items, field)?;
+        // 組んだ段を、渡された段の下へそのまま移す。
+        let count = unsafe { GetMenuItemCount(Some(built.handle)) };
+        for _ in 0..count.max(0) {
+            let mut text = vec![0u16; 512];
+            let mut info = MENUITEMINFOW {
+                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_STRING | MIIM_ID | MIIM_STATE | MIIM_SUBMENU | MIIM_FTYPE,
+                dwTypeData: windows::core::PWSTR(text.as_mut_ptr()),
+                cch: text.len() as u32 - 1,
+                ..Default::default()
+            };
+            unsafe {
+                GetMenuItemInfoW(built.handle, 0, true, &mut info)?;
+                RemoveMenu(built.handle, 0, MF_BYPOSITION)?;
+                info.dwTypeData = windows::core::PWSTR(text.as_mut_ptr());
+                InsertMenuItemW(menu.handle, u32::MAX, true, &info)?;
+            }
+        }
+        commands.extend(built_commands);
+        Ok(())
+    }
+
     /// RFN01-38: **本文へ置ける項目は押せる。**並びは表（`INSERT_MENU`）のまま。
     #[test]
     fn the_insert_menu_offers_what_it_can_write_into_the_body() {
@@ -3359,11 +3497,87 @@ mod tests {
     #[test]
     fn a_category_with_nothing_to_pick_does_not_open() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
-        let kills = Rc::new(RefCell::new(Kills::default()));
 
-        assert!(menu_opens(&h.window, &h.live, &kills, 2), "挿入は開く");
+        assert!(menu_opens(&h.window, &h.live, 2), "挿入は開く");
         // RFN01-66（2026-11-05）: ヘルプに行ができた（以前は未実装の行だけで開かなかった）。
-        assert!(menu_opens(&h.window, &h.live, &kills, 6), "Helpは開く");
+        assert!(menu_opens(&h.window, &h.live, 6), "Helpは開く");
+    }
+
+    /// RFN01-66 第2弾: ⋮・右クリックの行（`MenuActions`）も**メニューと同じ答え**で灰色になり、
+    /// 押せば同じ操作が走る。
+    #[test]
+    fn the_pane_menus_read_the_same_premises() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        install(window, live);
+        let actions = window.global::<MenuActions>();
+        actions.invoke_refresh();
+        let generation = actions.get_generation();
+        assert!(actions.invoke_allowed(MenuAction::Save, generation));
+        // 無題の文書にはフォルダが無い（タイトルバーのメニューでも灰色）。
+        assert!(!actions.invoke_allowed(MenuAction::FolderTerminal, generation));
+        assert!(!actions.invoke_allowed(MenuAction::Reveal, generation));
+        assert!(
+            !actions.invoke_allowed(MenuAction::SwapLeft, generation),
+            "隣のPaneが無い"
+        );
+        let saves = Rc::new(Cell::new(0));
+        let seen = saves.clone();
+        window.on_save_requested(move || seen.set(seen.get() + 1));
+        actions.invoke_run(MenuAction::Save);
+        assert_eq!(saves.get(), 1);
+        // 押せない行は、押されても走らせない。
+        let reveals = Rc::new(Cell::new(0));
+        let seen = reveals.clone();
+        window.on_reveal_requested(move || seen.set(seen.get() + 1));
+        actions.invoke_run(MenuAction::Reveal);
+        assert_eq!(reveals.get(), 0);
+    }
+
+    /// RFN01-66 第2弾: キーは**メニューと同じ前提**を読む。使えない場所では動かさずに知らせ、
+    /// その時の状態で何も起きないだけの操作（戻す履歴が無い等）は黙る。パレットも同じ答え。
+    #[test]
+    fn keys_and_the_palette_read_the_menus_premises() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        let pane = PaneId::FIRST;
+        assert_eq!(key_allowed(window, live, pane, 1), Allowed::Yes, "保存");
+        assert_eq!(
+            key_allowed(window, live, pane, 8),
+            Allowed::Quiet,
+            "戻す履歴が無い"
+        );
+        // メニューの行とキーが同じ答え。
+        let snapshot = menu_snapshot(window, live);
+        let save = snapshot
+            .entries
+            .iter()
+            .position(|entry| entry.title.ends_with("› 保存") || entry.title.ends_with("› Save"))
+            .unwrap();
+        assert!(snapshot.entries[save].enabled);
+
+        crate::open_settings_page(window, live, 0);
+        let saves = Rc::new(Cell::new(0));
+        let seen = saves.clone();
+        window.on_save_requested(move || seen.set(seen.get() + 1));
+        assert_eq!(
+            key_allowed(window, live, pane, 1),
+            Allowed::Tell,
+            "設定のTABは保存できない"
+        );
+        crate::shortcuts::run_command(window, live, pane, 1);
+        assert_eq!(saves.get(), 0);
+        assert!(
+            window.get_render_status().contains("使えません"),
+            "知らせる"
+        );
+        let snapshot = menu_snapshot(window, live);
+        let save = snapshot
+            .entries
+            .iter()
+            .position(|entry| entry.title.ends_with("› 保存") || entry.title.ends_with("› Save"))
+            .unwrap();
+        assert!(!snapshot.entries[save].enabled, "メニューでも灰色");
     }
 
     /// 書式のボタン（2026-09-23）：**挿入メニューの1段目の全部に絵があり**、束は

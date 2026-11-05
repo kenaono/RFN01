@@ -2035,6 +2035,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let draft = Rc::new(RefCell::new(quick_draft::QuickDraftWindow::default()));
     let live = Live {
         closed_tabs: Rc::default(),
+        kills: kill_ring.clone(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: pane_states.clone(),
@@ -4242,8 +4243,8 @@ fn main() -> Result<(), slint::PlatformError> {
         CloseRequestResponse::KeepWindowShown
     });
 
-    menu_commands::install(&window, &live, &kill_ring);
-    command_palette::install(&window, &live, &kill_ring);
+    menu_commands::install(&window, &live);
+    command_palette::install(&window, &live);
     // Winit creates its HWND only after entering the event loop.
     let chrome: Rc<RefCell<Option<Box<window_chrome::Chrome>>>> = Rc::default();
     // RFN01-87: the palette's frame is the app's to press, not the title row's.
@@ -4275,7 +4276,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // `MenuInput.open_menu()`を通らない——**ここが両方の道の合流点**である。
     let weak = window.as_weak();
     let open_live = live.clone();
-    let open_kills = kill_ring.clone();
     let menu_live = live.clone();
     window.on_title_menu_visibility(move |shown| {
         if let Some(chrome) = held.borrow().as_ref() {
@@ -4295,7 +4295,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         if shown && let Some(me) = weak.upgrade() {
             let openable: Vec<bool> = (0..menu_commands::MENU_GROUPS)
-                .map(|group| menu_commands::menu_opens(&me, &open_live, &open_kills, group))
+                .map(|group| menu_commands::menu_opens(&me, &open_live, group))
                 .collect();
             me.set_title_menu_openable(slint::ModelRc::from(Rc::new(slint::VecModel::from(
                 openable,
@@ -5229,6 +5229,8 @@ impl Tabs {
 #[derive(Clone)]
 struct Live {
     closed_tabs: Rc<RefCell<Vec<PaneTab>>>,
+    /// RFN01-66 第2弾: Kill Ring。アプリに1つで、メニュー・キー・パレットの前提（`Scene`）も読む。
+    kills: Rc<RefCell<Kills>>,
     /// The pane a conversion was last shown in (RFN01-77, RFN01-79): where the
     /// IME's clauses are looked up again, and where a conversion is committed
     /// when the writer clicks away from it.
@@ -5424,6 +5426,10 @@ impl Live {
             }
         }
         *self.states.of(id).borrow_mut() = tab.view.state.clone();
+        // 書き手の報告 2026-11-05（起動に失敗する）の元: 後ろにいたあいだ、このTABの位置は
+        // 同じ文書の書き換えに付いて動かない。**戻すときに文字の境目と本文の中へそろえる**
+        // （起動で戻すときと同じ）——そろえないと字の途中を指したまま使われ、保存もされる。
+        clamp_state_into(&self.states.of(id), &document.text.borrow());
         id.set_scroll(window, tab.view.scroll);
         // The passage this tab was left at. **A tab switch has the same problem
         // a restored session does**: the pane it comes back to may be a

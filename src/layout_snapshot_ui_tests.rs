@@ -223,6 +223,7 @@ fn layout_snapshot() {
                 let document = OpenDocument::new(file, text.clone(), window.as_weak());
                 let live = Live {
                     closed_tabs: Rc::default(),
+                    kills: Rc::default(),
                     composing: Rc::default(),
                     settled: Rc::default(),
                     states: PaneStates::new(&document),

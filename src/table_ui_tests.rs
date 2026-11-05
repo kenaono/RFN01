@@ -57,6 +57,7 @@ fn a_table_is_edited_as_a_table() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&document),
@@ -211,6 +212,7 @@ pub(crate) fn rig(text: &str, size: (u32, u32)) -> Rig {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&document),

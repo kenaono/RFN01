@@ -17,6 +17,7 @@ fn typography_settings_roundtrip_and_render() {
     let surface = MinimalSoftwareWindow::new(Default::default());
     slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
     let window = AppWindow::new().unwrap();
+    crate::menu_commands::wire_bare_menu_actions(&window);
     let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
     let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
     let fonts = Rc::new(VecModel::from(vec![
@@ -1065,6 +1066,7 @@ fn a_row_in_the_right_click_flyout_answers_the_click() {
     let surface = MinimalSoftwareWindow::new(Default::default());
     slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
     let window = AppWindow::new().unwrap();
+    crate::menu_commands::wire_bare_menu_actions(&window);
     surface.set_size(slint::PhysicalSize::new(1100, 760));
     window.set_tree_open(false);
     publish_panes(&window, 1);
@@ -1231,6 +1233,7 @@ fn a_menu_taller_than_the_window_scrolls_to_its_last_rows() {
     let surface = MinimalSoftwareWindow::new(Default::default());
     slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
     let window = AppWindow::new().unwrap();
+    crate::menu_commands::wire_bare_menu_actions(&window);
     surface.set_size(slint::PhysicalSize::new(1100, 440));
     window.set_tree_open(false);
     publish_panes(&window, 1);

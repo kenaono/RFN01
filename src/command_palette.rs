@@ -25,7 +25,6 @@ const ROWS_SHOWN: usize = 200;
 
 thread_local! {
     static PALETTE: RefCell<Option<Palette>> = const { RefCell::new(None) };
-    static KILLS: RefCell<Option<Rc<RefCell<Kills>>>> = const { RefCell::new(None) };
 }
 
 struct Palette {
@@ -65,8 +64,7 @@ enum Shown {
     Settings,
 }
 
-pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
-    KILLS.with(|held| *held.borrow_mut() = Some(kills.clone()));
+pub fn install(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
     let opened = live.clone();
     window.on_palette_requested(move |commands| {
@@ -196,8 +194,7 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
         Some(match text.strip_prefix('>') {
             Some(query) => {
                 if palette.menu.is_none() {
-                    let kills = KILLS.with(|kills| kills.borrow().clone())?;
-                    palette.menu = Some(menu_commands::menu_snapshot(window, live, &kills));
+                    palette.menu = Some(menu_commands::menu_snapshot(window, live));
                     palette.actions = shortcuts::palette_actions(window);
                     // RFN01-107: 下段のTABを閉じるは、下段にTABがあるときだけ。
                     let owner = crate::zoom_owner(window, palette.pane);
@@ -205,6 +202,11 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                     palette
                         .actions
                         .retain(|action| strip || !shortcuts::closes_strip(action.id));
+                    // RFN01-66 第2弾: メニューの行と同じく、いま押せない操作は並べない。
+                    palette.actions.retain(|action| {
+                        menu_commands::key_allowed(window, live, palette.pane, action.id)
+                            == menu_commands::Allowed::Yes
+                    });
                 }
                 let menu = palette.menu.as_ref()?;
                 let (mut rows, mut shown) = command_rows(menu, &palette.actions, query.trim());

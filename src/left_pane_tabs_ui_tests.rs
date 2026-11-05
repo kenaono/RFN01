@@ -176,3 +176,44 @@ fn help_opens_the_sample_the_keys_and_about() {
     assert_eq!(window.get_settings_tab(), 6);
     assert!(live.tabs.borrow().of(id).current().unwrap().settings);
 }
+
+/// 書き手の報告 2026-11-05（起動に失敗する）の元: 後ろにいたTABが覚えている位置は、同じ文書が
+/// 前のTABで書き換えられても直されない。戻ったとき、文字の途中や本文の外を指したまま置かれ、
+/// 保存されて次の起動で落ちていた。**戻すときに文字の境目へそろえる**（起動で戻すときと同じ）。
+#[test]
+fn a_tab_brought_back_after_an_edit_elsewhere_points_between_characters() {
+    let root = scratch_directory("stale-view");
+    let (harness, _) =
+        Harness::new(|weak| open_under(&root, "a.md", "あいうえおかきくけこ\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    let id = PaneId::FIRST;
+    {
+        let state = live.states.of(id);
+        let mut state = state.borrow_mut();
+        state.caret_source_byte = Some(27);
+        state.selection_anchor_source_byte = Some(30);
+    }
+    duplicate_tab(window, live, id, 0);
+    assert_eq!(live.tabs.borrow().of(id).active, 1);
+    // 前のTAB（同じ文書）で、先頭の1字を消す。後ろのTABの位置（27・30）は字の途中になる。
+    let document = live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .unwrap()
+        .document
+        .clone();
+    *document.text.borrow_mut() = "いうえおかきくけこ\n".into();
+    switch_to_tab(window, live, id, 0);
+    assert_eq!(live.tabs.borrow().of(id).active, 0);
+    let state = live.states.of(id);
+    let state = state.borrow();
+    let text = document.text.borrow();
+    for byte in [state.caret_source_byte, state.selection_anchor_source_byte]
+        .into_iter()
+        .flatten()
+    {
+        assert!(text.is_char_boundary(byte), "{byte} inside a character");
+    }
+}

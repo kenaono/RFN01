@@ -62,6 +62,7 @@ fn word_mode_selection_repaints_existing_text() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&memo),

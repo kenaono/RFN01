@@ -285,6 +285,32 @@ export global MenuInput {
     in-out property <int> field-left: 0;
 }
 
+/// RFN01-66 第2弾（書き手と合意 2026-11-05）: ⋮・TABの右クリック・TAB帯・本文の右クリックの行が
+/// 走らせる操作。**タイトルバーのメニューと同じ操作（Rustの`Command`）に落とし、押せるかも同じ
+/// 答え（`Scene::enabled`）を読む**——入口ごとに条件を書かない。
+export enum MenuAction {
+    save, save-as, folder-terminal, reveal,
+    close-tab, close-others, close-all, close-clean, reopen,
+    split-right, split-down, swap-left, swap-right, swap-up, swap-down, other-panes,
+    below, goto, compare-saved, compare-head, compare-file, print,
+    zoom-in, zoom-out, zoom-reset, duplicate, copy-path,
+    new-file, new-terminal, open-file,
+    undo, redo, cut, copy, paste, copy-body, mark, mark-rect, draft, back, forward,
+    pane-background, tab-color, text-background, appearance,
+    find-terminal, latest, save-output, clear-screen, clear-history,
+    selection-to-panel, history-to-panel, last-output-to-panel, copy-last-output,
+    file-log, panel-log,
+}
+
+/// RFN01-66 第2弾: 上の操作の窓口。**メニューを開く直前に`refresh()`**（対象は前にあるペイン）、
+/// 行は`allowed(操作, generation)`で押せるかを読み、押されたら`run(操作)`。
+export global MenuActions {
+    in-out property <int> generation: 0;
+    callback refresh();
+    callback run(MenuAction);
+    pure callback allowed(MenuAction, int) -> bool;
+}
+
 /// 「終わりまで」を表す選択の終端（`Field`）。**位置ではなく合図**なので、
 /// ありえない負の数にしてある。
 export global Selection {

@@ -227,6 +227,7 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&document),
@@ -688,6 +689,7 @@ fn a_tab_and_a_pane_carry_their_own_paper() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&document),
@@ -975,6 +977,7 @@ fn terminal_below_rows_reach_the_pane() {
     let surface = MinimalSoftwareWindow::new(Default::default());
     slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
     let window = AppWindow::new().unwrap();
+    crate::menu_commands::wire_bare_menu_actions(&window);
     let numbers = Rc::new(VecModel::from(vec![0; 2 * SHEET_NUMBERS]));
     let palette = Rc::new(VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]));
     let fonts = Rc::new(VecModel::from(vec![
@@ -1314,6 +1317,7 @@ fn the_find_bar_searches_the_settings() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&document),
@@ -1467,6 +1471,7 @@ fn the_left_pane_has_its_own_look() {
     let live = Live {
         preview: Rc::default(),
         closed_tabs: Rc::default(),
+        kills: Rc::default(),
         composing: Rc::default(),
         settled: Rc::default(),
         states: PaneStates::new(&document),
@@ -1695,8 +1700,7 @@ fn the_palette_lists_operations_by_other_words_and_offers_settings() {
     let root = scratch_directory("palette-ops");
     let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
     let (window, live) = (&harness.window, &harness.live);
-    let kills = Rc::new(RefCell::new(Kills::default()));
-    command_palette::install(window, live, &kills);
+    command_palette::install(window, live);
     let rows = |text: &str| -> Vec<PaletteRow> {
         window.invoke_palette_edited(text.into());
         window.get_palette_rows().iter().collect()
