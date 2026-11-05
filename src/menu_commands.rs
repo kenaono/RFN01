@@ -126,6 +126,8 @@ pub enum ShortcutAction {
     SelectLine,
     /// RFN01-87: コマンドパレットを開く。`true`は操作を探す（「>」入り）、`false`はファイル名。
     Palette(bool),
+    /// RFN01-107: 下段（Editor Panel・Terminal Panel）の前に出ているTABを閉じる。
+    CloseStripTab,
 }
 
 /// 挿入メニューのひな形（RFN01-48）。**番号ではなく形で持つ**——番号は挿入の並びを
@@ -1116,6 +1118,15 @@ fn read_menu(menu: HMENU, path: &[String], offset: usize, out: &mut Vec<MenuEntr
 }
 
 impl MenuSnapshot {
+    /// RFN01-107: この行が倍率の刻み（倍率 › 50%〜240%）か。パレットには並べない。
+    pub(crate) fn zoom_step(&self, entry: usize) -> bool {
+        self.entries
+            .get(entry)
+            .and_then(|entry| entry.id.checked_sub(1))
+            .and_then(|at| self.commands.get(at))
+            .is_some_and(|command| matches!(command, Command::ZoomSet(_)))
+    }
+
     /// パレットで選んだ行を、メニューで選んだのと同じに走らせる。
     pub(crate) fn run(&self, window: &AppWindow, live: &Live, entry: usize) {
         let Some(id) = self.entries.get(entry).map(|entry| entry.id) else {
@@ -2635,6 +2646,13 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
     if !target.valid(window, live) {
         return;
     }
+    // RFN01-107: 下段のTABを閉じる——下段で「TABを閉じる」を選んだのと同じ。上段にいても効く。
+    if action == ShortcutAction::CloseStripTab {
+        if crate::has_strip_tab(live, target.parent) {
+            terminal_panels::action(window, live, target.parent, 2, 0);
+        }
+        return;
+    }
     let command = match action {
         ShortcutAction::NewFile => Command::NewFile,
         // **既定のシェルで開く。**シェルの一覧は設定で変わるので、キーには
@@ -2657,7 +2675,8 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
         | ShortcutAction::ToggleLeftPane
         | ShortcutAction::ShowLeftTab(_)
         | ShortcutAction::OpenSettings
-        | ShortcutAction::Palette(_) => return,
+        | ShortcutAction::Palette(_)
+        | ShortcutAction::CloseStripTab => return,
     };
     execute(window, live, &target, command);
 }

@@ -42,6 +42,8 @@ export struct PaletteRow {
     title: string,
     detail: string,
     key: string,
+    /// RFN01-107: キーに割り当てられる操作なら、Keysを絞る名前。空なら鍵の印を出さない。
+    assign: string,
 }
 // Keys の面の1行（書き手の求め 2026-09-15）。分類の見出しか、キーの行か。
 export struct ShortcutItem {
@@ -173,6 +175,8 @@ export component AppWindow inherits Window {
     callback palette-requested(bool);
     callback palette-edited(string);
     callback palette-accepted();
+    /// RFN01-107: 行の鍵の印。その行の操作でKeysを絞って開く。
+    callback palette-assign(int);
     callback palette-cancelled();
     callback palette-span(length, length);
     private property <length> palette-box-x;
@@ -1514,6 +1518,8 @@ export component AppWindow inherits Window {
     out property <string> settings-query: root.find-open && root.find-pane < 65536 && root.panes[root.find-pane].settings
         ? root.panes[root.find-pane].find-needle : "";
     property <bool> settings-searching: root.settings-query != "";
+    /// RFN01-107: パレットの鍵の印が入れた語。検索の語がこれと同じあいだは、Keysの行だけを出す。
+    in-out property <string> settings-keys-query;
     /// 語が名前のどれかに含まれるか（大文字小文字・全角半角を問わない）。Rustが答える。
     pure callback settings-match(string, [string]) -> bool;
     /// 行・見出しを出すか。`labels`はその行の名前と、属する見出し。
@@ -1525,6 +1531,11 @@ export component AppWindow inherits Window {
     pure function shows-group(tab: int, labels: [string]) -> bool {
         if (!root.settings-searching) {
             return root.settings-tab == (tab == 7 ? 0 : (tab == 2 || tab == 4 || tab == 5 ? 3 : tab));
+        }
+        // RFN01-107（書き手の報告 2026-11-05）: パレットの鍵の印から来たときは、キーの割り当てを
+        // 変えるのが目的——Keysの行だけを出す。語を書き換えれば、ふだんの全体の検索に戻る。
+        if (root.settings-query == root.settings-keys-query) {
+            return false;
         }
         return labels.length == 0 || root.settings-match(root.settings-query, labels);
     }
@@ -4466,7 +4477,13 @@ export component AppWindow inherits Window {
                                         // 黒地で使う人が多く、要件9のシート（原稿の紙）と同じ値で決める
                                         // ものではない。書字方向も持たないので、シートを選ぶ釦はここにも
                                         // 無い。
-                                        if root.shows-group(1, []): VerticalLayout {
+                                        // 書き手の報告 2026-11-05: **探しているあいだは、名前が合うときだけ。**ラベルを
+                                        // 渡していなかったので、どの語で探してもこの面がまるごと出て、結果を埋めていた。
+                                        if root.shows-group(1, ["Terminal", "Editor Panel", "Terminal Panel", "WSL", "PowerShell", "cmd",
+                                                @tr("Profile name"), @tr("Executable"), @tr("Arguments"), @tr("Start folder"), @tr("Default"),
+                                                @tr("Confirm multiline paste"), @tr("Confirm shell termination"), @tr("Restore output after restart"),
+                                                @tr("History lines"), @tr("Timestamp format"), @tr("Background"), @tr("Font"), @tr("Size"),
+                                                @tr("Text Color"), @tr("Transparency"), @tr("Bold"), @tr("Italic"), @tr("Underline")]): VerticalLayout {
                                             spacing: 8px; alignment: start; vertical-stretch: 0;
                                             ComboBox {
                                                 width: 260px; height: 30px; horizontal-stretch: 0; vertical-stretch: 0;
@@ -7619,7 +7636,7 @@ export component AppWindow inherits Window {
                 background: index == root.palette-selected ? Tok.accent-soft : (palette-row-touch.has-hover ? Tok.accent-faint : transparent);
                 Text {
                     x: 10px; y: 2px;
-                    width: parent.width - 20px - (row.key != "" ? 110px : 0px);
+                    width: parent.width - 20px - (row.key != "" ? 110px : 0px) - (row.assign != "" ? 28px : 0px);
                     height: row.detail != "" ? 17px : parent.height - 4px;
                     text: row.title;
                     color: Tok.ink;
@@ -7629,7 +7646,7 @@ export component AppWindow inherits Window {
                 }
                 if row.detail != "": Text {
                     x: 10px; y: 18px;
-                    width: parent.width - 20px - (row.key != "" ? 110px : 0px);
+                    width: parent.width - 20px - (row.key != "" ? 110px : 0px) - (row.assign != "" ? 28px : 0px);
                     height: 14px;
                     text: row.detail;
                     color: Tok.ink-faint;
@@ -7638,7 +7655,7 @@ export component AppWindow inherits Window {
                     overflow: elide;
                 }
                 if row.key != "": Text {
-                    x: parent.width - 120px; width: 110px; height: parent.height;
+                    x: parent.width - 120px - (row.assign != "" ? 28px : 0px); width: 110px; height: parent.height;
                     text: row.key;
                     color: Tok.ink-faint;
                     font-size: 11px;
@@ -7649,6 +7666,19 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.palette-selected = index;
                         root.palette-accepted();
+                    }
+                    // RFN01-107（書き手と合意 2026-11-05）: キーに割り当てられる操作は、ポインタを
+                    // 載せた行か選んでいる行の右端に鍵の印。押すとKeysがその操作で絞られて開く。
+                    // **行のTouchAreaの子で、`visible`で隠す**——兄弟や`if`にすると、印へ移った
+                    // 瞬間に行のホバーが外れて印が消える（RFN01-74のTABの×と同じ）。
+                    IconButton {
+                        x: parent.width - 28px;
+                        y: (parent.height - self.height) / 2;
+                        size: 24px;
+                        icon: Icons.keyboard;
+                        tip: @tr("Change Keyboard Shortcut");
+                        visible: row.assign != "" && (palette-row-touch.has-hover || index == root.palette-selected);
+                        clicked => { root.palette-assign(index); }
                     }
                 }
             }

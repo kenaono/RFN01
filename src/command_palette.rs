@@ -61,6 +61,8 @@ enum Shown {
     Menu(usize),
     Action(usize),
     Template(usize),
+    /// RFN01-107: 設定をこの語で探す行。
+    Settings,
 }
 
 pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
@@ -84,6 +86,13 @@ pub fn install(window: &AppWindow, live: &Live, kills: &Rc<RefCell<Kills>>) {
     window.on_palette_accepted(move || {
         if let Some(window) = weak.upgrade() {
             accept(&window, &accepted);
+        }
+    });
+    let weak = window.as_weak();
+    let assigned = live.clone();
+    window.on_palette_assign(move |index| {
+        if let Some(window) = weak.upgrade() {
+            assign(&window, &assigned, index);
         }
     });
     let weak = window.as_weak();
@@ -190,6 +199,12 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                     let kills = KILLS.with(|kills| kills.borrow().clone())?;
                     palette.menu = Some(menu_commands::menu_snapshot(window, live, &kills));
                     palette.actions = shortcuts::palette_actions(window);
+                    // RFN01-107: 下段のTABを閉じるは、下段にTABがあるときだけ。
+                    let owner = crate::zoom_owner(window, palette.pane);
+                    let strip = crate::has_strip_tab(live, owner);
+                    palette
+                        .actions
+                        .retain(|action| strip || !shortcuts::closes_strip(action.id));
                 }
                 let menu = palette.menu.as_ref()?;
                 let (mut rows, mut shown) = command_rows(menu, &palette.actions, query.trim());
@@ -200,6 +215,23 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                 let (more_rows, more_shown) = template_rows(templates, query.trim(), true);
                 rows.extend(more_rows);
                 shown.extend(more_shown);
+                // RFN01-107（書き手と合意 2026-11-05）: 設定の項目は、設定の画面の検索で探す。
+                // 語があれば最後に1行、選べば設定のTABがその語で絞られて開く。
+                if !query.trim().is_empty() {
+                    rows.push(PaletteRow {
+                        title: format!(
+                            "{}{}{}",
+                            crate::i18n::pick("設定で「", "Search Settings for \u{201c}"),
+                            query.trim(),
+                            crate::i18n::pick("」を探す", "\u{201d}")
+                        )
+                        .into(),
+                        detail: SharedString::new(),
+                        key: SharedString::new(),
+                        assign: SharedString::new(),
+                    });
+                    shown.push(Shown::Settings);
+                }
                 palette.shown = shown;
                 rows
             }
@@ -238,6 +270,13 @@ fn accept(window: &AppWindow, live: &Live) {
             Shown::Template(at) => {
                 Chosen::Template(palette.templates.as_ref()?.get(at)?.path.clone())
             }
+            Shown::Settings => Chosen::Settings(
+                window
+                    .get_palette_text()
+                    .trim_start_matches('>')
+                    .trim()
+                    .to_owned(),
+            ),
         };
         Some((palette.pane, chosen))
     }) else {
@@ -263,6 +302,30 @@ fn accept(window: &AppWindow, live: &Live) {
             }
             Chosen::Action(id) => shortcuts::run_command(&window, &live, pane, id),
             Chosen::Template(path) => crate::insert_template(&window, &live, pane, &path),
+            Chosen::Settings(query) => {
+                crate::open_settings_searching(&window, &live, &query, false)
+            }
+        }
+    });
+}
+
+/// RFN01-107（書き手と合意 2026-11-05）: 行の鍵の印。設定のKeysを、その操作の名前で絞って開く
+/// ——割り当ては今のKeysの画面で行う（VS Codeの歯車と同じ考え方）。
+fn assign(window: &AppWindow, live: &Live, index: i32) {
+    let name = usize::try_from(index)
+        .ok()
+        .and_then(|at| window.get_palette_rows().row_data(at))
+        .map(|row| row.assign.to_string())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return;
+    }
+    close(window);
+    let weak = window.as_weak();
+    let live = live.clone();
+    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        if let Some(window) = weak.upgrade() {
+            crate::open_settings_searching(&window, &live, &name, true);
         }
     });
 }
@@ -272,6 +335,7 @@ enum Chosen {
     Menu(usize),
     Action(i32),
     Template(PathBuf),
+    Settings(String),
 }
 
 /// RFN01-88: the templates that match `query`. Among the operations (`named`)
@@ -304,6 +368,7 @@ fn template_rows(
                     title: upper.into(),
                     detail: lower.into(),
                     key: SharedString::new(),
+                    assign: SharedString::new(),
                 },
             ));
         }
@@ -561,6 +626,7 @@ fn file_rows(files: &[FileCandidate], query: &str) -> (Vec<PaletteRow>, Vec<Show
                 } else {
                     SharedString::default()
                 },
+                assign: SharedString::new(),
             }
         })
         .collect();
@@ -578,12 +644,16 @@ fn command_rows(
     let mut found: Vec<(i64, Shown, PaletteRow)> = Vec::new();
     let mut names = std::collections::HashSet::new();
     for (at, entry) in menu.entries.iter().enumerate() {
-        if !entry.enabled {
+        // RFN01-107: 倍率の刻み（50%〜240%）は並べない。拡大・縮小・既定に戻すで足りる。
+        if !entry.enabled || menu.zoom_step(at) {
             continue;
         }
         let leaf = entry.title.rsplit(" › ").next().unwrap_or(&entry.title);
         names.insert(same_name(leaf));
-        let points = score(query, &entry.title).or_else(|| score(query, &entry.other));
+        let other_leaf = entry.other.rsplit(" › ").next().unwrap_or(&entry.other);
+        let points = score(query, &entry.title)
+            .or_else(|| score(query, &entry.other))
+            .or_else(|| alias_score(query, leaf, other_leaf));
         if let Some(points) = points {
             let (upper, lower) = two_lines(&entry.title, &entry.other);
             found.push((
@@ -593,6 +663,7 @@ fn command_rows(
                     title: upper.into(),
                     detail: lower.into(),
                     key: entry.key.clone().into(),
+                    assign: assign_name(leaf).into(),
                 },
             ));
         }
@@ -601,7 +672,9 @@ fn command_rows(
         if names.contains(&same_name(&action.title)) {
             continue;
         }
-        let points = score(query, &action.title).or_else(|| score(query, &action.other));
+        let points = score(query, &action.title)
+            .or_else(|| score(query, &action.other))
+            .or_else(|| alias_score(query, &action.title, &action.other));
         if let Some(points) = points {
             let (upper, lower) = two_lines(&action.title, &action.other);
             found.push((
@@ -611,6 +684,7 @@ fn command_rows(
                     title: upper.into(),
                     detail: lower.into(),
                     key: action.key.clone().into(),
+                    assign: assign_name(&action.title).into(),
                 },
             ));
         }
@@ -623,6 +697,50 @@ fn command_rows(
         .into_iter()
         .map(|(_, shown, row)| (row, shown))
         .unzip()
+}
+
+/// RFN01-107: 鍵の印を出すなら、Keysを絞る名前（いまの言語の表示）。出さないなら空。
+fn assign_name(name: &str) -> String {
+    if shortcuts::assignable(name) {
+        name.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// RFN01-107（書き手の求め 2026-11-05）: **名前に無い言葉でも引けるように。**「Terminalを
+/// 閉じる」「Editorを閉じる」で「TABを閉じる」を、「Panelを閉じる」で「下段のTABを閉じる」を。
+/// 表には出さず、探すときだけ使う。名前はどちらの言語で来てもよい。
+const ALIASES: &[(&str, &[&str])] = &[
+    (
+        "TABを閉じる",
+        &[
+            "Terminalを閉じる",
+            "Editorを閉じる",
+            "Close Terminal",
+            "Close Editor",
+        ],
+    ),
+    (
+        "下段のTABを閉じる",
+        &[
+            "Panelを閉じる",
+            "Editor Panelを閉じる",
+            "Terminal Panelを閉じる",
+            "Close Panel",
+            "Close Editor Panel",
+            "Close Terminal Panel",
+        ],
+    ),
+];
+
+fn alias_score(query: &str, name: &str, other: &str) -> Option<i64> {
+    ALIASES
+        .iter()
+        .filter(|(key, _)| *key == name || *key == other)
+        .flat_map(|(_, words)| words.iter())
+        .filter_map(|word| score(query, word))
+        .max()
 }
 
 /// RFN01-87（書き手の決定 2026-11-03）: **上の段に表示の言葉、下の段にもう一方の言葉。**

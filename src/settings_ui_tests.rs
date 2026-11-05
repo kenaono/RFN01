@@ -1685,3 +1685,97 @@ fn reset_all_puts_the_format_toolbar_away() {
     reset_all_settings(window, live);
     assert!(!window.get_format_toolbar_open());
 }
+
+/// RFN01-107（書き手と合意 2026-11-05）: コマンドパレットの操作の並び。倍率の刻みは出ず、
+/// 「Terminalを閉じる」で「TABを閉じる」が引け、割り当てられる操作には鍵の印の名前が付き、
+/// 最後に「設定で…を探す」が出る。下段が無ければ「下段のTABを閉じる」は出ない。
+#[test]
+fn the_palette_lists_operations_by_other_words_and_offers_settings() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("palette-ops");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    let kills = Rc::new(RefCell::new(Kills::default()));
+    command_palette::install(window, live, &kills);
+    let rows = |text: &str| -> Vec<PaletteRow> {
+        window.invoke_palette_edited(text.into());
+        window.get_palette_rows().iter().collect()
+    };
+    command_palette::open(window, live, true);
+
+    let zoom = rows("> 240%");
+    let (_settings, operations) = zoom.split_last().unwrap();
+    assert!(
+        operations.iter().all(|row| !row.title.contains("240%")),
+        "zoom steps are not listed: {:?}",
+        zoom.iter()
+            .map(|row| row.title.to_string())
+            .collect::<Vec<_>>()
+    );
+
+    let close = rows("> Terminalを閉じる");
+    let tab = close
+        .iter()
+        .find(|row| row.title.contains("TABを閉じる") || row.title.contains("Close Tab"))
+        .expect("Close Tab found by another word");
+    assert!(!tab.assign.is_empty(), "Close Tab can be given a key");
+    assert!(
+        close
+            .iter()
+            .all(|row| !row.title.contains("下段のTABを閉じる")
+                && !row.title.contains("Close Strip Tab")),
+        "no strip, so no Close Strip Tab"
+    );
+    let last = close.last().unwrap();
+    assert!(last.title.contains("Terminalを閉じる"), "{}", last.title);
+    assert!(last.assign.is_empty());
+    command_palette::close(window);
+
+    // 設定で探す：設定のTABが開き、検索欄にその語が入る。
+    open_settings_searching(window, live, "倍率", false);
+    let id = focused_pane(window);
+    assert!(live.tabs.borrow().of(id).current().unwrap().settings);
+    assert!(window.get_find_open());
+    assert_eq!(id.screen(window).find_needle.as_str(), "倍率");
+    assert!(
+        window.get_settings_keys_query().is_empty(),
+        "the whole of the settings"
+    );
+
+    // 鍵の印から：「キー」の面で、その語のあいだはKeysの行だけ（書き手の報告 2026-11-05）。
+    open_settings_searching(window, live, "閉じたTABを開き直す", true);
+    assert_eq!(window.get_settings_tab(), 6);
+    assert_eq!(
+        window.get_settings_keys_query().as_str(),
+        "閉じたTABを開き直す"
+    );
+    assert_eq!(
+        id.screen(window).find_needle.as_str(),
+        "閉じたTABを開き直す"
+    );
+}
+
+/// 書き手の報告 2026-11-05: 設定の検索でIMEから打った「閉じたＴＡＢ」（全角）が、キーの一覧で
+/// 見つからなかった。項目の名前と同じく、全角・半角と大文字・小文字をそろえて探す。
+#[test]
+fn the_key_list_is_searched_with_full_width_letters_too() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("keys-width");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
+    let window = &harness.window;
+    for query in ["閉じたＴＡＢ", "閉じたtab", " 閉じたTAB "] {
+        window.set_shortcut_query(query.into());
+        shortcuts::publish(window);
+        let names: Vec<String> = window
+            .get_shortcut_rows()
+            .iter()
+            .map(|row| row.name.to_string())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|name| name.contains("閉じたTABを開き直す")),
+            "{query:?}: {names:?}"
+        );
+    }
+}

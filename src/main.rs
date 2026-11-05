@@ -574,6 +574,15 @@ fn zoom_owner(window: &AppWindow, id: PaneId) -> PaneId {
     }
 }
 
+/// RFN01-107: このペインの前に出ているTABに、下段のTAB（Editor Panel・Terminal Panel）があるか。
+pub(crate) fn has_strip_tab(live: &Live, id: PaneId) -> bool {
+    live.tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| !tab.below.entries.is_empty() || tab.below.shell.is_some())
+}
+
 /// 倍率を、そのペインで前に出ているTABへ書き込む（書き手の求め 2026-11-05）。
 ///
 /// **変えたその場で。**TABの見え方は切り替えるときに写し取るが、前に出ているTABを
@@ -5576,17 +5585,22 @@ impl StatusBar for AppWindow {
 ///
 /// **大文字小文字と全角半角を問わない**——英語の画面で`font`と打っても`Font`に、日本語の画面で
 /// 全角の`Ｈ１`と打っても`H1`に当たる。語の前後の空白は見ない。
+/// 設定を探すときの字のそろえ方：全角の英数字・記号と全角空白を半角へ、大文字を小文字へ。
+/// 書き手の報告 2026-11-05: **キーの一覧も同じそろえ方で探す**（`shortcuts::publish`）。IMEで
+/// 打った「閉じたＴＡＢ」が、項目の名前は見つかるのにキーの一覧では見つからなかった。
+pub(crate) fn fold_for_search(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            _ => c,
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 fn settings_match(query: &str, labels: impl IntoIterator<Item = SharedString>) -> bool {
-    let fold = |text: &str| -> String {
-        text.chars()
-            .map(|c| match c {
-                '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
-                '\u{3000}' => ' ',
-                _ => c,
-            })
-            .flat_map(char::to_lowercase)
-            .collect()
-    };
+    let fold = fold_for_search;
     let query = fold(query.trim());
     query.is_empty()
         || labels
@@ -13382,6 +13396,47 @@ fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
 /// Otherwise it opens in the pane the writer is in — and **a New Tab becomes
 /// it** rather than gaining a neighbour, for the reason a shell or a file does
 /// (追加要件 2026-09-07).
+/// RFN01-107（書き手と合意 2026-11-05）: 設定のTABを、この語で探した状態で開く。設定の検索は
+/// 設定のTABで開いた検索欄の語なので（`settings-query`）、TABを開いてその欄に語を入れて開く。
+/// パレットの「設定で…を探す」と、行の鍵の印（Keysをその操作で絞る）が使う。
+///
+/// `keys_only`はパレットの鍵の印から：左の一覧で「キー」を選び、結果はKeysの行だけにする
+/// （書き手の報告 2026-11-05：ほかの設定まで並ぶと、探していた行を見落とす）。
+pub(crate) fn open_settings_searching(
+    window: &AppWindow,
+    live: &Live,
+    query: &str,
+    keys_only: bool,
+) {
+    open_settings(window, live);
+    window.set_settings_keys_query(if keys_only {
+        query.into()
+    } else {
+        SharedString::new()
+    });
+    if keys_only {
+        window.set_settings_tab(6);
+    }
+    let id = focused_pane(window);
+    if !live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| tab.settings)
+    {
+        return;
+    }
+    id.update_screen(window, |screen| {
+        screen.find_needle = query.into();
+    });
+    window.set_find_pane(id.index());
+    window.set_find_replacing(false);
+    window.set_find_focus(true);
+    window.set_find_open(true);
+    window.set_find_generation(window.get_find_generation() + 1);
+}
+
 fn open_settings(window: &AppWindow, live: &Live) {
     if focused_pane(window).is_panel() {
         window.set_focused_pane(focused_pane(window).screen(window).panel_owner);
