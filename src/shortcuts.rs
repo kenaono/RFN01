@@ -1109,6 +1109,7 @@ pub fn wire(app: &AppWindow, live: &Live) {
     // RFN01-75/76: from a field of the left pane, only the left pane's own
     // operations — as assigned, so a key the writer moved works there too.
     let weak = app.as_weak();
+    let field_live = live.clone();
     app.on_left_field_shortcut(move |text, control, alt, shift| {
         let Some(app) = weak.upgrade() else {
             return false;
@@ -1118,8 +1119,13 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return false;
         };
         match action.action {
-            ShortcutAction::SearchInFolder => app.invoke_open_folder_search(),
-            ShortcutAction::ReplaceInFolder => app.invoke_open_folder_replace(),
+            // RFN01-66 第3弾: キーやメニューと同じ1つの入口。
+            ShortcutAction::SearchInFolder => {
+                crate::open_folder_search(&app, &field_live, false, None)
+            }
+            ShortcutAction::ReplaceInFolder => {
+                crate::open_folder_search(&app, &field_live, true, None)
+            }
             ShortcutAction::ExplorePane => app.invoke_focus_explore(),
             ShortcutAction::ToggleLeftPane => app.invoke_toggle_left_pane(),
             ShortcutAction::ShowLeftTab(tab) => app.invoke_show_left_tab(tab),
@@ -1262,85 +1268,14 @@ pub(crate) fn palette_actions(app: &AppWindow) -> Vec<PaletteAction> {
 /// 割り当ての一覧のidで、その操作を走らせる。キーからも、コマンドパレットからも
 /// （RFN01-87）——**同じ道**なので、パレットで選んだ操作はキーと同じに効く。
 pub(crate) fn run_command(app: &AppWindow, live: &Live, pane: crate::PaneId, command: i32) {
-    // RFN01-66 第2弾: メニューで押せない場面では動かさず、知らせる（前提はメニューと同じ答え）。
-    if (0..=45).contains(&command) {
-        match crate::menu_commands::key_allowed(app, live, pane, command) {
-            crate::menu_commands::Allowed::Yes => {}
-            crate::menu_commands::Allowed::Tell => {
-                return crate::menu_commands::tell_unavailable(app, &label(app, command as usize));
-            }
-            crate::menu_commands::Allowed::Quiet => return,
-        }
+    // RFN01-66 第3弾: 文書の操作は、メニューと同じ入口（`menu_commands::run`）を通る。そこで前提を
+    // 確かめ、使えない場所なら知らせる。
+    if crate::menu_commands::run_key(app, live, pane, command, &label(app, command as usize)) {
+        return;
     }
-    match command {
-        0 => app.invoke_open_file_requested(),
-        1 => app.invoke_save_requested(),
-        2 => app.invoke_save_as_requested(),
-        3 => {
-            let at = live.tabs.borrow().of(pane).active;
-            crate::close_tab(&app, &live, pane, at);
-        }
-        4 => app.invoke_toggle_find(pane.index(), false),
-        5 => app.invoke_toggle_find(pane.index(), true),
-        6 => app.invoke_goto_requested(false),
-        7 => crate::reopen_closed_tab(&app, &live),
-        8 => app.invoke_pane_undo(pane.index(), false),
-        9 => app.invoke_pane_undo(pane.index(), true),
-        10 => app.invoke_quick_draft_requested(),
-        11 => app.invoke_pane_tab_stepped(pane.index(), false),
-        12 => app.invoke_pane_tab_stepped(pane.index(), true),
-        13 => app.invoke_pane_focus_moved(pane.index(), 0),
-        14 => app.invoke_pane_focus_moved(pane.index(), 1),
-        15 => app.invoke_pane_focus_moved(pane.index(), 2),
-        16 => {
-            if crate::below_kind(live.cache.borrow_mut().pane(pane)) != 0 {
-                app.invoke_pane_below_focus(pane.index(), true);
-            } else {
-                app.invoke_pane_focus_moved(pane.index(), 3);
-            }
-        }
-        17 => app.invoke_pane_below_toggled(pane.index()),
-        18 => {} // Reserved: New Tab is the + button only.
-        19 => app.invoke_pane_navigate(pane.index(), false),
-        20 => app.invoke_pane_navigate(pane.index(), true),
-        21 => app.invoke_pane_delete(pane.index()),
-        22 => app.invoke_pane_move(pane.index(), 3, false),
-        23 => app.invoke_pane_move(pane.index(), -3, false),
-        24 => app.invoke_pane_kill(pane.index(), 0),
-        25 => app.invoke_pane_mark_toggled(pane.index(), false),
-        26 => app.invoke_pane_mark_toggled(pane.index(), true),
-        27 => app.invoke_pane_kill(pane.index(), 1),
-        28 => app.invoke_pane_kill(pane.index(), 2),
-        29 => app.invoke_pane_kill(pane.index(), 3),
-        30 => app.invoke_pane_kill(pane.index(), 4),
-        31 => app.invoke_pane_move(pane.index(), 3, true),
-        32 => app.invoke_pane_move(pane.index(), -3, true),
-        33 => app.invoke_pane_line_edit(pane.index(), 4),
-        34 => app.invoke_pane_line_edit(pane.index(), 0),
-        35 => app.invoke_pane_line_edit(pane.index(), 1),
-        36 => app.invoke_pane_line_edit(pane.index(), 2),
-        37 => app.invoke_pane_line_edit(pane.index(), 3),
-        42 => app.invoke_pane_direction_toggled(pane.index()),
-        43 => {
-            // ReadOnlyはViewerを抜けずに断る（追加要件 2026-09-15）——抜けて
-            // プレビューへ回すと、読むだけのつもりの面が書ける面になる。
-            let viewer = live.states.of(pane).borrow().viewer;
-            if viewer && !pane.reads_only(&app) {
-                app.invoke_pane_viewer_toggled(pane.index());
-            }
-            app.invoke_pane_preview_toggled(pane.index());
-        }
-        44 => app.invoke_pane_viewer_toggled(pane.index()),
-        // 要件 7.10: 紙の形で見る。**入口は窓に一つ**なので、どの面から
-        // 押しても同じ——刷るのは前に出ている文書である。
-        45 => app.invoke_print_requested(),
-        // RFN01-18: メニューから来た操作は、メニューと同じ道で実行する
-        // （`menu_at`が`None`を返す18・38〜41番は、これまでどおり何もしない）。
-        _ => {
-            if let Some(action) = menu_at(command as usize).map(|(action, _)| action.action) {
-                crate::menu_commands::run_shortcut(&app, &live, action);
-            }
-        }
+    // 文書の対象を持たない操作（左ペイン・設定・パレット・下段のTAB）。
+    if let Some(action) = usize::try_from(command).ok().and_then(menu_action_at) {
+        crate::menu_commands::run_shortcut(app, live, action);
     }
 }
 #[cfg(test)]

@@ -44,8 +44,11 @@ pub(crate) enum Command {
     CopyBody,
     SelectAll,
     Find(bool),
-    Goto,
+    /// 行へ移動。`true`はキーから（出ていれば畳む）、`false`はメニューから（出ていれば欄へ）。
+    Goto(bool),
     FolderFind,
+    /// RFN01-75: フォルダ内を置換（検索に置換の欄を出して開く）。
+    FolderReplace,
     Line(i32),
     Mark(bool),
     Kill(i32),
@@ -88,6 +91,10 @@ pub(crate) enum Command {
     ScrollLine(bool),
     /// RFN01-82: キャレットの行を選ぶ。
     SelectLine,
+    /// Emacs風：次の1文字を消す（Ctrl+D）。
+    DeleteNext,
+    /// Emacs風：1単語ずつ動く（`true`で後ろへ）。2つめが`true`なら選びながら。
+    WordMove(bool, bool),
 }
 
 /// 設定から割り当てたキーで走らせる、メニューの操作（RFN01-18）。
@@ -889,7 +896,7 @@ fn format_rows(
 
 /// 書式のボタン（か、その組の行）が押された。**メニューと同じ操作を、同じ対象へ**
 /// ——いま字を入れているPane（[`Target::for_shortcut`]、キーで走らせるのと同じ）。
-/// 押せない条件は実行先が同じ判定を持っているので、ここでは断らない。
+/// RFN01-66: 押せるかは[`run`]が確かめる（メニューと同じ答え）。
 pub fn run_format(window: &AppWindow, live: &Live, action: i32) {
     let Some(command) = format_command(action) else {
         return;
@@ -898,7 +905,7 @@ pub fn run_format(window: &AppWindow, live: &Live, action: i32) {
     if !target.valid(window, live) {
         return;
     }
-    execute(window, live, &target, command);
+    run(window, live, &target, command, "");
 }
 
 /// 書式のボタンの表のマス目で選んだ（RFN01-49 ①）。**ボタンと同じ対象へ**置く。
@@ -1087,10 +1094,13 @@ impl MenuSnapshot {
         let Some(command) = id.checked_sub(1).and_then(|at| self.commands.get(at)) else {
             return;
         };
-        if !self.target.valid(window, live) {
-            return;
-        }
-        execute(window, live, &self.target, command.clone());
+        let name = self.entries[entry]
+            .title
+            .rsplit(" › ")
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        run(window, live, &self.target, command.clone(), &name);
     }
 }
 
@@ -1359,14 +1369,11 @@ fn install_menu_actions(window: &AppWindow, live: &Live) {
         let Some(target) = TARGET.with(|held| held.borrow().clone()) else {
             return;
         };
-        if !target.valid(&window, &run_live) {
-            return;
-        }
-        let scene = Scene::read(&window, &run_live, &target);
-        let command = menu_action_command(&window, &scene, action);
-        if scene.enabled(&command) {
-            execute(&window, &run_live, &target, command);
-        }
+        let command = {
+            let scene = Scene::read(&window, &run_live, &target);
+            menu_action_command(&window, &scene, action)
+        };
+        run(&window, &run_live, &target, command, "");
     });
 }
 
@@ -1431,7 +1438,7 @@ fn menu_action_command(window: &AppWindow, scene: &Scene, action: MenuAction) ->
         MenuAction::SwapDown => Command::Swap(3),
         MenuAction::OtherPanes => Command::OtherPanes,
         MenuAction::Below => Command::Below,
-        MenuAction::Goto => Command::Goto,
+        MenuAction::Goto => Command::Goto(false),
         MenuAction::CompareSaved => Command::Compare(0),
         MenuAction::CompareHead => Command::Compare(1),
         MenuAction::CompareFile => Command::Compare(2),
@@ -1729,6 +1736,7 @@ impl<'a> Scene<'a> {
             | Command::Exit
             | Command::Help(_)
             | Command::FolderFind
+            | Command::FolderReplace
             | Command::Sidebar(1..)
             | Command::Toolbar
             | Command::Palette
@@ -1765,7 +1773,9 @@ impl<'a> Scene<'a> {
             Command::CopyBody => text && !field,
             Command::Find(false) => text || self.terminal || self.screen.settings,
             Command::Find(true) => editable,
-            Command::Goto => text,
+            Command::Goto(_) => text,
+            Command::DeleteNext => editable,
+            Command::WordMove(..) => text,
             Command::Line(_) => editable,
             Command::Mark(_) => text && !field,
             Command::Kill(i) => match i {
@@ -2003,7 +2013,7 @@ fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<
             root.push(Item::Sep);
             add!("検索…", "Find…", Command::Find(false));
             add!("置換…", "Replace…", Command::Find(true));
-            add!("行へ移動…", "Go to Line…", Command::Goto);
+            add!("行へ移動…", "Go to Line…", Command::Goto(false));
             add!("フォルダ内を検索…", "Find in Folder…", Command::FolderFind);
             if terminal {
                 root.push(Item::Sep);
@@ -2443,18 +2453,8 @@ fn show(
     if picked > 0
         && let Some(command) = commands.get(picked as usize - 1)
     {
-        if t.valid(window, live) {
-            window.set_title_menu_visible(false);
-            execute(window, live, t, command.clone());
-        } else {
-            window.tell(
-                pick(
-                    "操作対象が変わりました。選び直してください",
-                    "The target changed. Please choose again",
-                )
-                .into(),
-            );
-        }
+        window.set_title_menu_visible(false);
+        run(window, live, t, command.clone(), "");
     }
     Ok(navigation.next.get())
 }
@@ -2613,19 +2613,18 @@ unsafe extern "system" fn menu_filter(
 /// **対象は、いまフォーカスしているPane・TAB**——メニューは開いた時点で対象を
 /// 捕まえるが、キーには捕まえる瞬間が無い。押せない条件（選んだ字が要る形など）は
 /// それぞれの実行先が同じ判定を持っているので、ここでは断らない。
-/// RFN01-66 第2弾: 割り当ての一覧のid（0〜45、メニューに無いキーの操作）が、`pane`を対象に
-/// いま実行できるか。**メニューと同じ答え**（[`Scene::enabled`]）を読む。
-pub(crate) fn key_allowed(window: &AppWindow, live: &Live, pane: PaneId, id: i32) -> Allowed {
-    let target = Target::of(window, live, pane, 0);
-    let scene = Scene::read(window, live, &target);
-    let command = match id {
+/// RFN01-66: 割り当ての一覧のidを、メニューと同じ[`Command`]へ。0〜45はメニューに無いキーの操作、
+/// それより後はメニューの操作に割り当てたキー（[`shortcut_command`]）。文書の対象を持たない操作
+/// （左ペイン・設定・パレット・下段のTAB）は`None`。
+pub(crate) fn key_command(window: &AppWindow, pane: PaneId, id: i32) -> Option<Command> {
+    Some(match id {
         0 => Command::Open,
         1 => Command::Save(false),
         2 => Command::Save(true),
         3 => Command::Close,
         4 => Command::Find(false),
         5 => Command::Find(true),
-        6 => Command::Goto,
+        6 => Command::Goto(true),
         7 => Command::Reopen,
         8 => Command::Undo(false),
         9 => Command::Undo(true),
@@ -2636,28 +2635,75 @@ pub(crate) fn key_allowed(window: &AppWindow, live: &Live, pane: PaneId, id: i32
         17 => Command::Below,
         19 => Command::Navigate(false),
         20 => Command::Navigate(true),
-        // Emacs風の削除・移動・選択（メニューに無い）：消すのは書き換えられるとき、
-        // 動く・選ぶのは本文を出しているとき。
-        21 => return Allowed::from(scene.editable, false),
-        22 | 23 | 31 | 32 => return Allowed::from(scene.text, false),
+        21 => Command::DeleteNext,
+        22 => Command::WordMove(true, false),
+        23 => Command::WordMove(false, false),
         24 => Command::Kill(0),
         25 => Command::Mark(false),
         26 => Command::Mark(true),
         27..=30 => Command::Kill(id - 26),
+        31 => Command::WordMove(true, true),
+        32 => Command::WordMove(false, true),
         33 => Command::Line(4),
         34..=37 => Command::Line(id - 34),
         42 => Command::Direction(!pane.vertical(window)),
         43 => Command::Preview,
         44 => Command::Viewer,
         45 => Command::Print,
-        _ => match crate::shortcuts::menu_action_at(id as usize)
-            .and_then(|action| shortcut_command(window, action))
-        {
-            Some(command) => command,
-            None => return Allowed::Yes,
-        },
+        _ => {
+            return crate::shortcuts::menu_action_at(usize::try_from(id).ok()?)
+                .and_then(|action| shortcut_command(window, action));
+        }
+    })
+}
+
+/// RFN01-66: 割り当ての一覧のidの操作が、`pane`を対象にいま実行できるか（パレットが並べるか）。
+pub(crate) fn key_allowed(window: &AppWindow, live: &Live, pane: PaneId, id: i32) -> Allowed {
+    let Some(command) = key_command(window, pane, id) else {
+        return Allowed::Yes;
     };
+    let target = Target::of(window, live, pane, 0);
+    let scene = Scene::read(window, live, &target);
     Allowed::from(scene.enabled(&command), quiet(&command))
+}
+
+/// RFN01-66 第3弾（書き手と合意 2026-11-05）: **操作の入口はここ1つ。**タイトルバーのメニュー・
+/// パレット・キー・⋮・右クリックのどこから来ても、ここで対象がまだ同じかと前提（[`Scene::enabled`]）
+/// を確かめてから実行する——灰色にした・並べなかったことに頼らない（開いてから押すまでに場面が
+/// 変わることがある）。断ったときは`name`で知らせる（その時の状態だけの操作は黙る）。
+pub(crate) fn run(window: &AppWindow, live: &Live, t: &Target, command: Command, name: &str) {
+    if !t.valid(window, live) {
+        window.tell(
+            pick(
+                "操作対象が変わりました。選び直してください",
+                "The target changed. Please choose again",
+            )
+            .into(),
+        );
+        return;
+    }
+    if !Scene::read(window, live, t).enabled(&command) {
+        if !quiet(&command) {
+            tell_unavailable(window, name);
+        }
+        return;
+    }
+    execute(window, live, t, command);
+}
+
+/// RFN01-66: キー（割り当ての一覧のid）から。対象は`pane`。
+pub(crate) fn run_key(window: &AppWindow, live: &Live, pane: PaneId, id: i32, name: &str) -> bool {
+    let Some(command) = key_command(window, pane, id) else {
+        return false;
+    };
+    run(
+        window,
+        live,
+        &Target::of(window, live, pane, 0),
+        command,
+        name,
+    );
+    true
 }
 
 /// キーで押した操作を実行できるか。
@@ -2698,11 +2744,13 @@ fn quiet(command: &Command) -> bool {
 /// RFN01-66 第2弾: キーで押した操作が、いまの場面では使えないことを知らせる
 /// （以前は何も起きず、知らせも無かった）。
 pub(crate) fn tell_unavailable(window: &AppWindow, name: &str) {
+    let told = pick("この場面では使えません", "Not available here");
     window.tell(
-        format!(
-            "{}: {name}",
-            pick("この場面では使えません", "Not available here")
-        )
+        if name.is_empty() {
+            told.to_owned()
+        } else {
+            format!("{told}: {name}")
+        }
         .into(),
     );
 }
@@ -2711,9 +2759,7 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
     // RFN01-75/76: **the left pane's, not a document's** — no Pane or TAB is
     // acted on, so none has to be valid.
     match action {
-        ShortcutAction::SearchInFolder => return window.invoke_open_folder_search(),
         ShortcutAction::ExplorePane => return window.invoke_focus_explore(),
-        ShortcutAction::ReplaceInFolder => return window.invoke_open_folder_replace(),
         ShortcutAction::ToggleLeftPane => return window.invoke_toggle_left_pane(),
         ShortcutAction::ShowLeftTab(tab) => return window.invoke_show_left_tab(tab),
         ShortcutAction::OpenSettings => return window.invoke_settings_requested(),
@@ -2736,14 +2782,13 @@ pub fn run_shortcut(window: &AppWindow, live: &Live, action: ShortcutAction) {
     let Some(command) = shortcut_command(window, action) else {
         return;
     };
-    // RFN01-66 第2弾: **メニューで押せない場面では動かさず、知らせる。**
-    if !Scene::read(window, live, &target).enabled(&command) {
-        if !quiet(&command) {
-            tell_unavailable(window, &crate::shortcuts::action_label(window, action));
-        }
-        return;
-    }
-    execute(window, live, &target, command);
+    run(
+        window,
+        live,
+        &target,
+        command,
+        &crate::shortcuts::action_label(window, action),
+    );
 }
 
 /// 割り当てたキーの操作（メニューの操作）を、メニューと同じ[`Command`]へ落とす。
@@ -2763,11 +2808,11 @@ fn shortcut_command(window: &AppWindow, action: ShortcutAction) -> Option<Comman
         ShortcutAction::SpellingStep(back) => Command::SpellingStep(back),
         ShortcutAction::ReadAloud => Command::ReadAloud,
         ShortcutAction::SplitRight => Command::Split(true),
+        ShortcutAction::SearchInFolder => Command::FolderFind,
+        ShortcutAction::ReplaceInFolder => Command::FolderReplace,
         ShortcutAction::ScrollLine(down) => Command::ScrollLine(down),
         ShortcutAction::SelectLine => Command::SelectLine,
-        ShortcutAction::SearchInFolder
-        | ShortcutAction::ExplorePane
-        | ShortcutAction::ReplaceInFolder
+        ShortcutAction::ExplorePane
         | ShortcutAction::ToggleLeftPane
         | ShortcutAction::ShowLeftTab(_)
         | ShortcutAction::OpenSettings
@@ -2894,12 +2939,14 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
                 window.invoke_toggle_find(p, replace)
             }
         }
-        Command::Goto => window.invoke_goto_requested(true),
-        Command::FolderFind => {
-            window.set_tree_open(true);
-            window.set_left_tab(1);
-            window.invoke_left_tab_chosen(1);
+        Command::Goto(toggle) => window.invoke_goto_requested(!toggle),
+        Command::DeleteNext => window.invoke_pane_delete(p),
+        Command::WordMove(forward, select) => {
+            window.invoke_pane_move(p, if forward { 3 } else { -3 }, select)
         }
+        // RFN01-66 第3弾: Ctrl+Shift+F／Ctrl+Shift+Hと同じ1つの入口（以前は検索の面を開くだけだった）。
+        Command::FolderFind => crate::open_folder_search(window, live, false, None),
+        Command::FolderReplace => crate::open_folder_search(window, live, true, None),
         Command::Line(n) => window.invoke_pane_line_edit(p, n),
         Command::Mark(rect) => window.invoke_pane_mark_toggled(p, rect),
         Command::Kill(n) => window.invoke_pane_kill(p, n),
@@ -2920,7 +2967,8 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
             window.invoke_left_tab_chosen(n);
         }
         Command::Preview => {
-            if t.id.screen(window).viewer {
+            // Viewerかは文書の表示の状態（`EditorState`）から読む——画面の行はその写し。
+            if live.states.of(t.id).borrow().viewer {
                 window.invoke_pane_viewer_toggled(p)
             }
             window.invoke_pane_preview_toggled(p);
@@ -3011,7 +3059,7 @@ fn shortcut(window: &AppWindow, command: &Command, field: bool) -> String {
         Command::Close => 3,
         Command::Find(false) => 4,
         Command::Find(true) => 5,
-        Command::Goto => 6,
+        Command::Goto(_) => 6,
         Command::Reopen => 7,
         Command::Undo(false) => 8,
         Command::Undo(true) => 9,
@@ -3036,6 +3084,12 @@ fn shortcut(window: &AppWindow, command: &Command, field: bool) -> String {
             return shortcuts::action_label(window, ShortcutAction::SpellingStep(*back));
         }
         Command::ReadAloud => return shortcuts::action_label(window, ShortcutAction::ReadAloud),
+        Command::FolderFind => {
+            return shortcuts::action_label(window, ShortcutAction::SearchInFolder);
+        }
+        Command::FolderReplace => {
+            return shortcuts::action_label(window, ShortcutAction::ReplaceInFolder);
+        }
         _ => return String::new(),
     };
     shortcuts::label(window, id)
@@ -3501,6 +3555,47 @@ mod tests {
         assert!(menu_opens(&h.window, &h.live, 2), "挿入は開く");
         // RFN01-66（2026-11-05）: ヘルプに行ができた（以前は未実装の行だけで開かなかった）。
         assert!(menu_opens(&h.window, &h.live, 6), "Helpは開く");
+    }
+
+    /// RFN01-66 第3弾: タイトルバーの「フォルダ内を検索…」は、Ctrl+Shift+Fと同じ1つの入口
+    /// （`open_folder_search`）を通る。左ペインが閉じていればExplorerの木の上で、Outlineなどが
+    /// 出ていれば検索の面で探す（以前は、いつも検索の面を開くだけだった）。
+    #[test]
+    fn find_in_folder_is_one_road_from_the_menu_and_the_key() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        let target = Target::for_shortcut(window, live);
+        window.set_tree_open(false);
+        run(window, live, &target, Command::FolderFind, "");
+        assert!(window.get_tree_open());
+        assert_eq!(window.get_left_tab(), 0, "Explorer");
+        assert!(window.get_tree_searching(), "木の上で探す");
+        window.invoke_close_tree_search();
+        window.set_left_tab(3);
+        run_shortcut(window, live, ShortcutAction::SearchInFolder);
+        assert_eq!(window.get_left_tab(), 1, "Outlineからは検索の面");
+        // 置換は、木の上で探しているときに置換の欄を出す。
+        window.set_left_tab(0);
+        run(window, live, &target, Command::FolderReplace, "");
+        assert!(window.get_tree_searching() && window.get_tree_replacing());
+    }
+
+    /// RFN01-66 第3弾: **入口は`run`1つで、実行の直前に前提を確かめる。**パレットを開いたあとで
+    /// 場面が変わっても、開いた時点の答えでは走らない。
+    #[test]
+    fn the_one_entry_checks_again_when_it_runs() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        let target = Target::for_shortcut(window, live);
+        run(window, live, &target, Command::Find(true), "置換");
+        assert!(window.get_find_open() && window.get_find_replacing());
+        window.set_find_open(false);
+        window.set_find_replacing(false);
+        // 押せる答えのあとで、Viewerになった（書き換えられない）。
+        PaneId::FIRST.update_screen(window, |screen| screen.viewer = true);
+        run(window, live, &target, Command::Find(true), "置換");
+        assert!(!window.get_find_open(), "走らない");
+        assert!(window.get_render_status().contains("使えません"));
     }
 
     /// RFN01-66 第2弾: ⋮・右クリックの行（`MenuActions`）も**メニューと同じ答え**で灰色になり、

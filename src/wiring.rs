@@ -1736,6 +1736,13 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
     // RFN01-75: the tree's search starts and ends. From the event loop, like
     // a panel being chosen: both put new rows in the list being drawn.
     let weak = window.as_weak();
+    let toggle_live = live.clone();
+    window.on_tree_search_toggled(move || {
+        if let Some(window) = weak.upgrade() {
+            crate::toggle_tree_search(&window, &toggle_live);
+        }
+    });
+    let weak = window.as_weak();
     let tree_live = live.clone();
     window.on_tree_search_opened(move || {
         let weak = weak.clone();
