@@ -1096,7 +1096,7 @@ export component AppWindow inherits Window {
     in-out property <color> left-file-ink: #171321;
     callback left-size-stepped(int);
     callback left-reset();
-    // 書き手の求め 2026-11-05: 既定の倍率（新しいペインと Reset の戻り先）。開いているペインは変えない。
+    // 書き手の求め 2026-11-05: 既定の倍率（新しいTABと Reset の戻り先）。開いているTABは変えない。
     in-out property <int> default-zoom: 150;
     callback default-zoom-stepped(int);
     in-out property <color> terminal-paper: #fffefa;
@@ -4615,7 +4615,7 @@ export component AppWindow inherits Window {
                                         if root.shows-group(3, []): VerticalLayout {
                                             spacing: 20px;
                                             // 書き手の求め 2026-11-05: 画面で読む大きさは Body の字と既定の倍率の組み。
-                                            // 倍率はペインのもので向きを持たないので、横書き・縦書きの外に1行。
+                                            // 倍率はTABのもので向きを持たないので、横書き・縦書きの外に1行。
                                             if root.shows-any([@tr("ZOOM"), @tr("Default Zoom")]): VerticalLayout {
                                                 spacing: 8px;
                                                 Text {

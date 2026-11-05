@@ -1522,8 +1522,8 @@ fn build(
     let terminal = screen.terminal || matches!(t.spot, TerminalSpot::Below);
     let (text, editable) = text_state(window, live, t);
     let main = text && !t.id.is_panel();
-    // 書き手の求め 2026-11-05: 倍率はペインのもので、Terminal・下段にも効く。下段から押しても
-    // 持ち主のペインの倍率が動く（`zoom_owner`）。
+    // 書き手の求め 2026-11-05: 倍率は上段のTABのもので、Terminal・下段にも効く。下段から押しても
+    // 上段のTABの倍率が動く（`zoom_owner`）。
     let zoomable = (text || terminal) && !screen.settings;
     let zoom_now = t.parent.zoom(window);
     let parent_screen = t.parent.screen(window);

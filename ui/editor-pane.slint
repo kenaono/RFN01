@@ -1349,7 +1349,7 @@ export component EditorPane inherits Rectangle {
                         // so the window cannot tell from the signal alone
                         // whether focus should follow, and this is the end
                         // that knows.
-                        // 書き手の求め 2026-11-05: 倍率はペインのもので、Terminalの
+                        // 書き手の求め 2026-11-05: 倍率はTABのもので、Terminalの
                         // 升目と下段にも効く（以前は文書だけだった）。
                         if !root.settings: VerticalLayout {
                             spacing: 1px;
@@ -2268,7 +2268,7 @@ export component EditorPane inherits Rectangle {
                     below-pointer := TouchArea {
                         mouse-cursor: root.below-over-link ? MouseCursor.pointer : MouseCursor.text;
                         scroll-event(event) => {
-                            // 書き手の求め 2026-11-05: 上段と同じく、Ctrlならペインの倍率。
+                            // 書き手の求め 2026-11-05: 上段と同じく、Ctrlなら倍率（上段のTABの倍率）。
                             if event.modifiers.control {
                                 let notch = event.delta-y != 0px ? event.delta-y : event.delta-x;
                                 if notch != 0px {

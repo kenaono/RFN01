@@ -553,18 +553,18 @@ const ZOOM_MAX: i32 = 240;
 /// **これは出荷時の値で、使うのは設定の「Default Zoom」**（書き手の求め 2026-11-05、
 /// [`default_zoom`]）。画面で読みやすい大きさはディスプレイと距離で違うので、書き手が決める。
 const ZOOM_DEFAULT: i32 = 150;
-/// 書き手の求め 2026-11-05: 既定の倍率。新しいペインと Reset の戻り先だけに効き、
-/// **開いているペインの倍率は変えない**。
+/// 書き手の求め 2026-11-05: 既定の倍率。新しいTABと Reset の戻り先だけに効き、
+/// **開いているTABの倍率は変えない**。
 const DEFAULT_ZOOM_SETTING: &str = "zoom.default";
 
-/// 設定の既定の倍率（書き手の求め 2026-11-05）。新しいペイン、Reset、倍率を持たない
+/// 設定の既定の倍率（書き手の求め 2026-11-05）。新しいTAB・ペイン、Reset、倍率を持たない
 /// セッションの行がこれを使う。
 fn default_zoom(window: &AppWindow) -> i32 {
     window.get_default_zoom().clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
-/// 倍率を持つペイン（書き手の求め 2026-11-05）。**下段のEditor Panelは持ち主のペインの倍率**で
-/// 拡大する——倍率はペインに1つで、上段と下段は同じ数で読む。
+/// 倍率を持つペイン（書き手の求め 2026-11-05）。**下段のEditor Panelは持ち主のペインの倍率**、
+/// つまり上段で前に出ているTABの倍率で拡大する——上段と下段は同じ数で読む。
 fn zoom_owner(window: &AppWindow, id: PaneId) -> PaneId {
     if id.is_panel() {
         PaneId::from_index(id.screen(window).panel_owner)
@@ -573,8 +573,25 @@ fn zoom_owner(window: &AppWindow, id: PaneId) -> PaneId {
     }
 }
 
-/// 書式の大きさにペインの倍率を掛ける（書き手の求め 2026-11-05）。Terminal・Terminal Panel・
-/// Editor Panelは書式の文字サイズを持ち、画面ではそれをペインの倍率で拡大する。
+/// 倍率を、そのペインで前に出ているTABへ書き込む（書き手の求め 2026-11-05）。
+///
+/// **変えたその場で。**TABの見え方は切り替えるときに写し取るが、前に出ているTABを
+/// 出し直す道もあり、そこで古い倍率へ戻らないように。
+fn remember_tab_zoom(window: &AppWindow, live: &Live, id: PaneId) {
+    let id = zoom_owner(window, id);
+    let zoom = id.zoom(window);
+    if let Ok(mut tabs) = live.tabs.try_borrow_mut()
+        && let Some(strip) = tabs.of_mut(id)
+    {
+        let active = strip.active;
+        if let Some(tab) = strip.tabs.get_mut(active) {
+            tab.view.zoom = zoom;
+        }
+    }
+}
+
+/// 書式の大きさに倍率を掛ける（書き手の求め 2026-11-05）。Terminal・Terminal Panel・
+/// Editor Panelは書式の文字サイズを持ち、画面ではそれを前に出ているTABの倍率で拡大する。
 fn zoomed_size(size: f32, zoom_percent: i32) -> f32 {
     size * zoom_percent as f32 / 100.0
 }
@@ -1957,6 +1974,8 @@ fn main() -> Result<(), slint::PlatformError> {
         id.set_scroll(&window, tab.view.scroll);
         id.set_shows_preview(&window, tab.view.preview);
         set_pane_direction(&window, &render_cache, id, tab.view.vertical);
+        // 書き手の求め 2026-11-05: 倍率は前に出ているTABのもの。
+        id.set_zoom(&window, tab.view.zoom);
         // 要件 8.5: the passage it was looking at, which is what actually puts
         // the view back — the scroll above is pixels, and the zoom, the split
         // and the extent all change what those mean before the window stands
@@ -3266,11 +3285,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
+    let zoom_live = live.clone();
     window.on_pane_zoom(move |pane, notches| {
         if let Some(window) = weak.upgrade() {
             let id = zoom_owner(&window, PaneId::from_index(pane));
             let percent = id.zoom(&window) + notches * ZOOM_STEP;
             zoom_pane(&window, &states, &cache, &timer, id, percent);
+            remember_tab_zoom(&window, &zoom_live, id);
         }
     });
 
@@ -3278,10 +3299,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
+    let zoom_live = live.clone();
     window.on_pane_zoom_set(move |pane, percent| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             zoom_pane(&window, &states, &cache, &timer, id, percent);
+            remember_tab_zoom(&window, &zoom_live, id);
         }
     });
 
@@ -3289,10 +3312,12 @@ fn main() -> Result<(), slint::PlatformError> {
     let states = pane_states.clone();
     let cache = render_cache.clone();
     let timer = spec_timer.clone();
+    let zoom_live = live.clone();
     window.on_pane_zoom_reset(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
             zoom_pane(&window, &states, &cache, &timer, id, default_zoom(&window));
+            remember_tab_zoom(&window, &zoom_live, id);
         }
     });
 
@@ -4715,6 +4740,9 @@ struct TabView {
     /// file can be open横書き in one pane and縦書き in another.
     vertical: bool,
     preview: bool,
+    /// 書き手の求め 2026-11-05: **倍率はTABのもの。**同じペインでも、TerminalのTABと文書の
+    /// TABは別の倍率で読む。`0`は「既定の倍率」で、新しいTABはそれで開く（[`zoom_from`]）。
+    zoom: i32,
 }
 
 /// **まだ誰も見ていない表示は、文書の先頭に立つ**（書き手の報告 2026-09-15：
@@ -4732,6 +4760,7 @@ impl Default for TabView {
             top: Some(0),
             vertical: false,
             preview: false,
+            zoom: 0,
         }
     }
 }
@@ -5271,6 +5300,7 @@ impl Live {
             top: self.view_top(window, id),
             vertical: id.vertical(window),
             preview: id.shows_preview(window),
+            zoom: id.zoom(window),
         }
     }
 
@@ -5301,6 +5331,8 @@ impl Live {
         // The direction first: everything below is in a screen axis, and which
         // axis that is comes from the tab (要件 7.2).
         set_pane_direction(window, &self.cache, id, tab.view.vertical);
+        // 書き手の求め 2026-11-05: 倍率もTABのもの。組版は字の設定が変われば測り直す。
+        id.set_zoom(window, tab.view.zoom);
         // **What the pane is showing, told to the pane — twice, because two
         // sides ask.** Every path that draws reaches `refresh_pane` and none of
         // them carries a tab, so the render cache is told; and the keyboard is
@@ -6081,6 +6113,8 @@ fn open_same_file_in(window: &AppWindow, live: &Live, id: PaneId, like: PaneId) 
                     view: TabView {
                         vertical: like.vertical(window),
                         preview: like.shows_preview(window),
+                        // 書き手の求め 2026-11-05: 分割でできたTABは元のTABの倍率を継ぐ。
+                        zoom: like.zoom(window),
                         ..TabView::default()
                     },
                     terminal: None,

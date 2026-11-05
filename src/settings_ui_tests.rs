@@ -1658,4 +1658,19 @@ fn the_left_pane_has_its_own_look() {
     let early = AppWindow::new().unwrap();
     apply_default_zoom(&early, &values);
     assert_eq!(early.get_default_zoom(), 120);
+
+    // 書き手の求め 2026-11-05: **倍率はTABのもの。**同じペインでもTABを替えればそのTABの
+    // 倍率で読み、新しいTABは既定の倍率で開く。TABの列は1つなので、ペインも1つに戻す。
+    publish_panes(&window, 1);
+    id.set_zoom(&window, 200);
+    remember_tab_zoom(&window, &live, id);
+    new_tab(&window, &live, id);
+    assert_eq!(id.zoom(&window), 120, "a new tab opens at the default");
+    switch_to_tab(&window, &live, id, 0);
+    assert_eq!(id.zoom(&window), 200, "the first tab keeps its own");
+    switch_to_tab(&window, &live, id, 1);
+    assert_eq!(id.zoom(&window), 120);
+    let session = session::capture_session(&window, &live);
+    let zooms: Vec<i32> = session.panes[0].tabs.iter().map(|tab| tab.zoom).collect();
+    assert!(zooms.contains(&200), "{zooms:?}");
 }

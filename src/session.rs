@@ -115,6 +115,9 @@ pub fn open_session(
                     top: tab.top,
                     vertical: tab.vertical,
                     preview: tab.preview,
+                    // 書き手の求め 2026-11-05: 倍率はTABのもの。**TABの倍率を持たない
+                    // セッションは、ペインの倍率をそのTABへ写す**——見え方は変わらない。
+                    zoom: if tab.zoom != 0 { tab.zoom } else { stored.zoom },
                 },
                 empty: tab.empty,
                 settings: false,
@@ -652,6 +655,7 @@ pub fn session_tab(tab: &PaneTab, keep_output: bool) -> app_data::SessionTab {
         untitled: file.untitled_number(),
         vertical: tab.view.vertical,
         preview: tab.view.preview,
+        zoom: tab.view.zoom,
         // Whole pixels: the scroll is a position on a page, and a session that
         // remembered a fraction of one would be keeping precision nobody can
         // see.

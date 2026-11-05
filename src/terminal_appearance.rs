@@ -84,8 +84,8 @@ pub(crate) fn publish(window: &AppWindow, id: PaneId, below: &TabBelow) {
     });
 }
 
-/// 書き手の求め 2026-11-05: **字の大きさは書式の文字サイズ × ペインの倍率。**上段の
-/// Terminalも下段のTerminal Panelも、そのペインの倍率で拡大する。
+/// 書き手の求め 2026-11-05: **字の大きさは書式の文字サイズ × 倍率。**上段の
+/// Terminalも下段のTerminal Panelも、そのペインで前に出ているTABの倍率で拡大する。
 pub(crate) fn look(window: &AppWindow, id: PaneId, spot: TerminalSpot) -> cells::TerminalLook {
     let zoom = zoom_owner(window, id).zoom(window);
     let screen = id.screen(window);

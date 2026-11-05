@@ -247,7 +247,7 @@ pub fn wire_colours(
     });
 
     // 書き手の求め 2026-11-05: 既定の倍率。キーとホイールと同じ10%刻み。**開いているペインは
-    // 変えない**——変わるのは新しいペインと Reset の戻り先。
+    // 変えない**——変わるのは新しいTABと Reset の戻り先（倍率はTABのもの）。
     let weak = window.as_weak();
     let held = doors.clone();
     window.on_default_zoom_stepped(move |by| {
