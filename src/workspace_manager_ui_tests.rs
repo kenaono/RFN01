@@ -149,6 +149,11 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
     assert!(window.get_workspace_manager_open());
     workspace_create(&window, &live, "First".into());
     let first = runtime.borrow().manager_selection().unwrap();
+    // RFN01-110: Explorerから入るとき、外のファイルが開いていれば先にそれを訊く。
+    assert!(
+        matches!(*live.pending.borrow(), Some(Question::OutsideForWorkspace(value)) if value == first)
+    );
+    answer_question(&window, &live, 0);
     assert!(
         matches!(*live.pending.borrow(), Some(Question::ChangeWorkspace(Some(value))) if value == first)
     );
@@ -386,7 +391,7 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
     assert!(memo.file.borrow().path().is_none());
     memo.text.borrow_mut().push_str("restored memo");
     memo.text.mark_saved();
-    assert!(workspace_has_unsaved(&live));
+    assert!(closing_has_unsaved(&live, None));
     let memo_path = workspace_root.join("restored-memo.md");
     let mut offered = false;
     saving::save_all_including_memos_with_choice(&window, &live, true, |chosen| {
@@ -402,7 +407,7 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
         std::fs::read_to_string(&memo_path).unwrap(),
         "restored memo"
     );
-    assert!(!workspace_has_unsaved(&live));
+    assert!(!closing_has_unsaved(&live, None));
     request_workspace_change(&window, &live, Some(second));
     assert_eq!(runtime.borrow().active_workspace(), Some(second));
     assert!(live.tabs.borrow().of(id).tabs.iter().all(|tab| tab.empty));
@@ -682,4 +687,80 @@ fn manager_callbacks_enforce_workspace_transitions_and_boundaries() {
     answer_question(&window, &live, 1);
     assert!(!window.get_question_open());
     assert!(live.pending.borrow().is_none());
+}
+
+/// RFN01-106・110（書き手と合意 2026-11-05）: Workspaceの並びは、離れても次に入れば戻る。
+/// Explorerから入るとき、中のファイルは開いたまま持って入り、外のファイルがあれば先に訊く。
+#[test]
+fn each_workspace_keeps_its_tabs_and_explorer_files_come_along() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("workspace-tabs");
+    let inside_root = root.join("inside");
+    let other_root = root.join("other");
+    std::fs::create_dir_all(&inside_root).unwrap();
+    std::fs::create_dir_all(&other_root).unwrap();
+    let (harness, _) = Harness::new(|weak| open_under(&inside_root, "a.md", "あ\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    let id = PaneId::FIRST;
+    let runtime = Rc::new(RefCell::new(workspace_ui::Runtime::open(
+        app_data::app_directory().unwrap(),
+    )));
+    live.folder.borrow_mut().workspace = Some(runtime.clone());
+    let (first, second) = runtime
+        .borrow_mut()
+        .edit(|registry| {
+            let first = registry.create_workspace("First".into())?;
+            registry.add_root(first, &inside_root)?;
+            let second = registry.create_workspace("Second".into())?;
+            registry.add_root(second, &other_root)?;
+            Ok((first, second))
+        })
+        .unwrap();
+    let names = || -> Vec<String> {
+        live.tabs
+            .borrow()
+            .panes
+            .iter()
+            .flat_map(|strip| strip.tabs.iter())
+            .filter_map(|tab| tab.document.file.borrow().path().map(Path::to_path_buf))
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    };
+
+    // Explorerから、中のファイル（a.md）を開いたまま入る。問いは出ない。
+    request_workspace_change(window, live, Some(first));
+    assert!(live.pending.borrow().is_none());
+    assert_eq!(runtime.borrow().active_workspace(), Some(first));
+    assert_eq!(names(), ["a.md"], "the file came along");
+    let b = open_under(&inside_root, "b.md", "い\n", window.as_weak());
+    add_tab(window, live, id, PaneTab::showing(window, id, b));
+    assert_eq!(names(), ["a.md", "b.md"]);
+
+    // 別のWorkspaceへ移って戻ると、Firstの並びが戻る。
+    request_workspace_change(window, live, Some(second));
+    assert_eq!(runtime.borrow().active_workspace(), Some(second));
+    assert!(names().is_empty(), "Second has nothing remembered");
+    request_workspace_change(window, live, Some(first));
+    assert_eq!(names(), ["a.md", "b.md"], "First's tabs come back");
+
+    // 閉じれば空（Explorerの並びは覚えない）。外のファイルを開いて入り直すと先に訊かれる。
+    request_workspace_change(window, live, None);
+    assert!(names().is_empty());
+    let outside = open_under(&other_root, "c.md", "う\n", window.as_weak());
+    add_tab(window, live, id, PaneTab::showing(window, id, outside));
+    request_workspace_change(window, live, Some(first));
+    assert!(
+        matches!(*live.pending.borrow(), Some(Question::OutsideForWorkspace(value)) if value == first)
+    );
+    answer_question(window, live, 1);
+    assert_eq!(
+        runtime.borrow().active_workspace(),
+        None,
+        "cancel stays out"
+    );
+    assert_eq!(names(), ["c.md"]);
+    request_workspace_change(window, live, Some(first));
+    answer_question(window, live, 0);
+    assert_eq!(runtime.borrow().active_workspace(), Some(first));
+    assert_eq!(names(), ["a.md", "b.md"], "the outside file is closed");
 }

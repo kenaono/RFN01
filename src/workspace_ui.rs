@@ -250,7 +250,13 @@ impl Runtime {
         let Some(active) = self.active else {
             return Vec::new();
         };
-        let Some(workspace) = self.registry.workspace(active) else {
+        self.roots_of(active)
+    }
+
+    /// RFN01-110: any Workspace's registered roots, in order — what
+    /// [`Self::active_roots`] answers once `id` is the active one.
+    pub fn roots_of(&self, id: WorkspaceId) -> Vec<PathBuf> {
+        let Some(workspace) = self.registry.workspace(id) else {
             return Vec::new();
         };
         workspace

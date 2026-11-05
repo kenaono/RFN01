@@ -1751,9 +1751,20 @@ fn main() -> Result<(), slint::PlatformError> {
     // **Read before the panes are published** (2026-09-06). It is the session
     // that says how many panes there are, and a row nobody wrote is a pane
     // nobody can be in.
-    let session = app_data::app_directory()
+    let mut session = app_data::app_directory()
         .as_deref()
         .and_then(app_data::read_session);
+    // RFN01-110（書き手と合意 2026-11-05）: **ファイルやフォルダを指定した起動は、前回の並びを
+    // 戻さない。**ペインは1つで、TABは指定したものだけ（`open_startup_paths`）。窓の位置・
+    // 最近のファイル・探した語などはそのまま使う。前回Workspaceだった並びは、そのWorkspaceの
+    // 記録に残っているので、Workspaceを開き直せば戻る（RFN01-106）。
+    if !paths_from_command_line().is_empty()
+        && let Some(session) = session.as_mut()
+    {
+        session.panes.clear();
+        session.layout.clear();
+        session.focused = 0;
+    }
     // 書き手の求め 2026-11-05: 設定も**ペインを作る前に**読む。既定の倍率は新しいペインの行と、
     // 倍率を持たないセッションの行が使う。全体を当てるのは下の`apply_settings`で、同じ値を使う。
     let stored_settings = app_data::app_directory()
@@ -9292,12 +9303,6 @@ fn workspace_leave_requested(window: &AppWindow, live: &Live) {
     request_workspace_change(window, live, None);
 }
 
-fn workspace_has_unsaved(live: &Live) -> bool {
-    open_documents(live).iter().any(|doc| {
-        doc.text.edited() || (doc.file.borrow().path().is_none() && !doc.text.borrow().is_empty())
-    })
-}
-
 fn workspace_path_allowed(live: &Live, path: &Path, saving: bool) -> bool {
     let runtime = live.folder.borrow().workspace.clone();
     let Some(runtime) = runtime else {
@@ -9360,14 +9365,47 @@ fn request_workspace_change_with_cleanup(
     if live.pending.borrow().is_some() {
         return;
     }
-    if workspace_has_unsaved(live) {
+    // RFN01-110（書き手と合意 2026-11-05）: Explorerから入るとき、Workspaceの外のファイルが
+    // 開いていれば、閉じてよいかを先に訊く。開けないファイルを残したまま入らない。
+    if let Some(target) = target
+        && current.is_none()
+    {
+        let outside = outside_of_workspace(live, target);
+        if outside > 0 {
+            ask_question(
+                window,
+                live,
+                Question::OutsideForWorkspace(target),
+                format!(
+                    "{} ({outside})",
+                    pick(
+                        "このWorkspaceの外のファイルが開いています。閉じてWorkspaceを開きますか？",
+                        "Files outside this Workspace are open. Close them and open the Workspace?"
+                    )
+                ),
+                &[pick("閉じて開く", "Close and Open"), cancel()],
+                1,
+            );
+            return;
+        }
+    }
+    continue_workspace_change(window, live, target);
+}
+
+/// RFN01-110: 外のファイルの問いのあと（または問いが要らなかったとき）の、未保存の確認から先。
+fn continue_workspace_change(
+    window: &AppWindow,
+    live: &Live,
+    target: Option<workspace::WorkspaceId>,
+) {
+    if closing_has_unsaved(live, target) {
         ask_question(
             window,
             live,
             Question::ChangeWorkspace(target),
             say!(
-                "Workspaceを切り替えるため、すべてのTABを閉じます。未保存の文書があります。キャンセルすると現在のTABとWorkspaceを維持します。",
-                "Changing Workspace closes all tabs. There are unsaved documents. Cancel keeps the current tabs and Workspace."
+                "Workspaceを切り替えるため、今のTABを閉じます（WorkspaceのTABは、次に開いたときに戻ります）。未保存の文書があります。キャンセルすると現在のTABとWorkspaceを維持します。",
+                "Changing Workspace closes the current tabs (a Workspace's tabs come back when it is opened again). There are unsaved documents. Cancel keeps the current tabs and Workspace."
             ),
             &[
                 pick("すべて保存して切り替える", "Save All and Switch"),
@@ -9386,10 +9424,89 @@ fn finish_workspace_change(
     live: &Live,
     target: Option<workspace::WorkspaceId>,
 ) {
-    if workspace_has_unsaved(live) {
+    if closing_has_unsaved(live, target) {
         return;
     }
     finish_workspace_change_confirmed(window, live, target);
+}
+
+/// RFN01-110: Explorerから`target`へ入るとき、開いたまま持って入るTAB——そのWorkspaceの中の
+/// ファイル。Workspaceから移るときは何も持って行かない（今のWorkspaceの並びは覚えて閉じる）。
+fn carried_into(live: &Live, target: Option<workspace::WorkspaceId>) -> Vec<PaneTab> {
+    let Some(target) = target else {
+        return Vec::new();
+    };
+    let roots = {
+        let folder = live.folder.borrow();
+        let Some(runtime) = folder.workspace.as_ref() else {
+            return Vec::new();
+        };
+        let runtime = runtime.borrow();
+        if runtime.active_workspace().is_some() {
+            return Vec::new();
+        }
+        runtime.roots_of(target)
+    };
+    let mut carried: Vec<PaneTab> = Vec::new();
+    for strip in &live.tabs.borrow().panes {
+        for tab in &strip.tabs {
+            let inside =
+                tab.terminal.is_none()
+                    && !tab.settings
+                    && tab.document.file.borrow().path().is_some_and(|path| {
+                        workspace_boundary::existing_file_allowed(&roots, path)
+                    });
+            if inside
+                && !carried
+                    .iter()
+                    .any(|held| Rc::ptr_eq(&held.document, &tab.document))
+            {
+                carried.push(tab.clone());
+            }
+        }
+    }
+    carried
+}
+
+/// RFN01-110: Explorerから`target`へ入るとき、閉じることになる外のファイルの数。
+fn outside_of_workspace(live: &Live, target: workspace::WorkspaceId) -> usize {
+    let roots = {
+        let folder = live.folder.borrow();
+        let Some(runtime) = folder.workspace.as_ref() else {
+            return 0;
+        };
+        runtime.borrow().roots_of(target)
+    };
+    open_documents(live)
+        .iter()
+        .filter(|document| {
+            document
+                .file
+                .borrow()
+                .path()
+                .is_some_and(|path| !workspace_boundary::existing_file_allowed(&roots, path))
+        })
+        .count()
+}
+
+/// RFN01-110: Workspaceを替えるときに閉じる文書——持って入るものを除く。
+fn closing_documents(live: &Live, target: Option<workspace::WorkspaceId>) -> Vec<Rc<OpenDocument>> {
+    let carried = carried_into(live, target);
+    open_documents(live)
+        .into_iter()
+        .filter(|document| {
+            !carried
+                .iter()
+                .any(|tab| Rc::ptr_eq(&tab.document, document))
+        })
+        .collect()
+}
+
+/// 閉じる文書に未保存のものがあるか（RFN01-110：持って入る文書は閉じないので訊かない）。
+fn closing_has_unsaved(live: &Live, target: Option<workspace::WorkspaceId>) -> bool {
+    closing_documents(live, target).iter().any(|doc| {
+        doc.text.edited() || (doc.file.borrow().path().is_none() && !doc.text.borrow().is_empty())
+    })
 }
 
 fn finish_workspace_change_confirmed(
@@ -9397,6 +9514,24 @@ fn finish_workspace_change_confirmed(
     live: &Live,
     target: Option<workspace::WorkspaceId>,
 ) {
+    // RFN01-106: 今のWorkspaceの並びを、閉じる前に覚える。RFN01-110: Explorerから入るなら、
+    // そのWorkspaceの中のファイルは開いたまま持って入る（前に出ていたものを前に）。
+    sync_active_tab(window, live);
+    session::remember_workspace_tabs(live, &session::capture_session(window, live));
+    let carried = carried_into(live, target);
+    let front = live
+        .tabs
+        .borrow()
+        .of(focused_pane(window))
+        .current()
+        .map(|tab| tab.document.clone());
+    // **入る前に読む。**`switch_workspace`は記録を書き、そのとき入った先の並びとして空のTABを
+    // 書いてしまう——後で読むと、覚えていた並びが消えている。
+    let stored = target.and_then(|target| {
+        app_data::app_directory()
+            .as_deref()
+            .and_then(|directory| app_data::read_workspace_tabs(directory, target))
+    });
     // Commit the transition only after every document decision has succeeded.
     // Hidden panes and navigation history must not reopen an old-scope document.
     let count = live.tabs.borrow().panes.len();
@@ -9419,6 +9554,12 @@ fn finish_workspace_change_confirmed(
     }
     live.closed_tabs.borrow_mut().clear();
     switch_workspace(window, live, target);
+    // RFN01-106: 入るWorkspaceで覚えていた並びを戻す。
+    if target.is_some() && (stored.is_some() || !carried.is_empty()) {
+        restore_workspace_tabs(window, live, stored, carried, front);
+        // 戻した並びを、このWorkspaceの記録として書き直す（切り替えの途中で空のTABが書かれた）。
+        write_session(window, live);
+    }
     let cleanup = live.folder.borrow_mut().pending_workspace_cleanup.take();
     if let Some(cleanup) = cleanup {
         match cleanup {
@@ -9433,6 +9574,121 @@ fn finish_workspace_change_confirmed(
     publish_tabs(window, live);
     publish_workspace_manager(window, live);
     write_session(window, live);
+}
+
+/// RFN01-106（書き手と合意 2026-11-05）: Workspaceで覚えていた画面の並びを戻す。
+///
+/// **起動と同じ`open_session`で組む**ので、TABの作り方・開けないファイルの落とし方・
+/// シェルのTABを待たせることは起動と同じになる。ペインはいったん1つに畳み、覚えていた数まで
+/// 増やしてから組む。RFN01-110: `carried`はExplorerから持って入るTABで、覚えた並びに同じ
+/// ファイルがあればそのTABを持って入った文書で置き換え（二重に開かない）、無ければ
+/// フォーカスのペインの末尾に足す。前に出すのは`front`の文書。
+fn restore_workspace_tabs(
+    window: &AppWindow,
+    live: &Live,
+    stored: Option<app_data::Session>,
+    carried: Vec<PaneTab>,
+    front: Option<Rc<OpenDocument>>,
+) {
+    while PaneId::count(window) > 1 {
+        remove_pane(window, live, PaneId(PaneId::count(window) as u32 - 1));
+    }
+    let stored = stored.unwrap_or_default();
+    let panes = Layout::decode(&stored.layout)
+        .map(|layout| layout.panes())
+        .filter(|named| {
+            named.len() == stored.panes.len() && (0..named.len()).all(|pane| named.contains(&pane))
+        })
+        .map_or(1, |named| named.len())
+        .clamp(1, MAX_PANES);
+    for _ in 1..panes {
+        live.states.add(&live.states.document(PaneId::FIRST));
+        live.tabs.borrow_mut().add(PaneTabs::default());
+        live.cache.borrow_mut().add_pane(WritingMode::Horizontal);
+        publish_panes(window, PaneId::count(window) + 1);
+    }
+    let (mut tabs, layout) = open_session(window, Some(stored), Vec::new());
+    let focused = PaneId::from_index(window.get_focused_pane());
+    let mut front_at: Option<(usize, usize)> = None;
+    for tab in carried {
+        let path = tab.document.file.borrow().path().map(Path::to_path_buf);
+        let found = tabs.panes.iter().enumerate().find_map(|(pane, strip)| {
+            strip
+                .tabs
+                .iter()
+                .position(|held| held.document.file.borrow().path() == path.as_deref())
+                .map(|at| (pane, at))
+        });
+        let place = match found {
+            Some((pane, at)) => {
+                tabs.panes[pane].tabs[at].document = tab.document.clone();
+                (pane, at)
+            }
+            None => {
+                let strip = &mut tabs.panes[focused.index() as usize];
+                // 覚えた並びが無かったときの空の「無題」は、持って入るTABがあれば要らない。
+                strip.tabs.retain(|held| {
+                    !(held.terminal.is_none()
+                        && held.document.file.borrow().path().is_none()
+                        && held.document.text.borrow().is_empty())
+                });
+                strip.tabs.push(tab.clone());
+                (focused.index() as usize, strip.tabs.len() - 1)
+            }
+        };
+        if front
+            .as_ref()
+            .is_some_and(|front| Rc::ptr_eq(front, &tab.document))
+            || front_at.is_none()
+        {
+            front_at = Some(place);
+        }
+    }
+    if let Some((pane, at)) = front_at {
+        tabs.panes[pane].active = at;
+        window.set_focused_pane(pane as i32);
+    }
+    *live.tabs.borrow_mut() = tabs;
+    *live.layout.borrow_mut() = layout;
+    place_panes(window, &live.layout.borrow());
+    // 覚えたTABが無いペインは、切り替えたときのいつもの姿（何を開くかを訊く「新しいTAB」）で。
+    // `open_session`が置くのは起動のときの空の「無題」である。
+    for id in PaneId::all(window) {
+        let blank = live.tabs.borrow().of(id).tabs.iter().all(|tab| {
+            tab.terminal.is_none()
+                && !tab.settings
+                && tab.document.file.borrow().path().is_none()
+                && tab.document.text.borrow().is_empty()
+        });
+        if blank {
+            if let Some(strip) = live.tabs.borrow_mut().of_mut(id) {
+                strip.tabs.clear();
+                strip.history.clear();
+                strip.at = 0;
+            }
+            refill_strip(window, live, id);
+        }
+    }
+    for id in PaneId::all(window) {
+        let tab = live.tabs.borrow().of(id).current().cloned();
+        if let Some(tab) = tab {
+            live.show_tab(window, id, &tab);
+        }
+    }
+    after_layout_change(window, live);
+    live.cache.borrow_mut().log_diag(
+        "workspace",
+        &format!(
+            "tabs restored panes={} tabs={}",
+            PaneId::count(window),
+            live.tabs
+                .borrow()
+                .panes
+                .iter()
+                .map(|strip| strip.tabs.len())
+                .sum::<usize>()
+        ),
+    );
 }
 
 fn workspace_row_context_chosen(window: &AppWindow, live: &Live, index: usize) {
@@ -11218,11 +11474,8 @@ fn open_startup_paths(window: &AppWindow, live: &Live, pane: PaneId, paths: &[Pa
                 .path()
                 .is_some_and(|p| !workspace_path_allowed(live, p, false))
     });
-    if recovering_outside
-        || paths
-            .iter()
-            .any(|path| path.is_dir() || !workspace_path_allowed(live, path, false))
-    {
+    // RFN01-110: 指定した起動ではWorkspaceを使わない（中のファイルでも）。
+    if recovering_outside || !paths.is_empty() {
         if let Some(runtime) = live.folder.borrow().workspace.clone() {
             runtime.borrow_mut().set_active_silently(None);
         }
@@ -11289,6 +11542,64 @@ fn open_startup_paths(window: &AppWindow, live: &Live, pane: PaneId, paths: &[Pa
             );
             open_path_in_pane(window, live, pane, path, Opening::Kept);
         }
+    }
+    // RFN01-110（書き手の報告 2026-11-05：指定したファイルのほかに無題が開いていた）: 前回の
+    // 並びを使わない起動では、空のペインに置かれた中身の無い「無題」が残る。指定したファイルが
+    // 開いたら片付ける。書きかけの無題（作業コピーから戻ったもの）は中身があるので残る。
+    let opened_file = paths.iter().any(|path| path.is_file());
+    if opened_file {
+        let front = live
+            .tabs
+            .borrow()
+            .of(pane)
+            .current()
+            .map(|tab| tab.document.clone());
+        let tidied = {
+            let mut tabs = live.tabs.borrow_mut();
+            let Some(strip) = tabs.of_mut(pane) else {
+                return;
+            };
+            let before = strip.tabs.len();
+            strip.tabs.retain(|tab| {
+                tab.terminal.is_some()
+                    || tab.settings
+                    || tab.document.file.borrow().path().is_some()
+                    || !tab.document.text.borrow().is_empty()
+                    || tab.document.text.edited()
+            });
+            let blank = |place: &NavigationPlace| {
+                place.document.file.borrow().path().is_none()
+                    && place.document.text.borrow().is_empty()
+            };
+            strip.history.retain(|place| !blank(place));
+            strip.at = strip.at.min(strip.history.len().saturating_sub(1));
+            strip.active = front
+                .as_ref()
+                .and_then(|front| {
+                    strip
+                        .tabs
+                        .iter()
+                        .position(|tab| Rc::ptr_eq(&tab.document, front))
+                })
+                .unwrap_or(0)
+                .min(strip.tabs.len().saturating_sub(1));
+            before != strip.tabs.len()
+        };
+        if tidied {
+            let tab = live.tabs.borrow().of(pane).current().cloned();
+            if let Some(tab) = tab {
+                live.show_tab(window, pane, &tab);
+            }
+            publish_tabs(window, live);
+        }
+    }
+    // RFN01-110: フォルダを指定したらExplorerでそのフォルダを、ファイルだけなら左ペインを閉じて。
+    if paths.iter().any(|path| path.is_dir()) {
+        window.set_tree_open(true);
+        window.set_left_tab(LeftTab::Explorer.index());
+        publish_left(window, live);
+    } else if !paths.is_empty() {
+        window.set_tree_open(false);
     }
 }
 
@@ -13260,6 +13571,8 @@ enum Question {
     },
     CloneWorkspaceUrl,
     ChangeWorkspace(Option<workspace::WorkspaceId>),
+    /// RFN01-110: Explorerから入るWorkspaceの外のファイルが開いている。0で閉じて開く。
+    OutsideForWorkspace(workspace::WorkspaceId),
     DiscardForWorkspace(Option<workspace::WorkspaceId>),
     /// Closing a tab holding work that is not in its file (要件 8.4).
     ///
@@ -13404,6 +13717,7 @@ impl Question {
             Self::PanelLogStamp { .. } => "PanelLogStamp",
             Self::TerminalClose(..) => "TerminalClose",
             Self::ChangeWorkspace(..) => "ChangeWorkspace",
+            Self::OutsideForWorkspace(..) => "OutsideForWorkspace",
             Self::DiscardForWorkspace(..) => "DiscardForWorkspace",
             Self::CloseTab { .. } => "CloseTab",
             Self::CloseMemo { .. } => "CloseMemo",
@@ -13614,6 +13928,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     };
     if matches!(&question, Question::ChangeWorkspace(_) if choice >= 2)
         || matches!(&question, Question::DiscardForWorkspace(_) if choice != 0)
+        || matches!(&question, Question::OutsideForWorkspace(_) if choice != 0)
     {
         live.folder.borrow_mut().pending_workspace_cleanup = None;
     }
@@ -13704,9 +14019,12 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             live.folder.borrow_mut().clone_target = None;
             window.set_workspace_cloning(false);
         }
+        (Question::OutsideForWorkspace(target), 0) => {
+            continue_workspace_change(window, live, Some(target));
+        }
         (Question::ChangeWorkspace(target), 0) => {
             saving::save_all_for_workspace(window, live);
-            if workspace_has_unsaved(live) {
+            if closing_has_unsaved(live, target) {
                 live.folder.borrow_mut().pending_workspace_cleanup = None;
                 window.tell(
                     pick(
@@ -13733,7 +14051,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             );
         }
         (Question::DiscardForWorkspace(target), 0) => {
-            for document in open_documents(live) {
+            for document in closing_documents(live, target) {
                 if document.file.borrow().path().is_none() {
                     if !saving::discard_memo_copy(window, live, &document) {
                         live.folder.borrow_mut().pending_workspace_cleanup = None;
@@ -13752,7 +14070,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
                     discard_work_copy(live, &work_identity(&document.file.borrow()));
                 }
             }
-            for document in open_documents(live) {
+            for document in closing_documents(live, target) {
                 document.text.mark_saved();
             }
             finish_workspace_change_confirmed(window, live, target);

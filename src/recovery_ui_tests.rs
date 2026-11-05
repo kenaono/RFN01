@@ -722,3 +722,63 @@ fn save_all_defers_open_destinations_and_handles_duplicate_choices_and_cancel() 
     assert!(!b.text.edited() && !c.text.edited());
     assert_eq!(b.file.borrow().form(), chosen_form);
 }
+
+/// RFN01-110: フォルダを指定した起動はExplorerでそのフォルダを、ファイルだけなら左ペインを
+/// 閉じて始める。複数のファイルはファイルごとにTAB。
+#[test]
+fn startup_paths_set_the_left_pane() {
+    let r = Recovery::new();
+    let folder = r.directory.join("原稿");
+    std::fs::create_dir_all(&folder).unwrap();
+    r.window.set_tree_open(false);
+    open_startup_paths(&r.window, &r.live, r.id, std::slice::from_ref(&folder));
+    assert!(r.window.get_tree_open());
+    assert_eq!(r.window.get_left_tab(), LeftTab::Explorer.index());
+
+    let one = r.directory.join("一.md");
+    let two = r.directory.join("二.md");
+    std::fs::write(&one, "一").unwrap();
+    std::fs::write(&two, "二").unwrap();
+    open_startup_paths(&r.window, &r.live, r.id, &[one.clone(), two.clone()]);
+    assert!(!r.window.get_tree_open());
+    let tabs = r.live.tabs.borrow();
+    // 書き手の報告 2026-11-05: 指定したファイルのほかに、中身の無い無題は残らない。
+    assert!(
+        tabs.of(r.id).tabs.iter().all(|tab| {
+            tab.document.file.borrow().path().is_some() || !tab.document.text.borrow().is_empty()
+        }),
+        "a blank untitled tab was left"
+    );
+    for path in [&one, &two] {
+        assert!(
+            tabs.of(r.id)
+                .tabs
+                .iter()
+                .any(|tab| tab.document.file.borrow().path() == Some(path.as_path())),
+            "{path:?}"
+        );
+    }
+}
+
+/// 書き手の報告 2026-11-05: ファイルを指定して起動すると、そのほかに無題が開いていた。前回の
+/// 並びを使わない起動では、空のペインに中身の無い「無題」が置かれ（`open_session`）、それは
+/// 「新しいTAB」ではないので、開いたファイルに置き換えられずに残っていた。
+#[test]
+fn a_file_named_at_startup_leaves_no_blank_untitled_beside_it() {
+    use crate::saving::{Harness, scratch_directory};
+    let root = scratch_directory("startup-blank");
+    let (harness, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let (window, live) = (&harness.window, &harness.live);
+    let id = PaneId::FIRST;
+    let file = root.join("指定.md");
+    std::fs::write(&file, "本文").unwrap();
+    open_startup_paths(window, live, id, std::slice::from_ref(&file));
+    let tabs = live.tabs.borrow();
+    let paths: Vec<_> = tabs
+        .of(id)
+        .tabs
+        .iter()
+        .map(|tab| tab.document.file.borrow().path().map(Path::to_path_buf))
+        .collect();
+    assert_eq!(paths, [Some(file.clone())]);
+}
