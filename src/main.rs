@@ -5426,6 +5426,10 @@ impl Live {
             }
         }
         *self.states.of(id).borrow_mut() = tab.view.state.clone();
+        // 書き手の報告 2026-11-05（起動に失敗する）の元: 後ろにいたあいだ、このTABの位置は
+        // 同じ文書の書き換えに付いて動かない。**戻すときに文字の境目と本文の中へそろえる**
+        // （起動で戻すときと同じ）——そろえないと字の途中を指したまま使われ、保存もされる。
+        clamp_state_into(&self.states.of(id), &document.text.borrow());
         id.set_scroll(window, tab.view.scroll);
         // The passage this tab was left at. **A tab switch has the same problem
         // a restored session does**: the pane it comes back to may be a
