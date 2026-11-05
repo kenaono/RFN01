@@ -200,6 +200,7 @@ export component QuickDraft inherits Window {
                 mark-toggled(rectangle) => { root.editor-mark(rectangle); }
                 tab-pressed(backwards) => { if !backwards { root.editor-text("\u{9}"); } }
                 enter-pressed(shift) => { root.editor-text("\n"); }
+                plain-enter-pressed => { root.editor-text("\n"); }
                 margin-pressed => { source-view.take-focus(); }
             }
         }

@@ -1673,3 +1673,15 @@ fn the_left_pane_has_its_own_look() {
     let zooms: Vec<i32> = session.panes[0].tabs.iter().map(|tab| tab.zoom).collect();
     assert!(zooms.contains(&200), "{zooms:?}");
 }
+
+/// RFN01-109: Reset All で書式のツールバーも既定（出さない）に戻る。
+#[test]
+fn reset_all_puts_the_format_toolbar_away() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("reset-toolbar");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    window.set_format_toolbar_open(true);
+    reset_all_settings(window, live);
+    assert!(!window.get_format_toolbar_open());
+}

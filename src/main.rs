@@ -3013,6 +3013,13 @@ fn main() -> Result<(), slint::PlatformError> {
             enter_in_pane(&window, &enter_live, PaneId::from_index(pane), soft);
         }
     });
+    let weak = window.as_weak();
+    let enter_live = live.clone();
+    window.on_pane_plain_enter(move |pane| {
+        if let Some(window) = weak.upgrade() {
+            plain_enter_in_pane(&window, &enter_live, PaneId::from_index(pane));
+        }
+    });
 
     let weak = window.as_weak();
     let states = pane_states.clone();
@@ -13495,6 +13502,9 @@ fn reset_all_settings(window: &AppWindow, live: &Live) {
         id.update_screen(window, |screen| screen.word_mode = 0);
     }
     publish_word_mode_of(window, live);
+    // RFN01-109（書き手の求め 2026-11-05）: 書式のツールバーも既定（出さない）へ。表示の入切は
+    // 作業の記録に入るので、記録を書く前に。
+    window.set_format_toolbar_open(false);
     write_session(window, live);
     show_bullet_marks(window, document::BulletMarks::all());
     window.invoke_count_ruby_toggled(false);
@@ -23222,6 +23232,26 @@ fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId, soft: bool) {
             );
         }
     }
+}
+
+/// RFN01-108（書き手の求め 2026-11-05）: `Ctrl+J`——**改行を1つ入れるだけ。**字下げ・引用の
+/// `>`・箇条書きの印を継がず、中身の無い項目を終える扱いもしない。打ったのと同じ道を通るので、
+/// 取り消しも別の面の追従もEnterと変わらない。
+fn plain_enter_in_pane(window: &AppWindow, live: &Live, id: PaneId) {
+    answer_new_tab(window, live, id, None);
+    let document = live.states.document(id);
+    live.cache
+        .borrow_mut()
+        .log_diag("enter", &format!("pane={} plain=1", id.log_name()));
+    insert_pane_text(
+        window,
+        id,
+        &document,
+        &live.states,
+        &live.cache,
+        "\n",
+        false,
+    );
 }
 
 /// Delete the grapheme cluster beside a pane's caret, or its selection.

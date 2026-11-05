@@ -184,6 +184,8 @@ export component EditorSurface inherits Rectangle {
     private property <bool> bullet-rows-open;
     callback tab-pressed(bool);
     callback enter-pressed(bool);
+    /// RFN01-108: `Ctrl+J`——字下げも箇条書きの継続もしない、ただの改行。
+    callback plain-enter-pressed();
     callback line-edit(int);
     callback list-edit(int, int);
     callback preedit-changed(string);
@@ -1209,6 +1211,12 @@ export component EditorSurface inherits Rectangle {
                                     } else if event.modifiers.alt && !event.modifiers.control
                                         && event.text == Key.RightArrow {
                                         root.navigate-requested(true);
+                                        accept
+                                    // RFN01-108（書き手の求め 2026-11-05）: `Ctrl+J`はただの改行。
+                                    // Ctrl＋英字の字は鍵盤で`j`か制御文字（LF）で届く。
+                                    } else if event.modifiers.control && !event.modifiers.alt
+                                        && (event.text == "j" || event.text == "J" || event.text == "\n") {
+                                        root.plain-enter-pressed();
                                         accept
                                     } else if event.text == Key.Return {
                                         root.enter-pressed(root.shift-held(event.modifiers.shift));
