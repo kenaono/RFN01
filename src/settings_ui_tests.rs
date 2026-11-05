@@ -1732,11 +1732,27 @@ fn the_palette_lists_operations_by_other_words_and_offers_settings() {
     command_palette::close(window);
 
     // 設定で探す：設定のTABが開き、検索欄にその語が入る。
-    open_settings_searching(window, live, "倍率");
+    open_settings_searching(window, live, "倍率", false);
     let id = focused_pane(window);
     assert!(live.tabs.borrow().of(id).current().unwrap().settings);
     assert!(window.get_find_open());
     assert_eq!(id.screen(window).find_needle.as_str(), "倍率");
+    assert!(
+        window.get_settings_keys_query().is_empty(),
+        "the whole of the settings"
+    );
+
+    // 鍵の印から：「キー」の面で、その語のあいだはKeysの行だけ（書き手の報告 2026-11-05）。
+    open_settings_searching(window, live, "閉じたTABを開き直す", true);
+    assert_eq!(window.get_settings_tab(), 6);
+    assert_eq!(
+        window.get_settings_keys_query().as_str(),
+        "閉じたTABを開き直す"
+    );
+    assert_eq!(
+        id.screen(window).find_needle.as_str(),
+        "閉じたTABを開き直す"
+    );
 }
 
 /// 書き手の報告 2026-11-05: 設定の検索でIMEから打った「閉じたＴＡＢ」（全角）が、キーの一覧で

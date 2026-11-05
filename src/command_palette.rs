@@ -302,7 +302,9 @@ fn accept(window: &AppWindow, live: &Live) {
             }
             Chosen::Action(id) => shortcuts::run_command(&window, &live, pane, id),
             Chosen::Template(path) => crate::insert_template(&window, &live, pane, &path),
-            Chosen::Settings(query) => crate::open_settings_searching(&window, &live, &query),
+            Chosen::Settings(query) => {
+                crate::open_settings_searching(&window, &live, &query, false)
+            }
         }
     });
 }
@@ -323,7 +325,7 @@ fn assign(window: &AppWindow, live: &Live, index: i32) {
     let live = live.clone();
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         if let Some(window) = weak.upgrade() {
-            crate::open_settings_searching(&window, &live, &name);
+            crate::open_settings_searching(&window, &live, &name, true);
         }
     });
 }

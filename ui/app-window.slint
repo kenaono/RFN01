@@ -1518,6 +1518,8 @@ export component AppWindow inherits Window {
     out property <string> settings-query: root.find-open && root.find-pane < 65536 && root.panes[root.find-pane].settings
         ? root.panes[root.find-pane].find-needle : "";
     property <bool> settings-searching: root.settings-query != "";
+    /// RFN01-107: パレットの鍵の印が入れた語。検索の語がこれと同じあいだは、Keysの行だけを出す。
+    in-out property <string> settings-keys-query;
     /// 語が名前のどれかに含まれるか（大文字小文字・全角半角を問わない）。Rustが答える。
     pure callback settings-match(string, [string]) -> bool;
     /// 行・見出しを出すか。`labels`はその行の名前と、属する見出し。
@@ -1529,6 +1531,11 @@ export component AppWindow inherits Window {
     pure function shows-group(tab: int, labels: [string]) -> bool {
         if (!root.settings-searching) {
             return root.settings-tab == (tab == 7 ? 0 : (tab == 2 || tab == 4 || tab == 5 ? 3 : tab));
+        }
+        // RFN01-107（書き手の報告 2026-11-05）: パレットの鍵の印から来たときは、キーの割り当てを
+        // 変えるのが目的——Keysの行だけを出す。語を書き換えれば、ふだんの全体の検索に戻る。
+        if (root.settings-query == root.settings-keys-query) {
+            return false;
         }
         return labels.length == 0 || root.settings-match(root.settings-query, labels);
     }

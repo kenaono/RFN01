@@ -13399,8 +13399,24 @@ fn open_tab(window: &AppWindow, live: &Live, id: PaneId, empty: bool) {
 /// RFN01-107（書き手と合意 2026-11-05）: 設定のTABを、この語で探した状態で開く。設定の検索は
 /// 設定のTABで開いた検索欄の語なので（`settings-query`）、TABを開いてその欄に語を入れて開く。
 /// パレットの「設定で…を探す」と、行の鍵の印（Keysをその操作で絞る）が使う。
-pub(crate) fn open_settings_searching(window: &AppWindow, live: &Live, query: &str) {
+///
+/// `keys_only`はパレットの鍵の印から：左の一覧で「キー」を選び、結果はKeysの行だけにする
+/// （書き手の報告 2026-11-05：ほかの設定まで並ぶと、探していた行を見落とす）。
+pub(crate) fn open_settings_searching(
+    window: &AppWindow,
+    live: &Live,
+    query: &str,
+    keys_only: bool,
+) {
     open_settings(window, live);
+    window.set_settings_keys_query(if keys_only {
+        query.into()
+    } else {
+        SharedString::new()
+    });
+    if keys_only {
+        window.set_settings_tab(6);
+    }
     let id = focused_pane(window);
     if !live
         .tabs
