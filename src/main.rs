@@ -97,6 +97,7 @@ mod rectangle_ui_tests;
 mod saving;
 mod searcher;
 mod session;
+mod settings_items;
 mod settings_transfer;
 #[cfg(test)]
 mod settings_transfer_ui_tests;
@@ -211,6 +212,7 @@ slint::include_modules!();
 /// 長生きしない。
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TerminalShell {
+    id: u64,
     /// What a tab of this shell is called. **The shell, not 無題** — the
     /// document behind it is a stand-in nobody is writing in.
     name: String,
@@ -238,12 +240,13 @@ impl TerminalShell {
     ///   screen). PowerShell 7 reads UTF-8 by default.
     fn built_in() -> Vec<TerminalShell> {
         [
-            ("WSL", "wsl.exe"),
-            ("PowerShell", "powershell.exe -NoLogo"),
-            ("PowerShell 7", "pwsh.exe -NoLogo"),
+            (1, "WSL", "wsl.exe"),
+            (2, "PowerShell", "powershell.exe -NoLogo"),
+            (3, "PowerShell 7", "pwsh.exe -NoLogo"),
         ]
         .into_iter()
-        .map(|(name, command)| TerminalShell {
+        .map(|(id, name, command)| TerminalShell {
+            id,
             name: name.to_owned(),
             command: command.to_owned(),
             directory: String::new(),
@@ -278,6 +281,7 @@ impl TerminalShell {
             return None;
         }
         Some(TerminalShell {
+            id: 0,
             name,
             command,
             directory: directory.to_owned(),
@@ -317,7 +321,12 @@ fn configured_shells(window: &AppWindow) -> Vec<TerminalShell> {
     let written = window.get_terminal_shell_lines();
     let read: Vec<TerminalShell> = written
         .iter()
-        .filter_map(|line| TerminalShell::read(&line))
+        .filter_map(|line| {
+            let (id, profile) = line.split_once('\t')?;
+            let mut shell = TerminalShell::read(profile)?;
+            shell.id = id.parse().ok()?;
+            Some(shell)
+        })
         .collect();
     if read.is_empty() {
         TerminalShell::built_in()
@@ -326,14 +335,28 @@ fn configured_shells(window: &AppWindow) -> Vec<TerminalShell> {
     }
 }
 
-/// Put the list the file named into the window, in the file's own words.
+fn next_shell_id(window: &AppWindow) -> u64 {
+    window.get_terminal_profile_next_id().parse().unwrap_or(4)
+}
+
+/// Keep IDs beside profile data in the window model. Zero requests a new ID.
 fn hold_shells(window: &AppWindow, shells: &[TerminalShell]) {
-    window.set_terminal_shell_lines(ModelRc::new(VecModel::from(
-        shells
-            .iter()
-            .map(|shell| SharedString::from(shell.written()))
-            .collect::<Vec<_>>(),
-    )));
+    let mut seen = std::collections::HashSet::new();
+    let mut next =
+        next_shell_id(window).max(shells.iter().map(|shell| shell.id + 1).max().unwrap_or(4));
+    let lines = shells
+        .iter()
+        .cloned()
+        .map(|mut shell| {
+            if shell.id == 0 || !seen.insert(shell.id) {
+                shell.id = next;
+                next += 1;
+            }
+            SharedString::from(format!("{}\t{}", shell.id, shell.written()))
+        })
+        .collect::<Vec<_>>();
+    window.set_terminal_profile_next_id(next.to_string().into());
+    window.set_terminal_shell_lines(ModelRc::new(VecModel::from(lines)));
 }
 
 /// The shell a number from a menu names. **Anything unexpected is the first
@@ -2586,7 +2609,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wiring::wire_workspace(&window, &live);
 
     wiring::wire_find(&window, &live);
-    window.on_settings_match(|query, labels| settings_match(&query, labels.iter()));
+    settings_items::wire(&window);
 
     wiring::wire_terminal_look(&window, &live, &render_cache);
 
@@ -5609,15 +5632,6 @@ pub(crate) fn fold_for_search(text: &str) -> String {
         })
         .flat_map(char::to_lowercase)
         .collect()
-}
-
-fn settings_match(query: &str, labels: impl IntoIterator<Item = SharedString>) -> bool {
-    let fold = fold_for_search;
-    let query = fold(query.trim());
-    query.is_empty()
-        || labels
-            .into_iter()
-            .any(|label| fold(&label).contains(&query))
 }
 
 /// 問いのやめる側（国際化②）。
@@ -13484,6 +13498,7 @@ pub(crate) fn open_settings_searching(
     keys_only: bool,
 ) {
     open_settings(window, live);
+    window.set_settings_item_id(SharedString::new());
     window.set_settings_keys_query(if keys_only {
         query.into()
     } else {
@@ -13510,6 +13525,25 @@ pub(crate) fn open_settings_searching(
     window.set_find_focus(true);
     window.set_find_open(true);
     window.set_find_generation(window.get_find_generation() + 1);
+}
+
+/// Open the setting by identity. The query is a label for the existing search field.
+pub(crate) fn open_setting_item(window: &AppWindow, live: &Live, item: &settings_items::Item) {
+    open_setting_target(window, live, &item.title(), &item.id, item.tab);
+}
+
+fn open_setting_target(window: &AppWindow, live: &Live, title: &str, id: &str, tab: i32) {
+    open_settings_searching(window, live, title, false);
+    window.set_settings_tab(tab);
+    window.set_settings_inherited_text(
+        pick(
+            "縦書きは横書きの設定を使っています。",
+            "Vertical writing uses the horizontal setting.",
+        )
+        .into(),
+    );
+    window.set_settings_item_query(title.into());
+    window.set_settings_item_id(id.into());
 }
 
 /// RFN01-114: パレットの鍵の印から。設定のKeysを、**その操作の行だけ**に絞って開く。
@@ -16315,6 +16349,12 @@ const LIST_MARKS_SETTING: &str = "list.marks";
 /// the file writes them and renumbered on the way out, so a writer who deletes
 /// the middle one gets a list of two rather than a hole.
 const SHELL_SETTING: &str = "terminal.shell";
+const SHELL_NEXT_ID_SETTING: &str = "terminal.profile-next-id";
+const SHELL_PROFILE_ID_PREFIX: &str = "terminal.profile-id.";
+
+fn shell_identity_metadata(name: &str) -> bool {
+    name == SHELL_NEXT_ID_SETTING || name.starts_with(SHELL_PROFILE_ID_PREFIX)
+}
 
 /// 追加要件 2026-09-08: 端末の見た目（要件 6.8）。
 ///
@@ -17222,7 +17262,15 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
     // 穴のあいた一覧ではなく、二つの一覧になる。
     for (at, shell) in configured_shells(window).iter().enumerate() {
         values.push((format!("{SHELL_SETTING}.{at}"), shell.written()));
+        values.push((
+            format!("{SHELL_PROFILE_ID_PREFIX}{at}"),
+            shell.id.to_string(),
+        ));
     }
+    values.push((
+        SHELL_NEXT_ID_SETTING.to_owned(),
+        next_shell_id(window).to_string(),
+    ));
     // 追加要件 2026-09-08: **既定は名前で書く。**番号は一覧が変われば別の
     // シェルを指し、その一覧はいまや書き手のものである。
     values.push((
@@ -17434,10 +17482,33 @@ fn apply_settings(
     // 追加要件 2026-09-08: **一覧が先、二度なめてでも。**既定はその一覧の中の
     // 一つを名前で指すので、指される側が揃っていなければ答えようがない——
     // そして手で書き換えられた設定ファイルの並び順は、誰も約束していない。
+    if let Some(next) = values
+        .iter()
+        .find_map(|(name, value)| {
+            (name == SHELL_NEXT_ID_SETTING)
+                .then(|| value.parse::<u64>().ok())
+                .flatten()
+        })
+        .filter(|next| *next < u64::MAX / 2)
+    {
+        window.set_terminal_profile_next_id(next.max(next_shell_id(window)).to_string().into());
+    }
+    let ids: std::collections::HashMap<_, _> = values
+        .iter()
+        .filter_map(|(name, value)| {
+            let index = name.strip_prefix(SHELL_PROFILE_ID_PREFIX)?;
+            let id = value.parse::<u64>().ok().filter(|id| *id < u64::MAX / 2)?;
+            Some((index, id))
+        })
+        .collect();
     let read: Vec<TerminalShell> = values
         .iter()
-        .filter(|(name, _)| name.starts_with(SHELL_SETTING))
-        .filter_map(|(_, value)| TerminalShell::read(value))
+        .filter_map(|(name, value)| {
+            let index = name.strip_prefix("terminal.shell.")?;
+            let mut shell = TerminalShell::read(value)?;
+            shell.id = ids.get(index).copied().unwrap_or(0);
+            Some(shell)
+        })
         .collect();
     // **一件も読めなければ組み込みのまま。**シェルの無い編集器は、端末の
     // タブを開く道がどこにも無い編集器である。
@@ -25472,6 +25543,7 @@ mod tests {
     #[test]
     fn a_shell_line_goes_out_and_comes_back_the_same() {
         let shell = TerminalShell {
+            id: 0,
             name: "PowerShell 7".to_owned(),
             command: "pwsh.exe -NoLogo -WorkingDirectory .".to_owned(),
             directory: String::new(),
@@ -25514,7 +25586,13 @@ mod tests {
     fn the_built_in_shells_survive_the_settings_file() {
         for shell in TerminalShell::built_in() {
             let line = shell.written();
-            assert_eq!(TerminalShell::read(&line), Some(shell.clone()));
+            assert_eq!(
+                TerminalShell::read(&line),
+                Some(TerminalShell {
+                    id: 0,
+                    ..shell.clone()
+                })
+            );
             let values = vec![(format!("{SHELL_SETTING}.0"), line)];
             let file = app_data::encode_settings(&values);
             let read = app_data::decode_settings(&file).expect("reads");

@@ -614,6 +614,7 @@ pub fn write_terminal_outputs(window: &AppWindow, live: &Live) {
 /// first shown, with what it had printed.
 fn waiting_shell(stored: &app_data::SessionShell) -> Rc<std::cell::RefCell<TerminalSession>> {
     let shell = crate::TerminalShell {
+        id: 0,
         name: stored.name.clone(),
         command: stored.command.clone(),
         directory: stored.directory.clone(),
