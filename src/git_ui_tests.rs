@@ -442,6 +442,27 @@ fn the_pop_button_on_a_stash_row_brings_the_changes_back() {
     assert!(rows(window).iter().all(|(kind, ..)| *kind != 5));
     let text = fs::read_to_string(root.join("原稿.md")).unwrap();
     assert_eq!(text.replace("\r\n", "\n"), "書きかけ\n");
+
+    history_step(window, live, root.clone(), false);
+    settle(window, live);
+    let restored = git::stashes(&root).unwrap().remove(0);
+    assert!(history_state(&root, &git_history::point(&root), true).0);
+
+    fs::write(root.join("別の下書き.md"), "別の内容\n").unwrap();
+    git_ok(&root, &["stash", "push", "-u", "-m", "outside RFN Edit"]);
+    let before = git::stashes(&root).unwrap();
+    assert_eq!(before[1].oid, restored.oid);
+    history_step(window, live, root.clone(), true);
+    settle(window, live);
+    assert!(matches!(take_question(live), Question::GitNotice));
+    assert_eq!(git::stashes(&root).unwrap(), before);
+    assert!(!root.join("別の下書き.md").exists());
+
+    git_ok(&root, &["stash", "drop", "-q", "stash@{0}"]);
+    history_step(window, live, root.clone(), true);
+    settle(window, live);
+    assert!(git::stashes(&root).unwrap().is_empty());
+    assert_eq!(window.get_git_change_count(), 1);
 }
 
 /// 画面の絵を書き出す（`cargo test -- --ignored git_screens`）。一時フォルダの

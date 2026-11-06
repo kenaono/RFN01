@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 mod process_tree;
+mod stash;
 pub(crate) use process_tree::ManagedChild;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -499,26 +500,50 @@ pub struct Stash {
     pub name: String,
     pub oid: String,
     pub message: String,
+    reflog_date: String,
+    reflog_actor: String,
 }
 
 pub fn stashes(root: &Path) -> Result<Vec<Stash>, GitError> {
     let text = checked(
         root,
-        &["stash", "list", "-z", "--format=%gd%x1f%H%x1f%s"],
+        &[
+            "stash",
+            "list",
+            "-z",
+            "--date=raw",
+            "--format=%gd%x1f%H%x1f%gn <%ge>%x1f%gs",
+        ],
         None,
     )?;
     Ok(text
         .split_terminator('\0')
-        .filter_map(|entry| {
-            let (name, rest) = entry.split_once('\x1f')?;
-            let (oid, message) = rest.split_once('\x1f')?;
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let mut fields = entry.splitn(4, '\x1f');
             Some(Stash {
-                name: name.to_owned(),
-                oid: oid.to_owned(),
-                message: message.to_owned(),
+                name: format!("stash@{{{index}}}"),
+                reflog_date: fields.next()?.to_owned(),
+                oid: fields.next()?.to_owned(),
+                reflog_actor: fields.next()?.to_owned(),
+                message: fields.next()?.to_owned(),
             })
         })
         .collect())
+}
+
+/// Identity of a stash created by this process, independent of its list index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedStash(Stash);
+
+impl CreatedStash {
+    pub fn matches(&self, stash: &Stash) -> bool {
+        let created = &self.0;
+        created.oid == stash.oid
+            && created.message == stash.message
+            && created.reflog_date == stash.reflog_date
+            && created.reflog_actor == stash.reflog_actor
+    }
 }
 
 /// ローカルのブランチ（名前の順）。
@@ -633,17 +658,22 @@ pub fn head_is_pushed(root: &Path) -> bool {
 }
 
 /// Stash All（新しいファイルも）。`message`が空ならGitの既定の名前。
-pub fn stash_all(root: &Path, message: &str) -> Result<(), GitError> {
-    let mut arguments = vec!["stash", "push", "-q", "--include-untracked"];
-    if !message.trim().is_empty() {
-        arguments.extend(["-m", message]);
-    }
-    checked(root, &arguments, None).map(drop)
+pub fn stash_all(root: &Path, message: &str) -> Result<Option<CreatedStash>, GitError> {
+    stash::push(root, message)
 }
 
 /// Apply・Pop。**追跡しているファイルに変更があれば断る**——衝突したときに、書き手の変更を
 /// 巻き込まずに元へ戻せるのは、手元が前回のCommitと同じときだけだから。
 pub fn stash_apply(root: &Path, stash: &Stash, pop: bool) -> Result<(), GitError> {
+    stash_apply_with(root, stash, pop, || {})
+}
+
+fn stash_apply_with(
+    root: &Path,
+    stash: &Stash,
+    pop: bool,
+    after_apply: impl FnOnce(),
+) -> Result<(), GitError> {
     if status(root)?.has_tracked_changes() {
         return Err(GitError::Failed(
             crate::i18n::pick(
@@ -652,6 +682,9 @@ pub fn stash_apply(root: &Path, stash: &Stash, pop: bool) -> Result<(), GitError
             )
             .to_owned(),
         ));
+    }
+    if pop {
+        stash::require_files_refs(root)?;
     }
     let before = untracked(root)?;
     check_stash(root, stash)?;
@@ -673,6 +706,7 @@ pub fn stash_apply(root: &Path, stash: &Stash, pop: bool) -> Result<(), GitError
         return Err(GitError::Conflict);
     }
     if pop {
+        after_apply();
         stash_drop(root, stash).map_err(|error| {
             GitError::Failed(crate::say!(
                 "Stashを適用しましたが、削除できませんでした: {error}",
@@ -689,18 +723,21 @@ fn check_stash(root: &Path, expected: &Stash) -> Result<(), GitError> {
     if matches.next() == Some(expected) && matches.next().is_none() {
         return Ok(());
     }
-    Err(GitError::Failed(
+    Err(stash_changed())
+}
+
+fn stash_changed() -> GitError {
+    GitError::Failed(
         crate::i18n::pick(
             "対象のStashが変更されたか、一意に特定できません。一覧から選び直してください。",
             "The selected stash changed or is ambiguous. Select it again from the list.",
         )
         .to_owned(),
-    ))
+    )
 }
 
 pub fn stash_drop(root: &Path, stash: &Stash) -> Result<(), GitError> {
-    check_stash(root, stash)?;
-    checked(root, &["stash", "drop", "-q", &stash.name], None).map(drop)
+    stash::drop_locked(root, stash, || {})
 }
 
 fn untracked(root: &Path) -> Result<Vec<String>, GitError> {

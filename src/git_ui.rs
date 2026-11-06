@@ -58,7 +58,7 @@ struct Snapshot {
 /// 裏で走っている操作。
 struct Job {
     id: u64,
-    done: Receiver<Result<String, GitError>>,
+    done: Receiver<Result<JobSuccess, GitError>>,
     cancel: Cancel,
     root: PathBuf,
     /// 終わったら読み直すTABの範囲。
@@ -71,6 +71,20 @@ struct Job {
     record: Option<Recording>,
     /// Undo（`false`）・Redo（`true`）そのもの。通ったら記録を反対の山へ移す。
     history: Option<bool>,
+}
+
+struct JobSuccess {
+    message: String,
+    created_stash: Option<git::CreatedStash>,
+}
+
+impl From<String> for JobSuccess {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            created_stash: None,
+        }
+    }
 }
 
 impl Drop for Job {
@@ -626,7 +640,7 @@ fn collect_diff(window: &AppWindow) {
     }
 }
 
-fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitError>) {
+fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<JobSuccess, GitError>) {
     window.set_git_busy(false);
     window.set_git_busy_text(SharedString::new());
     window.set_git_can_cancel(false);
@@ -640,18 +654,16 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
         .borrow_mut()
         .log_diag("spec.git", &format!("done {outcome}"));
     reload_documents(window, live, &job, result.is_ok());
-    if result.is_ok() {
-        settle_history(&job);
-    }
     match result {
-        Ok(told) => {
+        Ok(success) => {
+            settle_history(&job, success.created_stash);
             if job.after == After::ClearMessage {
                 window.set_git_message(SharedString::new());
                 window.set_git_amend(false);
                 PANE.with(|pane| pane.borrow_mut().kept_message = None);
             }
-            if !told.is_empty() {
-                window.tell(told.into());
+            if !success.message.is_empty() {
+                window.tell(success.message.into());
             }
         }
         Err(GitError::Cancelled) => window.tell(GitError::Cancelled.to_string().into()),
@@ -907,7 +919,7 @@ fn build_rows(
 
 /// 裏で操作を始める。`work`はリポジトリの根と止める合図を受け取り、通れば知らせる文を返す。
 #[allow(clippy::too_many_arguments)]
-fn start(
+fn start<T: Into<JobSuccess>>(
     window: &AppWindow,
     live: &Live,
     root: PathBuf,
@@ -917,7 +929,7 @@ fn start(
     discarded: Vec<Rc<OpenDocument>>,
     after: After,
     name: &str,
-    work: impl FnOnce(&Path, &Cancel) -> Result<String, GitError> + Send + 'static,
+    work: impl FnOnce(&Path, &Cancel) -> Result<T, GitError> + Send + 'static,
 ) {
     let cancel = Cancel::default();
     let (sender, done) = mpsc::channel();
@@ -953,7 +965,7 @@ fn start(
     window.set_git_busy_text(busy.into());
     window.set_git_can_cancel(cancellable);
     std::thread::spawn(move || {
-        let _ = sender.send(work(&root, &cancel));
+        let _ = sender.send(work(&root, &cancel).map(Into::into));
     });
     poll(window, live);
 }
@@ -1483,7 +1495,10 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
             After::ClearMessage,
             "stash",
             move |root, _| {
-                git::stash_all(root, &message).map(|()| pick("Stashしました", "Stashed").to_owned())
+                Ok(JobSuccess {
+                    message: pick("Stashしました", "Stashed").to_owned(),
+                    created_stash: git::stash_all(root, &message)?,
+                })
             },
         ),
         Action::Undo { changes, staged } => {
@@ -1712,6 +1727,7 @@ fn recording(root: &Path, action: &Action) -> Option<Recording> {
             format!("Pop {}", stash.name),
             HistoryKind::Pop {
                 message: stash.message.clone(),
+                stash: None,
             },
         ),
         Action::BranchAt { name, .. } => (
@@ -1744,7 +1760,7 @@ fn remember(record: Recording) {
 }
 
 /// 通った操作を記録する（新しい操作なら Redo は消える）。Undo／Redo なら記録を移す。
-fn settle_history(job: &Job) {
+fn settle_history(job: &Job, created_stash: Option<git::CreatedStash>) {
     let key = key(&job.root);
     if let Some(redo) = job.history {
         HISTORY.with(|history| {
@@ -1755,7 +1771,12 @@ fn settle_history(job: &Job) {
             } else {
                 (&mut held.undo, &mut held.redo)
             };
-            if let Some(entry) = from.pop() {
+            if let Some(mut entry) = from.pop() {
+                match (&mut entry.kind, redo) {
+                    (HistoryKind::StashAll { stash, .. }, true)
+                    | (HistoryKind::Pop { stash, .. }, false) => *stash = created_stash,
+                    _ => {}
+                }
                 to.push(entry);
             }
         });
@@ -1766,7 +1787,10 @@ fn settle_history(job: &Job) {
     };
     let mut kind = record.kind.clone();
     if let HistoryKind::StashAll { stash, .. } = &mut kind {
-        *stash = git::resolve(&job.root, "refs/stash");
+        *stash = created_stash;
+        if stash.is_none() {
+            return;
+        }
     }
     let entry = Entry {
         label: record.label.clone(),
@@ -1809,6 +1833,14 @@ pub(crate) fn history_state(root: &Path, now: &Point, redo: bool) -> (bool, Stri
             } else {
                 pick("戻すものはありません", "Nothing to undo").to_owned()
             },
+        ),
+        Some(entry) if git_history::stash_identity_missing(&entry, redo) => (
+            false,
+            say!(
+                "{verb} {}：作成したStashを特定できないため使えません",
+                "{verb} {}: The created stash could not be identified",
+                entry.label
+            ),
         ),
         Some(entry) if git_history::usable(&entry, now, redo) => {
             (true, format!("{verb} {}", entry.label))
@@ -1863,11 +1895,15 @@ fn run_history(
         After::Nothing,
         if redo { "redo" } else { "undo" },
         move |root, _| {
-            if redo {
+            let result = if redo {
                 git_history::redo(root, &entry)
             } else {
                 git_history::undo(root, &entry)
-            }
+            }?;
+            Ok(JobSuccess {
+                message: result.message,
+                created_stash: result.created_stash,
+            })
         },
     );
     PANE.with(|pane| {

@@ -648,6 +648,34 @@ fn write_all_to(mut file: fs::File, bytes: &[u8]) -> io::Result<()> {
 /// The whole point is the order. If any step fails, the temporary file goes
 /// and the original is untouched.
 pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<FileStamp> {
+    stage_atomic_write(path, bytes)?.publish()?;
+    FileStamp::read(path)
+}
+
+pub(crate) struct StagedWrite<'a> {
+    path: &'a Path,
+    temporary: Option<PathBuf>,
+}
+
+impl StagedWrite<'_> {
+    pub(crate) fn publish(mut self) -> io::Result<()> {
+        if let Some(temporary) = &self.temporary {
+            fs::rename(temporary, self.path)?;
+            self.temporary = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagedWrite<'_> {
+    fn drop(&mut self) {
+        if let Some(temporary) = &self.temporary {
+            let _ = fs::remove_file(temporary);
+        }
+    }
+}
+
+pub(crate) fn stage_atomic_write<'a>(path: &'a Path, bytes: &[u8]) -> io::Result<StagedWrite<'a>> {
     let (temporary, file) = loop {
         let temporary = temporary_path(path);
         match fs::OpenOptions::new()
@@ -661,15 +689,12 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<FileStamp> {
             Err(error) => return Err(error),
         }
     };
-    if let Err(error) = write_all_to(file, bytes) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    FileStamp::read(path)
+    let write = StagedWrite {
+        path,
+        temporary: Some(temporary),
+    };
+    write_all_to(file, bytes)?;
+    Ok(write)
 }
 
 /// Save a document, putting the file back into the shape it arrived in.
