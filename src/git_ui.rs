@@ -268,6 +268,10 @@ pub(crate) fn workspace_folders(live: &Live) -> Vec<PathBuf> {
         .collect()
 }
 
+pub(crate) fn active_root() -> Option<PathBuf> {
+    PANE.with(|pane| root_of(&pane.borrow()))
+}
+
 fn root_of(pane: &Pane) -> Option<PathBuf> {
     let snapshot = pane.snapshot.as_ref()?;
     if Some(&snapshot.folder) != pane.chosen.as_ref() {
@@ -1631,7 +1635,7 @@ fn pending(action: Action) -> Option<Pending> {
     })
 }
 
-fn act(window: &AppWindow, live: &Live, action: Action) {
+pub(crate) fn act(window: &AppWindow, live: &Live, action: Action) {
     if let Some(pending) = pending(action) {
         request(window, live, pending);
     }
@@ -1708,7 +1712,7 @@ fn new_branch(window: &AppWindow, live: &Live) {
     }
 }
 
-fn fetch(window: &AppWindow, live: &Live) {
+pub(crate) fn fetch(window: &AppWindow, live: &Live) {
     let Some(root) = PANE.with(|pane| root_of(&pane.borrow())) else {
         return;
     };
@@ -1728,7 +1732,7 @@ fn fetch(window: &AppWindow, live: &Live) {
     );
 }
 
-fn push(window: &AppWindow, live: &Live) {
+pub(crate) fn push(window: &AppWindow, live: &Live) {
     let (Some(root), Some(status)) = (PANE.with(|pane| root_of(&pane.borrow())), status_now())
     else {
         return;
@@ -1762,7 +1766,7 @@ fn push(window: &AppWindow, live: &Live) {
     );
 }
 
-fn commit(window: &AppWindow, live: &Live) {
+pub(crate) fn commit(window: &AppWindow, live: &Live) {
     let message = window.get_git_message().to_string();
     let amend = window.get_git_amend();
     let Some(status) = status_now() else {
@@ -2034,12 +2038,14 @@ pub fn wire(window: &AppWindow, live: &Live) {
             amend_toggled(&window, wanted);
         }
     });
-    window.on_git_cancel(|| {
-        PANE.with(|pane| {
-            if let Some(job) = pane.borrow().job.as_ref() {
-                job.cancel.cancel();
-            }
-        });
+    window.on_git_cancel(cancel);
+}
+
+pub(crate) fn cancel() {
+    PANE.with(|pane| {
+        if let Some(job) = pane.borrow().job.as_ref() {
+            job.cancel.cancel();
+        }
     });
 }
 

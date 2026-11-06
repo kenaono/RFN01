@@ -1028,6 +1028,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     window.invoke_shortcut_save(true);
     let draft_window = crate::QuickDraft::new().unwrap();
     crate::quick_draft::wire_shortcuts(&window, &draft_window);
+    draft_window.set_text("Draft to copy".into());
     let copied_then_closed = Rc::new(RefCell::new(Vec::new()));
     let received = copied_then_closed.clone();
     draft_window.on_copied(move || received.borrow_mut().push("copied"));

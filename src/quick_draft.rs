@@ -181,16 +181,7 @@ pub(crate) fn wire_shortcuts(owner: &AppWindow, window: &QuickDraft) {
                 .ok()
                 .and_then(|at| crate::actions::all().get(at))
                 .map_or("", |action| action.id.as_str());
-            match id {
-                "draft.copy-all" => draft.invoke_copy_all(),
-                "draft.copy-and-close" => {
-                    draft.invoke_copy_all();
-                    draft.invoke_copy_and_close();
-                }
-                "draft.clear" => draft.invoke_clear_requested(),
-                "draft.paste-to-tab" => draft.invoke_send_requested(),
-                _ => {}
-            }
+            draft.invoke_run_action(id.into());
         });
         true
     });

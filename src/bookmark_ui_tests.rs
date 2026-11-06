@@ -154,7 +154,11 @@ fn the_bookmark_view_and_the_outline_answer_their_clicks() {
     hear!(on_bookmark_cleared, "cleared");
     hear!(on_bookmark_remove, "remove", row);
     hear!(on_bookmark_move_to, "move", row, group);
-    hear!(on_bookmark_add_current, "add-current");
+    let surface_actions = heard.clone();
+    window.on_surface_action(move |id| {
+        assert_eq!(id.as_str(), "bookmarks.add-current");
+        surface_actions.borrow_mut().push("add-current".into());
+    });
     hear!(on_outline_fold_toggled, "fold", row);
     hear!(on_left_row_activated, "heading", row);
     hear!(on_outline_bookmark_requested, "outline-bookmark", row);

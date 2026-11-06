@@ -88,6 +88,14 @@ enum Shown {
     SettingGroup(crate::settings_items::Group),
 }
 
+// Keep only state and phase markers here. A palette can contain unpublished
+// text and paths, and recording them is unnecessary for crash diagnosis.
+fn trace(live: &Live, category: &str, fields: &str) {
+    if let Ok(mut cache) = live.cache.try_borrow_mut() {
+        cache.log_diag(category, fields);
+    }
+}
+
 pub fn install(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
     let opened = live.clone();
@@ -118,16 +126,39 @@ pub fn install(window: &AppWindow, live: &Live) {
         }
     });
     let weak = window.as_weak();
+    let cancelled = live.clone();
     window.on_palette_cancelled(move || {
         if let Some(window) = weak.upgrade() {
+            trace(&cancelled, "palette", "stage=cancel");
             close(&window);
         }
+    });
+    let focus = live.clone();
+    window.on_palette_focus_trace(move |returned| {
+        trace(
+            &focus,
+            "palette",
+            if returned { "stage=field-focus-returned" } else { "stage=field-focus-begin" },
+        );
     });
 }
 
 /// Open the palette: for operations when `commands`, for files otherwise. A
 /// palette already open switches to what was asked for.
 pub fn open(window: &AppWindow, live: &Live, commands: bool) {
+    trace(
+        live,
+        "palette",
+        &format!(
+            "stage=open-begin mode={} pane={} panes={} left_open={} left_tab={} already_open={}",
+            if commands { "commands" } else { "files" },
+            window.get_focused_pane(),
+            PaneId::count(window),
+            window.get_tree_open(),
+            window.get_left_tab(),
+            window.get_palette_open(),
+        ),
+    );
     if window.get_title_menu_visible() {
         window.invoke_title_menu_dismissed();
     }
@@ -136,7 +167,7 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
         PALETTE.with(|held| {
             *held.borrow_mut() = Some(Palette {
                 pane,
-                tree: menu_commands::Target::for_tree(window, live),
+                tree: menu_commands::Target::for_panels(window, live),
                 files: None,
                 operations: None,
                 templates: None,
@@ -153,7 +184,16 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
     let text = if commands { "> " } else { "" };
     window.set_palette_text(text.into());
     window.set_palette_open(true);
+    prepare_open(window, live, text);
+}
+
+fn prepare_open(window: &AppWindow, live: &Live, text: &str) {
+    trace(live, "palette", "stage=initial-rows-begin");
     refilter(window, live, text);
+    trace(live, "palette", &format!(
+        "stage=initial-rows-published rows={}", window.get_palette_rows().row_count()
+    ));
+    trace(live, "palette", "stage=focus-request");
     window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
 }
 
@@ -170,13 +210,14 @@ pub(crate) fn open_list(window: &AppWindow, live: &Live, list: List) {
 }
 
 fn open_list_for(window: &AppWindow, live: &Live, pane: PaneId, list: List) {
+    trace(live, "palette", "stage=open-begin mode=list");
     if window.get_title_menu_visible() {
         window.invoke_title_menu_dismissed();
     }
     PALETTE.with(|held| {
         *held.borrow_mut() = Some(Palette {
             pane,
-            tree: menu_commands::Target::for_tree(window, live),
+            tree: menu_commands::Target::for_panels(window, live),
             files: None,
             operations: None,
             templates: None,
@@ -186,15 +227,16 @@ fn open_list_for(window: &AppWindow, live: &Live, pane: PaneId, list: List) {
     });
     window.set_palette_text("".into());
     window.set_palette_open(true);
-    refilter(window, live, "");
-    window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
+    prepare_open(window, live, "");
     // **Asked again after the text has taken the keyboard back**: chosen from
     // the palette itself ("> Insert › Template…"), the palette that closed
     // has just sent the keyboard to the text, and that lands after this.
     let weak = window.as_weak();
+    let live = live.clone();
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         if let Some(window) = weak.upgrade() {
             if window.get_palette_open() {
+                trace(&live, "palette", "stage=focus-request retry=true");
                 window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
             }
         }
@@ -241,6 +283,7 @@ fn setting_row(titles: &(String, String), key: &str) -> PaletteRow {
 }
 
 fn refilter(window: &AppWindow, live: &Live, text: &str) {
+    trace(live, "palette.detail", "stage=filter-begin");
     let rows = PALETTE.with(|held| {
         let mut held = held.borrow_mut();
         let palette = held.as_mut()?;
@@ -345,9 +388,11 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
     } else {
         ""
     };
+    trace(live, "palette.detail", &format!("stage=publish-begin rows={}", rows.len()));
     window.set_palette_note(note.into());
     window.set_palette_selected(0);
     window.set_palette_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+    trace(live, "palette.detail", "stage=publish-returned");
 }
 
 fn accept(window: &AppWindow, live: &Live) {
@@ -393,7 +438,7 @@ fn accept(window: &AppWindow, live: &Live) {
         match chosen {
             Chosen::File(path) => open_path_in_focused_pane(&window, &live, &path, Opening::Kept),
             Chosen::Operation(command, name) => {
-                let target = if matches!(command, menu_commands::Command::Tree(_)) {
+                let target = if matches!(command, menu_commands::Command::Tree(_) | menu_commands::Command::PanelAction(_)) {
                     tree
                 } else {
                     menu_commands::Target::for_pane(&window, &live, pane)
@@ -800,8 +845,9 @@ fn operations_now(
         .enumerate()
         .filter_map(|(at, action)| {
             let command = action.command.clone()?;
-            let enabled = if matches!(command, menu_commands::Command::Tree(_)) {
-                tree_scene.enabled(&command)
+            let enabled = if matches!(command, menu_commands::Command::Tree(_) | menu_commands::Command::PanelAction(_)) {
+                (!matches!(command, menu_commands::Command::PanelAction(_)) || !crate::panel_actions::overlay_active(window))
+                    && tree_scene.enabled(&command)
             } else {
                 menu_commands::allowed_for(window, live, pane, &command) == menu_commands::Allowed::Yes
             };
@@ -909,7 +955,7 @@ fn ranked_operations(operations: &[Operation], query: &str, categorized: bool) -
             .into_iter()
             .chain(best_score(query, &title_ja, &title_en))
             .max()
-            .or_else(|| alias_score(query, ja, en));
+            .or_else(|| alias_score(query, operation.action));
         let Some(points) = points else {
             continue;
         };
@@ -962,10 +1008,10 @@ fn finish_ranked(mut rows: Vec<RankedRow>) -> (Vec<PaletteRow>, Vec<Shown>) {
 
 /// RFN01-107（書き手の求め 2026-11-05）: **名前に無い言葉でも引けるように。**「Terminalを
 /// 閉じる」「Editorを閉じる」で「TABを閉じる」を、「Panelを閉じる」で「下段のTABを閉じる」を。
-/// 表には出さず、探すときだけ使う。名前はどちらの言語で来てもよい。
+/// 表示名に依存しないように、アクションIDに検索語を対応させる。
 const ALIASES: &[(&str, &[&str])] = &[
     (
-        "TABを閉じる",
+        "file.close-tab",
         &[
             "Terminalを閉じる",
             "Editorを閉じる",
@@ -974,7 +1020,7 @@ const ALIASES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "下段のTABを閉じる",
+        "view.close-strip-tab",
         &[
             "Panelを閉じる",
             "Editor Panelを閉じる",
@@ -984,12 +1030,16 @@ const ALIASES: &[(&str, &[&str])] = &[
             "Close Terminal Panel",
         ],
     ),
+    ("run.compare-file", &["diff"]),
+    ("run.compare-saved", &["diff saved"]),
+    ("run.compare-head", &["diff git"]),
 ];
 
-fn alias_score(query: &str, name: &str, other: &str) -> Option<i64> {
+fn alias_score(query: &str, action: Option<usize>) -> Option<i64> {
+    let id = &crate::actions::all()[action?].id;
     ALIASES
         .iter()
-        .filter(|(key, _)| *key == name || *key == other)
+        .filter(|(key, _)| *key == id)
         .flat_map(|(_, words)| words.iter())
         .filter_map(|word| score(query, word))
         .max()
@@ -1012,6 +1062,56 @@ fn two_lines(shown: &str, other: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_diagnostics_record_stages_without_the_query() {
+        let (harness, _) = crate::saving::Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let window = &harness.window;
+        let live = &harness.live;
+        let directory = app_data::app_directory().unwrap().join("palette-diagnostics");
+        let config = crate::diag::Config::from_args(["--diagnostics=ui".into()]).unwrap();
+        let path = {
+            let mut cache = live.cache.borrow_mut();
+            cache.diag.start_in(&directory, config);
+            cache.diag.path().unwrap().to_owned()
+        };
+        window.set_custom_title(true);
+        install(window, live);
+        window.show().unwrap();
+        window.invoke_palette_requested(true);
+        slint::platform::update_timers_and_animations();
+        let query = "PRIVATE_PALETTE_QUERY";
+        window.invoke_palette_edited(format!("> {query}").into());
+        let written = std::fs::read_to_string(path).unwrap();
+        close(window);
+        let mut after = written.as_str();
+        for stage in [
+            "stage=open-begin",
+            "stage=initial-rows-begin",
+            "stage=initial-rows-published",
+            "stage=focus-request",
+            "stage=field-focus-begin",
+            "stage=field-focus-returned",
+            "stage=filter-begin",
+            "stage=publish-returned",
+        ] {
+            after = after.split_once(stage).unwrap_or_else(|| panic!("missing {stage}: {written}")).1;
+        }
+        assert!(!written.contains(query));
+    }
+
+    #[test]
+    fn diff_search_lists_file_comparison_first() {
+        let (harness, _) = crate::saving::Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let window = &harness.window;
+        install(window, &harness.live);
+        window.invoke_palette_requested(true);
+        window.invoke_palette_edited("> diff".into());
+
+        let rows = window.get_palette_rows();
+        assert_eq!(rows.row_data(0).unwrap().assign.as_str(), "run.compare-file");
+        close(window);
+    }
 
     /// RFN01-87: the letters in order, together counting for more.
     #[test]

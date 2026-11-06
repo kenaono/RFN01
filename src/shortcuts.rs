@@ -893,6 +893,17 @@ pub fn wire(app: &AppWindow, live: &Live) {
         app.invoke_shortcut_key(text, control, alt, shift)
     });
     let weak = app.as_weak();
+    let overlay_live = live.clone();
+    app.on_panel_shortcut(move |text, control, alt, shift| {
+        let Some(app) = weak.upgrade() else { return false };
+        let id = resolve(&app.get_shortcut_bindings(), 0, &text, control, alt, shift);
+        if let Some(Command::PanelAction(action)) = usize::try_from(id).ok().and_then(command_at) {
+            crate::panel_actions::queue(&app, &overlay_live, *action);
+            return true;
+        }
+        false
+    });
+    let weak = app.as_weak();
     let keyed_live = live.clone();
     app.on_shortcut_key(move |text, control, alt, shift| {
         let Some(app) = weak.upgrade() else {
@@ -903,6 +914,10 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return false;
         }
         if command == -2 {
+            return true;
+        }
+        if let Some(Command::PanelAction(action)) = usize::try_from(command).ok().and_then(command_at) {
+            crate::panel_actions::queue(&app, &keyed_live, *action);
             return true;
         }
         // RFN01-67（書き手の求め 2026-10-03）: Git Repository の画面では「戻る」で画面を閉じる。
