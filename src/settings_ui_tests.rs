@@ -1899,70 +1899,30 @@ fn the_key_list_is_searched_with_full_width_letters_too() {
 /// RFN01-66（2026-11-05）: 古いTerminalの値（地・字・書体・大きさ）は、読めば外観の既定へ移り、
 /// もう書かない。後ろに外観の値があれば、そちらが勝つ。
 #[test]
-fn old_terminal_values_move_into_the_appearance_defaults() {
-    use crate::saving::{Harness, open_under, scratch_directory};
-    let root = scratch_directory("legacy-terminal");
-    let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
+fn current_settings_take_effect_and_retired_keys_do_not() {
+    let (harness, _) = crate::saving::Harness::new(|weak| OpenDocument::untitled(1, weak));
     let window = &harness.window;
     let numbers = VecModel::from(vec![0; 2 * SHEET_NUMBERS]);
     let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
     let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
     reset_settings(&numbers, &palette, &fonts);
-    let old = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    };
-    apply_settings(
-        window,
-        &numbers,
-        &palette,
-        &fonts,
-        &old(&[
-            ("terminal.paper", "#101010"),
-            ("terminal.ink", "#e0e0e0"),
-            ("terminal.font", "Cascadia Mono"),
-            ("terminal.size", "20"),
-        ]),
-    );
-    let style = |kind| terminal_appearance::default_style(window, kind);
-    for kind in 0..3 {
-        assert_eq!(
-            style(kind).paper,
-            Color::from_rgb_u8(0x10, 0x10, 0x10),
-            "{kind}"
-        );
-        assert_eq!(
-            style(kind).ink,
-            Color::from_rgb_u8(0xe0, 0xe0, 0xe0),
-            "{kind}"
-        );
-        assert_eq!(style(kind).family.as_str(), "Cascadia Mono", "{kind}");
-    }
-    assert_eq!(style(0).size, 20);
-    assert_eq!(style(1).size, 14, "the Editor Panel kept its own size");
-    assert_eq!(style(2).size, 20);
-    let written = settings_values(window);
-    assert!(
-        written.iter().all(|(k, _)| !matches!(
-            k.as_str(),
-            "terminal.paper" | "terminal.ink" | "terminal.font" | "terminal.size"
-        )),
-        "the old values are no longer written"
-    );
-    // 外観の値が後ろにあれば、そちらが勝つ。
-    let mut appearance = initial_style_written();
-    appearance.insert(0, ("terminal.size".into(), "25".into()));
-    apply_settings(window, &numbers, &palette, &fonts, &appearance);
-    assert_eq!(style(0).size, 14);
+    let mut style = terminal_appearance::initial_style();
+    style.size = 19;
+    let values = [
+        ("terminal.appearance.0", terminal_appearance::encode(&style)),
+        ("terminal.size", "25".to_owned()),
+        ("speech.speed", "1.25".to_owned()),
+        ("speech.rate", "3".to_owned()),
+        ("h.body-size", "22".to_owned()),
+        ("body-size", "28".to_owned()),
+    ]
+    .map(|(key, value)| (key.to_owned(), value));
+    apply_settings(window, &numbers, &palette, &fonts, &values);
 
-    fn initial_style_written() -> Vec<(String, String)> {
-        vec![(
-            "terminal.appearance.0".into(),
-            terminal_appearance::encode(&terminal_appearance::initial_style()),
-        )]
-    }
+    assert_eq!(terminal_appearance::default_style(window, 0).size, 19);
+    assert_eq!(window.get_speech_speed(), 1.25);
+    assert_eq!(numbers.row_data(Setting::BodySize.row_in_sheet()).unwrap(), 22);
+    assert_eq!(numbers.row_data(SHEET_NUMBERS + Setting::BodySize.row_in_sheet()).unwrap(), BASE_FONT_SIZE);
 }
 
 /// RFN01-66（書き手の判断 2026-11-05）: キーの割り当ては設定ファイルにある。作業の記録には
@@ -1973,17 +1933,14 @@ fn key_bindings_live_in_the_settings_file() {
     let root = scratch_directory("keys-in-settings");
     let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文\n", weak));
     let (window, live) = (&harness.window, &harness.live);
-    window.set_shortcut_bindings("0=Ctrl+Alt+O;v=4".into());
+    window.set_shortcut_bindings("file.open=Ctrl+Alt+O;v=5".into());
     let written = settings_values(window);
     assert!(written.contains(&(
         SHORTCUT_BINDINGS_SETTING.to_owned(),
-        "0=Ctrl+Alt+O;v=4".to_owned()
+        "file.open=Ctrl+Alt+O;v=5".to_owned()
     )));
-    assert!(
-        session::capture_session(window, live)
-            .shortcut_bindings
-            .is_empty()
-    );
+    let session = app_data::encode_session(&session::capture_session(window, live));
+    assert!(!session.contains("shortcut-bindings:"));
     let export = settings_transfer::export_now(window);
     assert!(
         export
@@ -1991,7 +1948,7 @@ fn key_bindings_live_in_the_settings_file() {
             .iter()
             .all(|(name, _)| name != SHORTCUT_BINDINGS_SETTING)
     );
-    assert_eq!(export.keys.as_deref(), Some("0=Ctrl+Alt+O;v=4"));
+    assert_eq!(export.keys.as_deref(), Some("file.open=Ctrl+Alt+O;v=5"));
 
     window.set_shortcut_bindings("".into());
     let numbers = VecModel::from(vec![0; 2 * SHEET_NUMBERS]);
@@ -1999,7 +1956,7 @@ fn key_bindings_live_in_the_settings_file() {
     let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
     reset_settings(&numbers, &palette, &fonts);
     apply_settings(window, &numbers, &palette, &fonts, &written);
-    assert_eq!(window.get_shortcut_bindings().as_str(), "0=Ctrl+Alt+O;v=4");
+    assert_eq!(window.get_shortcut_bindings().as_str(), "file.open=Ctrl+Alt+O;v=5");
 }
 
 #[test]
@@ -2183,7 +2140,7 @@ fn the_palette_toggles_a_single_setting_and_opens_named_setting_groups() {
 }
 
 #[test]
-fn terminal_profile_ids_survive_legacy_loading_and_palette_selection_after_reordering() {
+fn terminal_profile_ids_survive_loading_and_palette_selection_after_reordering() {
     use crate::saving::{Harness, open_under, scratch_directory};
     let root = scratch_directory("terminal-profile-id");
     let (harness, _) = Harness::new(|weak| open_under(&root, "a.md", "本文", weak));
@@ -2191,7 +2148,7 @@ fn terminal_profile_ids_survive_legacy_loading_and_palette_selection_after_reord
     let numbers = VecModel::from(vec![0; 2 * SHEET_NUMBERS]);
     let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
     let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
-    let legacy = vec![
+    let settings = vec![
         (
             "terminal.shell.0".into(),
             "WSL | wsl.exe -d Ubuntu\t/tmp".into(),
@@ -2200,13 +2157,15 @@ fn terminal_profile_ids_survive_legacy_loading_and_palette_selection_after_reord
             "terminal.shell.1".into(),
             "PowerShell | powershell.exe -NoLogo".into(),
         ),
+        ("terminal.profile-id.0".into(), "12".into()),
+        ("terminal.profile-id.1".into(), "13".into()),
         ("terminal.default".into(), "WSL".into()),
     ];
-    apply_settings(window, &numbers, &palette, &fonts, &legacy);
+    apply_settings(window, &numbers, &palette, &fonts, &settings);
     let mut shells = configured_shells(window);
     let wsl_id = shells[0].id;
-    assert_ne!(wsl_id, 0);
-    assert_ne!(wsl_id, shells[1].id);
+    assert_eq!(wsl_id, 12);
+    assert_eq!(shells[1].id, 13);
     let candidate = settings_items::Group::all(window)
         .into_iter()
         .find(|group| group.matches("wsl arguments"))

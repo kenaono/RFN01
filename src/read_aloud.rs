@@ -39,10 +39,6 @@ pub const FASTEST: f32 = 2.0;
 pub const SPEED_STEP: f32 = 0.05;
 /// 速さの既定（1.0×）。
 pub const DEFAULT_SPEED: f32 = 1.0;
-/// 以前の5段の選び方（番号で保存していた）。**読み込むときだけ使う**——その日に
-/// 保存された設定を、同じ速さとして引き継ぐ。
-const OLD_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
-
 /// Sampleで読む例文（書き手と合意）。
 const SAMPLE: &str = "吾輩は猫である。名前はまだ無い。";
 
@@ -51,17 +47,6 @@ pub fn speed_of(value: f32) -> f32 {
     let stepped = (value / SPEED_STEP).round() * SPEED_STEP;
     // 0.05刻みの小数を、表示と保存で「1.2500001」にしない。
     (stepped.clamp(SLOWEST, FASTEST) * 100.0).round() / 100.0
-}
-
-/// 以前の番号の保存（`speech.rate`）を、速さへ。
-pub fn speed_from_old_rate(index: &str) -> f32 {
-    index
-        .trim()
-        .parse::<usize>()
-        .ok()
-        .and_then(|at| OLD_RATES.get(at))
-        .copied()
-        .unwrap_or(DEFAULT_SPEED)
 }
 
 /// Windowsに入っている声の1つ。

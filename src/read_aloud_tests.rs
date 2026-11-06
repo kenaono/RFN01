@@ -96,14 +96,11 @@ fn reading_requires_a_japanese_voice_even_if_other_voices_are_installed() {
 }
 
 #[test]
-fn speed_snaps_to_the_slider_and_old_steps_carry_over() {
+fn speed_snaps_to_the_slider_and_stays_in_range() {
     assert_eq!(read_aloud::speed_of(1.26), 1.25);
     assert_eq!(read_aloud::speed_of(0.1), 0.5);
     assert_eq!(read_aloud::speed_of(9.0), 2.0);
     assert_eq!(read_aloud::speed_of(1.0), 1.0);
-    // 以前の5段の番号は、同じ速さとして読む。
-    assert_eq!(read_aloud::speed_from_old_rate("3"), 1.5);
-    assert_eq!(read_aloud::speed_from_old_rate("x"), 1.0);
 }
 
 #[test]

@@ -640,10 +640,6 @@ const REVEAL_SETTLE: Duration = Duration::from_millis(120);
 /// 読みやすかったが、そのまま刷ると不自然に大きかった——画面で読む大きさは
 /// [`ZOOM_DEFAULT`]が持つ。
 const BASE_FONT_SIZE: i32 = 14;
-/// 2026-09-16より前の既定（16.5pt）。**移し替えのためだけに残してある**
-/// ——設定ファイルには既定の値も書いてあるので、これが入っていれば
-/// 「誰も選んでいない」ということである。
-const OLD_BASE_FONT_SIZE: i32 = 22;
 /// A paragraph past this many characters is called out in the status bar.
 ///
 /// Not an engine limit and not enforced: the writer is told, and the document is
@@ -1850,13 +1846,6 @@ fn main() -> Result<(), slint::PlatformError> {
             window.set_palette_placed(true);
         }
     }
-    window.set_shortcut_bindings(
-        session
-            .as_ref()
-            .map(|s| s.shortcut_bindings.clone())
-            .unwrap_or_default()
-            .into(),
-    );
     window.set_search_exclusions(
         session
             .as_ref()
@@ -3343,16 +3332,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // 要件 9: what the last run was set to, before anything is drawn with it.
     if let Some(values) = &stored_settings {
         apply_settings(&window, &numbers, &palette, &sheet_fonts, values);
-    }
-    // RFN01-66: キーの割り当てを作業の記録から設定ファイルへ移す。設定ファイルにまだ無く、記録に
-    // あれば（上で記録から置いた値）、ここで一度書いておく——記録にはもう書かないので。
-    let keys_in_settings = stored_settings.as_ref().is_some_and(|values| {
-        values
-            .iter()
-            .any(|(name, _)| name == SHORTCUT_BINDINGS_SETTING)
-    });
-    if !keys_in_settings && !window.get_shortcut_bindings().is_empty() {
-        save_settings(&window, &render_cache);
     }
     // 追加要件 2026-09-15: 表示の言語。**窓を作ったあと、画面の文言を作る前に**決める。
     i18n::apply(window.get_language());
@@ -16331,18 +16310,11 @@ fn default_font(slot: usize) -> &'static str {
 
 /// Which sheet a settings-file name belongs to, and the name without it.
 ///
-/// **`h.` and `v.`**, because every one of these is a direction's now. A name
-/// with no prefix is one from before the sheets were split; it is taken as
-/// both, so a settings file written by an older build opens with what it said
-/// rather than with the defaults.
-fn sheet_prefix(name: &str) -> (Option<usize>, &str) {
-    if let Some(rest) = name.strip_prefix("h.") {
-        return (Some(0), rest);
-    }
-    if let Some(rest) = name.strip_prefix("v.") {
-        return (Some(1), rest);
-    }
-    (None, name)
+/// The prefix identifies the writing direction for each sheet setting.
+fn sheet_prefix(name: &str) -> Option<(usize, &str)> {
+    name.strip_prefix("h.")
+        .map(|rest| (0, rest))
+        .or_else(|| name.strip_prefix("v.").map(|rest| (1, rest)))
 }
 
 /// Every display setting as a name and a value (要件 9).
@@ -16392,8 +16364,6 @@ const LANGUAGE_SETTING: &str = "language";
 /// RFN01-62: 読み上げの声（WindowsのId、空なら既定）と速さ（0.5〜2.0の倍率）。
 const SPEECH_VOICE_SETTING: &str = "speech.voice";
 const SPEECH_SPEED_SETTING: &str = "speech.speed";
-/// 以前の5段の番号（2026-09-28の1日だけ使った）。読むだけで、もう書かない。
-const SPEECH_RATE_SETTING: &str = "speech.rate";
 /// 追加要件 2026-09-15（書き手）: 背景の壁紙。種類（0 なし・1 Windows・2 画像）、画像のパス、
 /// 置き方（0 タイル・1 縦・2 横）、濃さ（%）。
 const WALL_KIND_SETTING: &str = "wallpaper.kind";
@@ -16427,11 +16397,6 @@ fn shell_identity_metadata(name: &str) -> bool {
     name == SHELL_NEXT_ID_SETTING || name.starts_with(SHELL_PROFILE_ID_PREFIX)
 }
 
-/// 追加要件 2026-09-08: 端末の見た目（要件 6.8）。
-///
-/// **紙とは別に持つ。**要件9のシートは原稿の紙の設定で、端末を黒地で使う人が多いことと
-/// 何の関係も無い。書字方向も持たないので、シートの外にいる。
-const TERMINAL_PAPER_SETTING: &str = "terminal.paper";
 /// C5: 最近使用した色。`#rrggbb` をカンマで並べる。
 const RECENT_COLOURS_SETTING: &str = "colour.recent";
 /// 追加要件 2026-09-15（書き手）: Left Pane の書式。フォルダ・ファイルの色は、付けていなければ空。
@@ -16470,11 +16435,6 @@ fn reset_left_look(window: &AppWindow) {
     window.set_left_folder_own(false);
     window.set_left_file_own(false);
 }
-const TERMINAL_INK_SETTING: &str = "terminal.ink";
-const TERMINAL_FONT_SETTING: &str = "terminal.font";
-const TERMINAL_SIZE_SETTING: &str = "terminal.size";
-// RFN01-66（2026-11-05）: 上の3つ（と`TERMINAL_PAPER_SETTING`）は**古い設定ファイルを読むためだけ**
-// に残す。読めば外観の既定へ移し（`terminal_appearance::migrate_legacy`）、もう書かない。
 
 thread_local! {
     /// 鍵盤を持っている素の欄の数（書き手の報告 2026-09-08）。
@@ -17577,7 +17537,7 @@ fn apply_settings(
         .filter_map(|(name, value)| {
             let index = name.strip_prefix("terminal.shell.")?;
             let mut shell = TerminalShell::read(value)?;
-            shell.id = ids.get(index).copied().unwrap_or(0);
+            shell.id = ids.get(index).copied().filter(|id| *id != 0)?;
             Some(shell)
         })
         .collect();
@@ -17592,17 +17552,11 @@ fn apply_settings(
         // one it does not have opens the first one it does.
         if written == DEFAULT_SHELL_SETTING {
             let offered = offered_shells(window);
-            let most = offered.len().saturating_sub(1) as i32;
-            // 番号で書かれた古い設定ファイルもそのまま読める（2026-09-08 まで
-            // はそちらだった）。
-            let at = match value.trim().parse::<i32>() {
-                Ok(number) => number,
-                Err(_) => offered
-                    .iter()
-                    .position(|shell| shell.name == value.trim())
-                    .map_or(0, |at| at as i32),
-            };
-            window.set_default_shell(at.clamp(0, most));
+            let at = offered
+                .iter()
+                .position(|shell| shell.name == value.trim())
+                .map_or(0, |at| at as i32);
+            window.set_default_shell(at);
             continue;
         }
         // 追加要件 2026-09-08: **`0`だけがOff。**読めない値は書いた覚えの
@@ -17663,10 +17617,6 @@ fn apply_settings(
                 .parse::<f32>()
                 .unwrap_or(read_aloud::DEFAULT_SPEED);
             window.set_speech_speed(read_aloud::speed_of(speed));
-            continue;
-        }
-        if written == SPEECH_RATE_SETTING {
-            window.set_speech_speed(read_aloud::speed_from_old_rate(value));
             continue;
         }
         if written == WALL_KIND_SETTING {
@@ -17755,20 +17705,6 @@ fn apply_settings(
                 .set_recent(ModelRc::new(VecModel::from(recent)));
             continue;
         }
-        // RFN01-66: 古いTerminalの値は外観の既定へ移す（3つとも）。
-        if written == TERMINAL_PAPER_SETTING || written == TERMINAL_INK_SETTING {
-            if let Some(rgb) = parse_hex_colour(value) {
-                let paper = written == TERMINAL_PAPER_SETTING;
-                terminal_appearance::migrate_legacy(window, |_, style| {
-                    if paper {
-                        style.paper = slint_colour(rgb);
-                    } else {
-                        style.ink = slint_colour(rgb);
-                    }
-                });
-            }
-            continue;
-        }
         if written == LEFT_SIZE_SETTING {
             if let Ok(size) = value.trim().parse::<i32>() {
                 let (low, high) = LEFT_SIZE_RANGE;
@@ -17794,15 +17730,6 @@ fn apply_settings(
             } else {
                 window.set_left_file_own(colour.is_some());
                 window.set_left_file_ink(colour.unwrap_or_default());
-            }
-            continue;
-        }
-        if written == TERMINAL_FONT_SETTING {
-            if !value.trim().is_empty() {
-                let family: SharedString = value.trim().into();
-                terminal_appearance::migrate_legacy(window, |_, style| {
-                    style.family = family.clone();
-                });
             }
             continue;
         }
@@ -17846,50 +17773,20 @@ fn apply_settings(
             }
             continue;
         }
-        // 古い大きさはTerminalとTerminal Panelのもの（Editor Panelは14のままだった）。
-        if written == TERMINAL_SIZE_SETTING {
-            if let Ok(size) = value.trim().parse::<i32>() {
-                terminal_appearance::migrate_legacy(window, |kind, style| {
-                    if kind != 1 {
-                        style.size = size.clamp(9, 32);
-                    }
-                });
-            }
+        let Some((sheet, name)) = sheet_prefix(written) else {
             continue;
-        }
-        let (only, name) = sheet_prefix(written);
-        // No prefix is a name from before the sheets, and it meant both.
-        let sheets: &[usize] = match only {
-            Some(0) => &[0],
-            Some(_) => &[1],
-            None => &[0, 1],
         };
         if let Some(setting) = Setting::from_name(name) {
             let (low, high) = setting.range();
             if let Ok(number) = value.parse::<i32>() {
-                // **誰も選んでいない大きさは、新しい既定へ移す**（2026-09-16、
-                // 書き手の決定で本文の既定を22画素＝16.5ptから14画素＝10.5ptへ
-                // 下げた）。設定ファイルには既定の値も書き出してあるので、そのまま
-                // 読むと**既定を変えても誰にも届かない**。自分で選んだ大きさ
-                // （22以外）はそのまま——選んだものを黙って動かさない。
-                let number = if matches!(setting, Setting::BodySize) && number == OLD_BASE_FONT_SIZE
-                {
-                    BASE_FONT_SIZE
-                } else {
-                    number
-                };
-                for sheet in sheets {
-                    setting.write(numbers, *sheet, number.clamp(low, high));
-                }
+                setting.write(numbers, sheet, number.clamp(low, high));
             }
             continue;
         }
         if let Some(slot) = colour_slot(name)
             && let Some(rgb) = parse_hex_colour(value)
         {
-            for sheet in sheets {
-                set_colour(palette, *sheet, slot, rgb);
-            }
+            set_colour(palette, sheet, slot, rgb);
             continue;
         }
         // **A family name is taken as written.** Whether the machine has it is
@@ -17897,9 +17794,7 @@ fn apply_settings(
         // settings file carried to another machine should not lose the name of
         // a font that is merely not installed here.
         if let Some(slot) = font_slot(name) {
-            for sheet in sheets {
-                fonts.set_row_data(font_row(*sheet, slot), value.as_str().into());
-            }
+            fonts.set_row_data(font_row(sheet, slot), value.as_str().into());
         }
     }
     // RFN01-62: 声は**Idで持つ**ので、一覧のどれに当たるかは読み込んでから決める。
@@ -26304,11 +26199,9 @@ mod tests {
 
     #[test]
     fn a_settings_name_says_which_sheet_it_is_for() {
-        assert_eq!(sheet_prefix("h.body-size"), (Some(0), "body-size"));
-        assert_eq!(sheet_prefix("v.ink-h1"), (Some(1), "ink-h1"));
-        // **No prefix is a name from before the sheets were split**, and it
-        // meant one value for both.
-        assert_eq!(sheet_prefix("font-code"), (None, "font-code"));
+        assert_eq!(sheet_prefix("h.body-size"), Some((0, "body-size")));
+        assert_eq!(sheet_prefix("v.ink-h1"), Some((1, "ink-h1")));
+        assert_eq!(sheet_prefix("font-code"), None);
     }
 
     #[test]

@@ -1,8 +1,7 @@
 //! 設定のKeys（キーの割り当て）。RFN01-114: **割り当てられる操作はアクションの表
 //! （`crate::actions`）の行で、保存はIDで書く**。ここに操作の名前の表は持たない。
 use crate::actions::{self, Category, Scope};
-use crate::document::{CalloutType, InsertEdit, LineNoteEdit};
-use crate::menu_commands::{Command, InsertShape};
+use crate::menu_commands::Command;
 use crate::{AppWindow, Live, ShortcutItem};
 use slint::{ComponentHandle, ModelRc, VecModel};
 
@@ -344,174 +343,9 @@ fn conflict(keys: &[String], i: usize, key: &str) -> Option<usize> {
         .enumerate()
         .position(|(other, value)| other != i && scope_at(other) == scope_at(i) && value == key)
 }
-/// 割り当ての書き方の版。**5からはIDで書く**（RFN01-114）。4までは表の位置の番号で書いていた
-/// ので、読むときに[`LEGACY`]でIDへ移す。保存はどの枠も明示して書く（`id=`は「キーなし」）ので、
-/// 既定を替えても、前に保存した書き手には古い既定が残る——その枠は[`migrations`]で移す。
+/// 保存するキー割り当ての形式。
 const BINDINGS_VERSION: u32 = 5;
-/// 4までの番号の並び（それぞれのIDか、挿入の形）。**移し替えのためだけに残す。**
-enum Legacy {
-    Id(&'static str),
-    Shape(InsertShape),
-    Gone,
-}
-const fn ins(what: InsertEdit) -> Legacy {
-    Legacy::Shape(InsertShape::Edit(what))
-}
-const fn line(what: LineNoteEdit) -> Legacy {
-    Legacy::Shape(InsertShape::Line(what))
-}
-const LEGACY: &[Legacy] = &[
-    Legacy::Id("file.open"),
-    Legacy::Id("file.save"),
-    Legacy::Id("file.save-as"),
-    Legacy::Id("file.close-tab"),
-    Legacy::Id("edit.find"),
-    Legacy::Id("edit.replace"),
-    Legacy::Id("edit.goto"),
-    Legacy::Id("file.reopen"),
-    Legacy::Id("edit.undo"),
-    Legacy::Id("edit.redo"),
-    Legacy::Id("view.quick-draft"),
-    Legacy::Id("view.next-tab"),
-    Legacy::Id("view.previous-tab"),
-    Legacy::Id("view.focus-left"),
-    Legacy::Id("view.focus-right"),
-    Legacy::Id("view.focus-up"),
-    Legacy::Id("view.focus-down"),
-    Legacy::Id("view.below"),
-    Legacy::Gone,
-    Legacy::Id("view.back"),
-    Legacy::Id("view.forward"),
-    Legacy::Id("text.delete-next"),
-    Legacy::Id("text.word-forward"),
-    Legacy::Id("text.word-back"),
-    Legacy::Id("edit.kill-line"),
-    Legacy::Id("edit.mark"),
-    Legacy::Id("edit.mark-rect"),
-    Legacy::Id("edit.kill-copy"),
-    Legacy::Id("edit.kill-cut"),
-    Legacy::Id("edit.yank"),
-    Legacy::Id("edit.yank-pop"),
-    Legacy::Id("text.select-word-forward"),
-    Legacy::Id("text.select-word-back"),
-    Legacy::Id("edit.delete-line"),
-    Legacy::Id("edit.move-line-up"),
-    Legacy::Id("edit.move-line-down"),
-    Legacy::Id("edit.copy-line-up"),
-    Legacy::Id("edit.copy-line-down"),
-    Legacy::Id("draft.copy-all"),
-    Legacy::Id("draft.copy-and-close"),
-    Legacy::Id("draft.clear"),
-    Legacy::Id("draft.paste-to-tab"),
-    Legacy::Id("layout.toggle-direction"),
-    Legacy::Id("view.toggle-preview"),
-    Legacy::Id("view.toggle-viewer"),
-    Legacy::Id("file.print"),
-    // メニューから来た操作（RFN01-18）
-    Legacy::Id("file.new"),
-    Legacy::Id("file.new-terminal"),
-    Legacy::Id("file.terminal-in-folder"),
-    ins(InsertEdit::MarkdownLink),
-    ins(InsertEdit::WikiLink),
-    ins(InsertEdit::WikiLinkAlias),
-    ins(InsertEdit::Ruby),
-    ins(InsertEdit::SideNote),
-    ins(InsertEdit::RubyWithSideNote),
-    ins(InsertEdit::EmphasisDots),
-    ins(InsertEdit::SesameDotsNote),
-    ins(InsertEdit::RoundDotsNote),
-    ins(InsertEdit::WhiteRoundDotsNote),
-    ins(InsertEdit::DoubleRoundDotsNote),
-    ins(InsertEdit::CrossDotsNote),
-    ins(InsertEdit::LineNote),
-    ins(InsertEdit::DoubleLineNote),
-    ins(InsertEdit::WaveLineNote),
-    ins(InsertEdit::ChainLineNote),
-    ins(InsertEdit::DashLineNote),
-    ins(InsertEdit::Upright),
-    ins(InsertEdit::Warichu),
-    ins(InsertEdit::SmallText),
-    ins(InsertEdit::LargeText),
-    line(LineNoteEdit::Heading(1)),
-    line(LineNoteEdit::Heading(2)),
-    line(LineNoteEdit::Heading(3)),
-    line(LineNoteEdit::Heading(4)),
-    line(LineNoteEdit::Heading(5)),
-    line(LineNoteEdit::Heading(6)),
-    line(LineNoteEdit::NoHeading),
-    line(LineNoteEdit::Indent(1)),
-    line(LineNoteEdit::Indent(2)),
-    line(LineNoteEdit::Indent(3)),
-    line(LineNoteEdit::Indent(4)),
-    line(LineNoteEdit::NoIndent),
-    line(LineNoteEdit::AlignToEnd(0)),
-    line(LineNoteEdit::AlignToEnd(1)),
-    line(LineNoteEdit::AlignToEnd(2)),
-    line(LineNoteEdit::AlignToEnd(3)),
-    line(LineNoteEdit::AlignToEnd(4)),
-    line(LineNoteEdit::NoAlignToEnd),
-    Legacy::Shape(InsertShape::PageBreak),
-    Legacy::Id("insert.bullet-dash"),
-    Legacy::Id("insert.bullet-star"),
-    Legacy::Id("insert.bullet-plus"),
-    Legacy::Id("insert.numbered"),
-    Legacy::Id("insert.renumber"),
-    ins(InsertEdit::MarkdownImage),
-    ins(InsertEdit::WikiImage),
-    ins(InsertEdit::Highlight),
-    ins(InsertEdit::Comment),
-    ins(InsertEdit::Footnote),
-    ins(InsertEdit::Callout(CalloutType::Note)),
-    ins(InsertEdit::Callout(CalloutType::Tip)),
-    ins(InsertEdit::Callout(CalloutType::Important)),
-    ins(InsertEdit::Callout(CalloutType::Warning)),
-    ins(InsertEdit::Callout(CalloutType::Caution)),
-    Legacy::Shape(InsertShape::Table),
-    Legacy::Shape(InsertShape::Template),
-    Legacy::Id("run.next-spelling"),
-    Legacy::Id("run.previous-spelling"),
-    Legacy::Id("run.read-aloud"),
-    Legacy::Id("edit.find-in-folder"),
-    Legacy::Id("left.explore"),
-    Legacy::Id("edit.replace-in-folder"),
-    Legacy::Id("left.toggle"),
-    Legacy::Id("view.sidebar.outline"),
-    Legacy::Id("view.sidebar.git"),
-    Legacy::Id("left.settings"),
-    Legacy::Id("view.split-right"),
-    Legacy::Id("text.scroll-up"),
-    Legacy::Id("text.scroll-down"),
-    Legacy::Id("text.select-line"),
-    Legacy::Id("view.go-to-file"),
-    Legacy::Id("view.command-palette"),
-    Legacy::Id("view.close-strip-tab"),
-];
-/// 4までの番号を、いまの表の位置へ。
-fn legacy_index(number: usize) -> Option<usize> {
-    match LEGACY.get(number)? {
-        Legacy::Id(id) => actions::index_of(id),
-        Legacy::Shape(shape) => actions::index_of(&actions::insert_id(*shape)),
-        Legacy::Gone => None,
-    }
-}
-/// 既定を替えた枠と、その前の既定、替えた版。
-///
-/// 2：VS Codeに合わせた（RFN01-82、2026-11-03）。3：Ctrl+Pをファイル名で開くへ
-/// 譲り、印刷プレビューはキーなし（RFN01-87、2026-11-03）。4：縦書き・横書きの
-/// 切り替えにCtrl+R（同）。
-const MIGRATIONS: &[(u32, &str, &str)] = &[
-    (2, "view.toggle-preview", ""),
-    (3, "file.print", "Ctrl+P"),
-    (4, "layout.toggle-direction", ""),
-    (2, "file.terminal-in-folder", ""),
-    (2, "left.toggle", "Ctrl+Alt+L"),
-];
-/// 保存した割り当ての版。印が無ければ1（RFN01-82より前）。
-fn saved_version(raw: &str) -> u32 {
-    raw.split(';')
-        .find_map(|entry| entry.strip_prefix("v=")?.parse().ok())
-        .unwrap_or(1)
-}
+
 /// 保存する形。**IDで書く**（RFN01-114）。[`BINDINGS_VERSION`]を添える。
 fn encode(keys: &[String]) -> String {
     actions::all()
@@ -524,33 +358,14 @@ fn encode(keys: &[String]) -> String {
 }
 fn bindings(raw: &str) -> Vec<String> {
     let mut keys: Vec<_> = (0..count()).map(|i| default_at(i).to_string()).collect();
-    let saved = saved_version(raw);
     for entry in raw.split(';') {
         let Some((name, value)) = entry.split_once('=') else {
             continue;
         };
-        if name == "v" {
-            continue;
-        }
-        let at = if saved < 5 {
-            name.parse::<usize>().ok().and_then(legacy_index)
-        } else {
-            actions::index_of(name)
-        };
-        if let Some(at) = at
+        if let Some(at) = actions::index_of(name)
             && let Some(key) = normalize_for(value, scope_at(at))
         {
             keys[at] = key;
-        }
-    }
-    if !raw.trim().is_empty() {
-        for (version, id, before) in MIGRATIONS {
-            if *version > saved
-                && let Some(at) = actions::index_of(id)
-                && keys[at] == *before
-            {
-                keys[at] = default_at(at).to_owned();
-            }
         }
     }
     if keys
@@ -989,6 +804,7 @@ pub(crate) fn run_command(app: &AppWindow, live: &Live, pane: crate::PaneId, com
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::menu_commands::InsertShape;
     /// 表の位置（IDから）。
     fn at(id: &str) -> usize {
         actions::index_of(id).unwrap_or_else(|| panic!("{id} is not listed"))
@@ -1011,23 +827,9 @@ mod tests {
         assert_eq!(bindings(&with_unknown)[at("file.save")], "Ctrl+Alt+S");
     }
 
-    /// RFN01-114: **4までの番号の保存も読める**（一度だけIDへ移す）。18番（新しいTAB）は無い。
     #[test]
-    fn bindings_saved_by_number_move_to_ids() {
-        let keys = bindings("1=Ctrl+Alt+S;18=Ctrl+Alt+N;19=Ctrl+Alt+B;v=4");
-        assert_eq!(keys[at("file.save")], "Ctrl+Alt+S");
-        assert_eq!(keys[at("view.back")], "Ctrl+Alt+B");
-        assert_eq!(
-            resolve("1=Ctrl+Alt+S;18=Ctrl+Alt+N;v=4", 0, "n", true, true, false),
-            -1
-        );
-        // 挿入の形は形で移す（番号の並びと表の並びは違う）。
-        let table = 46 + 3 + 57;
-        let keys = bindings(&format!("{}=Ctrl+Alt+T;v=4", table - 2));
-        assert_eq!(
-            keys[at(&actions::insert_id(InsertShape::Table))],
-            "Ctrl+Alt+T"
-        );
+    fn numeric_bindings_are_ignored() {
+        assert_eq!(bindings("1=Ctrl+Alt+S;v=4"), bindings(""));
     }
 
     #[test]
@@ -1223,30 +1025,6 @@ mod tests {
     /// 古い既定のままの枠だけで、書き手が替えたキーは残す。印を付けて保存したあとは
     /// 移さない——後で外した枠は外れたまま。
     #[test]
-    fn bindings_saved_before_the_change_take_the_new_defaults_once() {
-        // 4までの番号の形：43＝Source・Preview切替、48＝文書のフォルダでTerminal、112＝左ペイン、10＝Quick Draft。
-        let saved = "43=;48=;112=Ctrl+Alt+L;10=F5";
-        let keys = bindings(saved);
-        assert_eq!(keys[at("view.toggle-preview")], "Ctrl+Shift+V");
-        assert_eq!(keys[at("file.terminal-in-folder")], "Ctrl+Shift+C");
-        assert_eq!(keys[at("left.toggle")], "Ctrl+B");
-        assert_eq!(
-            keys[at("view.quick-draft")],
-            "F5",
-            "the writer's own key stays"
-        );
-        // 印のある保存では、空は「外した」の意味で、そのまま。
-        let mut after = keys.clone();
-        after[at("view.toggle-preview")].clear();
-        let encoded = encode(&after);
-        assert_eq!(bindings(&encoded)[at("view.toggle-preview")], "");
-        assert_eq!(bindings(&encoded)[at("left.toggle")], "Ctrl+B");
-    }
-
-    /// RFN01-87: Ctrl+Pはファイル名で開く、Ctrl+Shift+Pはコマンドパレット。**前に
-    /// 保存した割り当ての印刷プレビューのCtrl+Pは外す**——残すとぶつかって、
-    /// 割り当てが全部既定に戻ってしまう。v=2で保存した書き手も同じ。
-    #[test]
     fn ctrl_p_goes_to_the_palette_and_print_preview_lets_it_go() {
         assert_eq!(
             resolve("", 0, "p", true, false, false),
@@ -1256,17 +1034,6 @@ mod tests {
             resolve("", 0, "P", true, false, true),
             hit("view.command-palette")
         );
-        for saved in [
-            "0=Ctrl+O;42=;45=Ctrl+P;94=F5",
-            "0=Ctrl+O;42=;45=Ctrl+P;94=F5;v=2",
-        ] {
-            let keys = bindings(saved);
-            assert_eq!(keys[at("file.print")], "", "{saved}");
-            // 版4：縦書き・横書きの切り替えにCtrl+R。空のまま保存していた書き手にも付く。
-            assert_eq!(keys[at("layout.toggle-direction")], "Ctrl+R", "{saved}");
-            assert_eq!(keys[at("view.go-to-file")], "Ctrl+P", "{saved}");
-        }
-        // 版3のあとで書き手が印刷プレビューに戻したなら、それは書き手の決めたこと。
         let mut keys = bindings("");
         keys[at("view.go-to-file")].clear();
         keys[at("file.print")] = "Ctrl+P".into();
@@ -1364,11 +1131,6 @@ mod tests {
             crate::document::INSERT_EDITS.len() + crate::document::LINE_NOTE_EDITS.len() + 3
         );
         // 4までの番号の並びも、挿入の形を1つずつ持っていた。
-        let legacy = LEGACY
-            .iter()
-            .filter(|entry| matches!(entry, Legacy::Shape(_)))
-            .count();
-        assert_eq!(legacy, used.len());
     }
 
     /// 指定できるキーは**修飾キー付きかF1〜F12**。素の打鍵と、窓・アプリが先に

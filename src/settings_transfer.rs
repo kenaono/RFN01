@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(kind_of("h.size"), Some(PresetKind::Editor));
         assert_eq!(kind_of("v.ink"), Some(PresetKind::Editor));
         assert_eq!(kind_of("wallpaper.path"), Some(PresetKind::Editor));
-        assert_eq!(kind_of("terminal.font"), Some(PresetKind::Terminal));
+        assert_eq!(kind_of("terminal.appearance.0"), Some(PresetKind::Terminal));
         assert_eq!(kind_of("terminal.appearance.0"), Some(PresetKind::Terminal));
         assert_eq!(kind_of(KEYS_SETTING), Some(PresetKind::Keys));
         // 守りの設定・この機械のもの・General。
@@ -754,7 +754,7 @@ mod tests {
             Preset {
                 kind: PresetKind::Keys,
                 name: "Emacs風".into(),
-                values: vec![(KEYS_SETTING.into(), "0=Ctrl+Alt+O;3=Ctrl+Q".into())],
+                values: vec![(KEYS_SETTING.into(), "file.open=Ctrl+Alt+O;file.close-tab=Ctrl+Q;v=5".into())],
             },
         ];
         PresetBook {
@@ -791,7 +791,7 @@ mod tests {
                 ("h.size".into(), "18".into()),
                 ("language".into(), "1".into()),
             ],
-            keys: Some("0=Ctrl+Alt+O".into()),
+            keys: Some("file.open=Ctrl+Alt+O;v=5".into()),
             presets: sample(),
             words: Some(words.into()),
         };

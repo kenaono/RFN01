@@ -314,7 +314,6 @@ pub struct Session {
     pub search_exclusions: String,
     /// RFN01-70: 検索パネルの探し方（大文字と小文字・単語単位・正規表現）。
     pub search_options: [bool; 3],
-    pub shortcut_bindings: String,
     pub expanded: Vec<PathBuf>,
     pub tree_shown: bool,
     /// How wide the left pane is, in pixels (追加要件 2026-09-06). **Zero when
@@ -401,10 +400,6 @@ pub fn encode_session(session: &Session) -> String {
         .map(|on| if *on { '1' } else { '0' })
         .collect();
     out.push_str(&format!("search-options: {options}\n"));
-    out.push_str(&format!(
-        "shortcut-bindings: {}\n",
-        session.shortcut_bindings.replace(['\n', '\r'], "")
-    ));
     match session.workspace {
         SessionWorkspace::Unknown => {}
         SessionWorkspace::None => out.push_str("workspace: none\n"),
@@ -557,7 +552,6 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             "palette-at" => session.palette_at = decode_point(value),
             "folder" => session.folder = Some(PathBuf::from(value)),
             "search" => session.search_folder = Some(PathBuf::from(value)),
-            "shortcut-bindings" => session.shortcut_bindings = value.to_owned(),
             "search-exclusions" => session.search_exclusions = value.to_owned(),
             "search-options" => {
                 for (on, letter) in session.search_options.iter_mut().zip(value.chars()) {
@@ -1511,7 +1505,6 @@ mod tests {
             search_folder: Some(PathBuf::from("D:\\書きかけ\\章")),
             search_exclusions: "*.bak;backup/".into(),
             search_options: [true, false, true],
-            shortcut_bindings: "0=Ctrl+Alt+O".into(),
             expanded: vec![PathBuf::from("D:\\書きかけ\\章")],
             tree_shown: true,
             tree_width: 260,

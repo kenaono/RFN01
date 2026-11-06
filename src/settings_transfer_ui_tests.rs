@@ -65,13 +65,13 @@ fn a_preset_puts_back_only_its_own_page() {
     assert_eq!(names, ["執筆用", "黒"]);
 
     // Keys。
-    window.set_shortcut_bindings("0=Ctrl+Alt+O".into());
+    window.set_shortcut_bindings("file.open=Ctrl+Alt+O;v=5".into());
     settings_transfer::save_as(window, &r.live, PresetKind::Keys, "自分の");
     window.set_shortcut_bindings("".into());
     crate::shortcuts::publish(window);
     assert!(modified(window, 2));
     window.invoke_preset_chosen(2, "自分の".into());
-    assert_eq!(window.get_shortcut_bindings(), "0=Ctrl+Alt+O");
+    assert_eq!(window.get_shortcut_bindings(), "file.open=Ctrl+Alt+O;v=5");
     assert_eq!(current(window, 2), "自分の");
 
     // 「Save」で選んでいるプリセットを上書き。
@@ -120,7 +120,7 @@ fn an_export_brings_everything_back() {
 
     window.set_paper_random(1);
     window.set_left_size(15);
-    window.set_shortcut_bindings("0=Ctrl+Alt+O".into());
+    window.set_shortcut_bindings("file.open=Ctrl+Alt+O;v=5".into());
     save_settings(window, &r.live.cache);
     settings_transfer::save_as(window, &r.live, PresetKind::Editor, "執筆用");
     let written = settings_transfer::encode_export(&settings_transfer::export_now(window));
@@ -142,7 +142,7 @@ fn an_export_brings_everything_back() {
     assert_eq!(modes[0].name, "小説");
     assert_eq!(window.get_paper_random(), 1);
     assert_eq!(window.get_left_size(), 15);
-    assert_eq!(window.get_shortcut_bindings(), "0=Ctrl+Alt+O");
+    assert_eq!(window.get_shortcut_bindings(), "file.open=Ctrl+Alt+O;v=5");
     assert_eq!(window.get_editor_presets().row_count(), 1);
     assert_eq!(current(window, 0), "執筆用");
 

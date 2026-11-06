@@ -1195,7 +1195,7 @@ fn search_shortcuts_open_the_bar_in_both_directions() {
         press("f", false);
         assert!(!window.get_find_open());
     }
-    window.set_shortcut_bindings("4=Ctrl+Alt+F".into());
+    window.set_shortcut_bindings("edit.find=Ctrl+Alt+F;v=5".into());
     press("f", false);
     assert!(
         !window.get_find_open(),
