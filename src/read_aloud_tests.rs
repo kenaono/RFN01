@@ -8,6 +8,7 @@ fn caret(live: &Live, id: PaneId) -> Option<usize> {
 }
 
 #[test]
+#[ignore = "uses the installed Windows speech engine and media player; run explicitly"]
 fn reading_aloud_goes_paragraph_by_paragraph_and_stops_on_an_edit() {
     let root = scratch_directory("read-aloud");
     let text = "前の段落。\n｜漢字《かんじ》を読む。\n\n次の段落。\n最後の段落。\n";
@@ -83,6 +84,18 @@ fn reading_aloud_goes_paragraph_by_paragraph_and_stops_on_an_edit() {
 }
 
 #[test]
+fn reading_requires_a_japanese_voice_even_if_other_voices_are_installed() {
+    let voice = |language: &str| read_aloud::Voice {
+        id: language.into(),
+        name: language.into(),
+        language: language.into(),
+    };
+    assert!(!read_aloud::available(&[]));
+    assert!(!read_aloud::available(&[voice("en-US")]));
+    assert!(read_aloud::available(&[voice("en-US"), voice("JA-JP")]));
+}
+
+#[test]
 fn speed_snaps_to_the_slider_and_old_steps_carry_over() {
     assert_eq!(read_aloud::speed_of(1.26), 1.25);
     assert_eq!(read_aloud::speed_of(0.1), 0.5);
@@ -94,6 +107,7 @@ fn speed_snaps_to_the_slider_and_old_steps_carry_over() {
 }
 
 #[test]
+#[ignore = "uses the installed Windows speech engine and media player; run explicitly"]
 fn the_sample_plays_and_stops_and_gives_way_to_reading() {
     let root = scratch_directory("read-aloud-sample");
     let (harness, _document) =

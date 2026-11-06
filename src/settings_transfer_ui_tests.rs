@@ -157,6 +157,33 @@ fn an_export_brings_everything_back() {
     assert!(saved.contains(&("paper.random".into(), "1".into())));
 }
 
+#[test]
+fn a_failed_import_backup_leaves_settings_and_presets_untouched() {
+    let r = rig("本文。\n", (900, 500));
+    let window = &r.window;
+    settings_transfer::wire(window, &r.live);
+    window.set_left_size(15);
+    settings_transfer::save_as(window, &r.live, PresetKind::Editor, "元の設定");
+    save_settings(window, &r.live.cache);
+
+    let directory = app_data::app_directory().unwrap();
+    let backup = settings_transfer::backup_path(&directory);
+    std::fs::create_dir(&backup).unwrap();
+    let settings_before = app_data::read_settings(&directory).unwrap();
+    let snapshot = || settings_transfer::encode_export(&settings_transfer::export_now(window));
+    let before = snapshot();
+    let mut incoming = settings_transfer::export_now(window);
+    incoming.settings.retain(|(name, _)| name != "left.size");
+    incoming.settings.push(("left.size".into(), "18".into()));
+    incoming.keys = Some("file.save=Ctrl+Alt+S;v=5".into());
+    incoming.presets = Default::default();
+
+    assert!(settings_transfer::import(window, &r.live, incoming).is_err());
+    assert_eq!(snapshot(), before);
+    assert_eq!(app_data::read_settings(&directory).unwrap(), settings_before);
+    assert!(backup.is_dir());
+}
+
 /// 書き手の報告 2026-09-24（Terminal・Keysで変えてもSaveできない）の確かめ：設定の画面と同じ
 /// 配線で変えれば、Terminal・Keysのプリセットも「変更あり」になる。
 #[test]

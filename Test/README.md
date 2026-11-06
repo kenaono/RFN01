@@ -23,7 +23,11 @@ cargo test --locked --offline --manifest-path Test/wsl/Cargo.toml --target-dir t
 
 毎回実行するテストには、一時ファイルやオフスクリーンで安定して判定できるものを置く。Explorerの右クリックメニューと更新抑止のテストもここに含める。
 
-`cargo test --locked --offline -- --list` で一覧を、`cargo test --locked --offline -- --ignored --list` で通常は除外する一覧を確認できる。描画スナップショットや計測、本物のシェル・WSL・印刷を使うケースは、目的に合うテスト名を指定して個別に実行する。アプリからWSLを起動する試験はWindows側で実行する。DirectWrite、WindowsのCP932変換、ConPTY、ジャンクションなどもWindows側で確認する。印刷ジョブを実際に出すテストは、利用する出力先を確認してから実行する。
+`cargo test --locked --offline -- --list` で一覧を、`cargo test --locked --offline -- --ignored --list` で通常は除外する一覧を確認できる。描画スナップショットや計測、本物のシェル・WSL・印刷を使うケースは、目的に合うテスト名を指定して個別に実行する。アプリからWSLを起動する試験はWindows側で実行する。DirectWrite、WindowsのCP932変換、ConPTY、ジャンクションなどもWindows側で確認する。印刷ジョブを実際に出すテストは、利用する出力先を確認してから実行する。Windowsの音声合成・再生を使う読み上げのテストは、日本語音声が入っている環境で個別実行する。音声の有無の判定と速度設定の互換性は通常テストに含む。
+
+```powershell
+cargo test --locked --offline read_aloud_tests:: -- --ignored --test-threads=1
+```
 
 ## Windows の実画面で確認すること
 
