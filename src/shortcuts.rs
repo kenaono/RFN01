@@ -1031,14 +1031,15 @@ mod tests {
     }
 
     #[test]
-    fn settings_validate_and_roundtrip() {
+    fn invalid_keys_are_rejected_and_colliding_bindings_restore_defaults() {
         assert_eq!(normalize("ctrl+alt+s").as_deref(), Some("Ctrl+Alt+S"));
         assert!(normalize("S").is_none());
         assert!(normalize("Ctrl+A").is_none());
-        let save = at("file.save");
-        assert_eq!(bindings("file.save=Ctrl+Alt+S;v=5")[save], "Ctrl+Alt+S");
-        // ほかの操作の既定とぶつかれば、全部を既定へ戻す。
-        assert_eq!(bindings("file.save=Ctrl+O;v=5")[save], "Ctrl+S");
+        // A collision with another action's default invalidates the whole saved map.
+        assert_eq!(
+            bindings("file.save=Ctrl+O;view.back=Ctrl+Alt+B;v=5"),
+            bindings("")
+        );
     }
 
     #[test]

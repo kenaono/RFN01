@@ -1136,10 +1136,17 @@ mod tests {
         assert!(!prompt.is_empty(), "no prompt in 10s from {command}");
         println!("prompt: {prompt}");
 
-        for byte in b"echo RFN-SESSION-OK" {
-            session.send_key(Key::Char(*byte as char), Modifiers::none());
+        // This test injects keys faster than a user can type. Wait for the
+        // bounded input queue instead of counting a refused write as a keypress.
+        let keys = "echo RFN-SESSION-OK".chars().map(Key::Char).chain([Key::Enter]);
+        for key in keys {
+            let bytes = encode_key(key, Modifiers::none(), session.screen().modes());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !session.send(&bytes) {
+                assert!(Instant::now() < deadline, "the shell did not accept a key");
+                session.wait(Duration::from_millis(10));
+            }
         }
-        session.send_key(Key::Enter, Modifiers::none());
 
         let waited = Instant::now();
         let mut answered = false;

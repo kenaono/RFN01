@@ -558,7 +558,10 @@ mod tests {
                 other => panic!("unknown step {other}"),
             }
         }
-        let path = std::env::var("PTY_DUMP").unwrap_or_else(|_| "tui_probe.bin".to_owned());
+        let path = std::env::var("PTY_DUMP").unwrap_or_else(|_| {
+            std::fs::create_dir_all("target").expect("probe output directory");
+            "target/tui_probe.bin".to_owned()
+        });
         std::fs::write(&path, &seen).expect("dump");
         println!("wrote {} bytes to {path}", seen.len());
         // 今の解析器が読めなかったもの。
