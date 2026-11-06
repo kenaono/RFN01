@@ -316,7 +316,11 @@ pub(crate) fn root() -> Option<PathBuf> {
 
 /// File の「Git Repository…」と、Git Changes の見出しの釦。
 pub fn open(window: &AppWindow, live: &Live) {
-    let root = match git_ui::chosen_root(window, live) {
+    open_folder(window, live, git_ui::repository_folder(window, live).as_deref());
+}
+
+pub(crate) fn open_folder(window: &AppWindow, live: &Live, folder: Option<&Path>) {
+    let root = match git_ui::prepare_repository(window, live, folder) {
         Ok(root) => root,
         Err(text) => {
             window.tell(text.into());
@@ -1771,7 +1775,6 @@ pub fn wire(window: &AppWindow, live: &Live) {
             });
         }};
     }
-    on!(on_git_repository_requested, |w, l| open(w, l));
     on!(on_git_repo_close, |w, _l| close(w));
     on!(on_git_repo_branch_here, |w, l| branch_here(w, l));
     on!(on_git_repo_pop, |w, l| pop(w, l));

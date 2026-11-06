@@ -77,9 +77,10 @@ component Picker inherits Rectangle {
 
 export component GitChangesView inherits Rectangle {
     in property <bool> merging;
-    in property <string> resolve-title;
-    in property <bool> resolve-allowed;
-    callback resolve-merge();
+    callback action(string);
+    pure callback allowed(string) -> bool;
+    pure callback action-title(string) -> string;
+    callback shortcut(KeyEvent) -> EventResult;
     // 0 案内の文だけ、1 Gitの管理下にない（Create Git Repository）、2 リポジトリ。
     in property <int> mode;
     in property <string> note;
@@ -88,14 +89,12 @@ export component GitChangesView inherits Rectangle {
     in property <string> repo-tip;
     in property <string> branch;
     in property <[string]> branches;
-    in property <bool> on-branch;
     in property <bool> has-upstream;
     in property <bool> has-commit;
     in property <int> incoming;
     in property <int> outgoing;
     in property <bool> busy;
     in property <string> busy-text;
-    in property <bool> can-cancel;
     in property <int> staged-count;
     in property <int> change-count;
     in property <[GitRow]> rows;
@@ -111,18 +110,8 @@ export component GitChangesView inherits Rectangle {
     callback new-branch();
     // 見出しの右端の釦：Git Repository の画面を開く（RFN01-67 PR 2b。PR 2a ではブランチ▾の
     // 「Manage Branches」だったが、同じ面に入口を2つ置かないため見出しへ移した）。
-    callback open-repository();
-    in property <string> repositories-title;
-    in property <bool> repositories-allowed;
-    callback open-repositories();
-    callback fetch();
-    callback pull();
-    callback push();
-    callback sync();
-    callback commit();
     callback amend-toggled(bool);
     callback stash-all();
-    callback cancel();
     // 行を押した：見出しは開閉。
     callback row-clicked(int);
     // 行をダブルクリック：ファイルを開く（変更があれば前回のCommitと比べる）。
@@ -137,7 +126,6 @@ export component GitChangesView inherits Rectangle {
     property <int> menu-kind: 0;
     property <length> menu-y;
     property <length> commit-menu-y;
-    property <bool> can-commit: !root.busy && root.message != "" && (root.amend ? root.has-commit : (root.staged-count > 0 || root.change-count > 0));
 
     VerticalLayout {
         padding: 10px;
@@ -154,20 +142,19 @@ export component GitChangesView inherits Rectangle {
                 vertical-alignment: center;
                 horizontal-stretch: 1;
             }
-            if !root.compact && root.repositories-title != "": IconButton {
+            if !root.compact: IconButton {
                 size: 22px;
                 icon: Icons.folder;
-                tip: root.repositories-title;
-                enabled: root.repositories-allowed;
-                clicked => { root.open-repositories(); }
+                tip: root.action-title("git.repositories");
+                enabled: root.allowed("git.repositories");
+                clicked => { root.action("git.repositories"); }
             }
             if !root.compact && root.mode == 2: IconButton {
                 size: 22px;
                 icon: Icons.graph;
-                tip: @tr("Git Repository");
-                clicked => {
-                    root.open-repository();
-                }
+                tip: root.action-title("file.git-repository");
+                enabled: root.allowed("file.git-repository");
+                clicked => { root.action("file.git-repository"); }
             }
         }
 
@@ -212,11 +199,11 @@ export component GitChangesView inherits Rectangle {
                 font-weight: 650;
             }
             TextButton {
-                title: root.resolve-title;
+                title: root.action-title("git.merge-resolution");
                 wide: true;
                 role: Role.primary;
-                enabled: root.resolve-allowed;
-                clicked => { root.resolve-merge(); }
+                enabled: root.allowed("git.merge-resolution");
+                clicked => { root.action("git.merge-resolution"); }
             }
             Rectangle { vertical-stretch: 1; }
         }
@@ -238,31 +225,23 @@ export component GitChangesView inherits Rectangle {
                 spacing: 4px;
                 TextButton {
                     title: @tr("Fetch");
-                    enabled: !root.busy && root.has-commit;
-                    clicked => {
-                        root.fetch();
-                    }
+                    enabled: root.allowed("git.fetch");
+                    clicked => { root.action("git.fetch"); }
                 }
                 TextButton {
                     title: root.incoming > 0 ? @tr("Pull") + " ↓" + root.incoming : @tr("Pull");
-                    enabled: !root.busy && root.has-upstream;
-                    clicked => {
-                        root.pull();
-                    }
+                    enabled: root.allowed("git.pull");
+                    clicked => { root.action("git.pull"); }
                 }
                 TextButton {
                     title: !root.has-upstream ? @tr("Publish") : root.outgoing > 0 ? @tr("Push") + " ↑" + root.outgoing : @tr("Push");
-                    enabled: !root.busy && root.on-branch && root.has-commit;
-                    clicked => {
-                        root.push();
-                    }
+                    enabled: root.allowed("git.push");
+                    clicked => { root.action("git.push"); }
                 }
                 TextButton {
                     title: @tr("Sync");
-                    enabled: !root.busy && root.on-branch && root.has-commit;
-                    clicked => {
-                        root.sync();
-                    }
+                    enabled: root.allowed("git.sync");
+                    clicked => { root.action("git.sync"); }
                 }
             }
 
@@ -277,11 +256,9 @@ export component GitChangesView inherits Rectangle {
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                 }
-                if root.can-cancel: TextButton {
+                if root.allowed("git.cancel"): TextButton {
                     title: @tr("Cancel");
-                    clicked => {
-                        root.cancel();
-                    }
+                    clicked => { root.action("git.cancel"); }
                 }
             }
 
@@ -291,6 +268,7 @@ export component GitChangesView inherits Rectangle {
                 enabled: !root.busy;
                 placeholder: @tr("Enter a message");
                 text <=> root.message;
+                shortcut(event) => { return root.shortcut(event); }
             }
 
             HorizontalLayout {
@@ -298,12 +276,8 @@ export component GitChangesView inherits Rectangle {
                 TextButton {
                     title: root.amend ? @tr("Amend") : root.staged-count > 0 ? @tr("Commit Staged") : @tr("Commit All");
                     role: Role.primary;
-                    enabled: root.can-commit;
-                    clicked => {
-                        if root.can-commit {
-                            root.commit();
-                        }
-                    }
+                    enabled: root.allowed("git.commit-changes");
+                    clicked => { root.action("git.commit-changes"); }
                 }
                 IconButton {
                     icon: Icons.down;

@@ -1234,20 +1234,13 @@ export component AppWindow inherits Window {
     callback git-create-repository();
     callback git-branch-chosen(int);
     callback git-new-branch();
-    callback git-fetch();
-    callback git-pull();
-    callback git-push();
-    callback git-sync();
-    callback git-commit();
     callback git-amend-toggled(bool);
     callback git-stash-all();
-    callback git-cancel();
     callback git-row-clicked(int);
     callback git-row-activated(int);
     callback git-row-staged(int);
     callback git-row-diff(int);
     callback git-row-menu(int, int);
-    callback git-open-repository();
     in property <bool> git-catalog-open;
     in property <bool> git-catalog-scanning;
     in property <int> git-catalog-focus;
@@ -1287,7 +1280,6 @@ export component AppWindow inherits Window {
     in property <int> git-repo-focus-generation;
     callback git-repo-close();
     /// File の「Git Repository…」。
-    callback git-repository-requested();
     callback git-repo-branch-here();
     callback git-repo-pop();
     callback git-repo-commit-selected(int);
@@ -1344,7 +1336,6 @@ export component AppWindow inherits Window {
     in property <[string]> git-merge-paths;
     callback git-merge-file(int);
     callback git-merge-version-chosen(int);
-    callback git-merge-back();
     in property <bool> git-worktrees-open;
     in property <[GitWorktreeRow]> git-worktree-rows;
     in-out property <int> git-worktree-selected: -1;
@@ -2150,23 +2141,22 @@ export component AppWindow inherits Window {
                         vertical-stretch: 1;
                         mode: root.git-mode;
                         merging: root.git-merge-active;
-                        resolve-title: root.git-action-title("git.merge-resolution");
-                        resolve-allowed: root.git-action-allowed("git.merge-resolution", false, root.git-repo-action-generation);
-                        resolve-merge => { root.surface-action("git.merge-resolution"); }
+                        action(id) => { root.surface-action(id); }
+                        allowed(id) => { return root.git-action-allowed(id, false, root.git-repo-action-generation); }
+                        action-title(id) => { return root.git-action-title(id); }
+                        shortcut(event) => { return root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject; }
                         note: root.git-note;
                         repos: root.git-repos;
                         repo-index: root.git-repo-index;
                         repo-tip: root.git-repo-tip;
                         branch: root.git-branch;
                         branches: root.git-branches;
-                        on-branch: root.git-on-branch;
                         has-upstream: root.git-has-upstream;
                         has-commit: root.git-has-commit;
                         incoming: root.git-incoming;
                         outgoing: root.git-outgoing;
                         busy: root.git-busy;
                         busy-text: root.git-busy-text;
-                        can-cancel: root.git-can-cancel;
                         staged-count: root.git-staged-count;
                         change-count: root.git-change-count;
                         rows: root.git-rows;
@@ -2176,23 +2166,13 @@ export component AppWindow inherits Window {
                         create-repository => { root.git-create-repository(); }
                         branch-chosen(index) => { root.git-branch-chosen(index); }
                         new-branch => { root.git-new-branch(); }
-                        fetch => { root.surface-action("git.fetch"); }
-                        pull => { root.surface-action("git.pull"); }
-                        push => { root.surface-action("git.push"); }
-                        sync => { root.surface-action("git.sync"); }
-                        commit => { root.surface-action("git.commit-changes"); }
                         amend-toggled(wanted) => { root.git-amend-toggled(wanted); }
                         stash-all => { root.git-stash-all(); }
-                        cancel => { root.surface-action("git.cancel"); }
                         row-clicked(index) => { root.git-row-clicked(index); }
                         row-activated(index) => { root.git-row-activated(index); }
                         row-staged(index) => { root.git-row-staged(index); }
                         row-diff(index) => { root.git-row-diff(index); }
                         row-menu(index, action) => { root.git-row-menu(index, action); }
-                        open-repository => { root.git-open-repository(); }
-                        repositories-title: root.git-action-title("git.repositories");
-                        repositories-allowed: root.git-action-allowed("git.repositories", false, root.git-repo-action-generation);
-                        open-repositories => { root.surface-action("git.repositories"); }
                     }
                     if root.left-tab == 7: BackupsView {
                         vertical-stretch: 1;
@@ -7017,7 +6997,6 @@ export component AppWindow inherits Window {
             ready: root.git-merge-ready;
             can-delete: root.git-merge-can-delete;
             focus-generation: root.git-repo-focus-generation;
-            back => { root.git-merge-back(); }
             select(index) => { root.git-merge-file(index); }
             show-version(index) => { root.git-merge-version-chosen(index); }
             action(id) => { root.surface-action(id); }
@@ -7052,12 +7031,10 @@ export component AppWindow inherits Window {
             branches: root.git-branches;
             has-commit: root.git-has-commit;
             has-upstream: root.git-has-upstream;
-            on-branch: root.git-on-branch;
             incoming: root.git-incoming;
             outgoing: root.git-outgoing;
             busy: root.git-busy;
             busy-text: root.git-busy-text;
-            can-cancel: root.git-can-cancel;
             has-stash: root.git-repo-has-stash;
             has-changes: root.git-repo-has-changes;
             branch-rows: root.git-repo-branches;
@@ -7119,13 +7096,9 @@ export component AppWindow inherits Window {
             shortcut(text, control, alt, shift) => { return root.shortcut-key(text, control, alt, shift); }
             branch-chosen(index) => { root.git-branch-chosen(index); }
             new-branch => { root.git-new-branch(); }
-            pull => { root.surface-action("git.pull"); }
-            push => { root.surface-action("git.push"); }
-            fetch => { root.surface-action("git.fetch"); }
             branch-here => { root.git-repo-branch-here(); }
             stash => { root.git-stash-all(); }
             pop => { root.git-repo-pop(); }
-            cancel => { root.surface-action("git.cancel"); }
             commit-selected(index) => { root.git-repo-commit-selected(index); }
             commit-menu(index, action) => { root.git-repo-commit-menu(index, action); }
             search(field, query) => { root.git-repo-search(field, query); }
@@ -7140,7 +7113,6 @@ export component AppWindow inherits Window {
             branch-dropped(from, to) => { root.git-repo-branch-dropped(from, to); }
             file-clicked(index) => { root.git-repo-file-clicked(index); }
             file-menu(index, action) => { root.git-repo-file-menu(index, action); }
-            changes-commit => { root.surface-action("git.commit-changes"); }
             changes-amend-toggled(wanted) => { root.git-amend-toggled(wanted); }
             changes-stash-all => { root.git-stash-all(); }
             changes-row-clicked(index) => { root.git-repo-changes-clicked(index); }

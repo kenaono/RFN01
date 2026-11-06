@@ -180,6 +180,17 @@ fn merge_resolution_actions_use_the_palette_target_and_protect_unsaved_work() {
     assert!(!window.get_git_busy());
     assert!(document.text.edited());
     assert_eq!(git::merge_state(&root).unwrap().unwrap().conflicts.len(), 1);
+
+    crate::answer_question(window, live, 0);
+    crate::command_palette::open(window, live, true);
+    let back = pick("リポジトリに戻る", "Back to Repository");
+    let at = window.get_palette_rows().iter().position(|row| row.title.contains(back)).unwrap();
+    window.set_palette_selected(at as i32);
+    window.invoke_palette_accepted();
+    slint::platform::update_timers_and_animations();
+    assert!(!window.get_git_merge_open());
+    assert!(window.get_git_repo_active());
+    assert!(!window.invoke_git_action_allowed("git.merge-back".into(), false, 0));
 }
 
 #[test]

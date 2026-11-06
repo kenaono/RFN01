@@ -14,7 +14,6 @@ export component GitMergeView inherits Rectangle {
     in property <bool> can-delete;
     in property <bool> ready;
     in property <int> focus-generation;
-    callback back();
     callback select(int);
     callback show-version(int);
     callback action(string);
@@ -29,7 +28,7 @@ export component GitMergeView inherits Rectangle {
         init => { self.focus(); }
         key-pressed(event) => {
             if event.text == Key.Escape {
-                root.back();
+                root.action("git.merge-back");
                 return accept;
             }
             return root.shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject;
@@ -45,8 +44,9 @@ export component GitMergeView inherits Rectangle {
                 padding-right: 14px;
                 spacing: 12px;
                 TextButton {
-                    title: @tr("Back to Repository");
-                    clicked => { root.back(); }
+                    title: root.action-title("git.merge-back");
+                    enabled: root.allowed("git.merge-back");
+                    clicked => { root.action("git.merge-back"); }
                 }
                 VerticalLayout {
                     alignment: center;

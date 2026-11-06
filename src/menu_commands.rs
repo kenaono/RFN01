@@ -75,7 +75,6 @@ pub(crate) enum Command {
     ZoomReset,
     Compare(i32),
     /// RFN01-67: Git Repository の画面を開く。
-    GitRepository,
     /// RFN01-63: スペルチェックを始める／終える（アクティブな文書）。
     Spelling,
     /// RFN01-63: 次（`false`）／前（`true`）のスペルミスへ。
@@ -1640,7 +1639,6 @@ impl<'a> Scene<'a> {
             | Command::Folder
             | Command::Recent(_)
             | Command::Workspaces
-            | Command::GitRepository
             | Command::SaveAll
             | Command::Close
             | Command::Exit
@@ -1881,7 +1879,7 @@ fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<
                 crate::git_catalog_ui::Action::Show
             )));
             // RFN01-67: 全ブランチのグラフ（Git Changes で選んでいるリポジトリ）。
-            act!(Command::GitRepository);
+            act!(Command::PanelAction(crate::panel_actions::Action::GitRepositoryOpen));
             root.push(Item::Sep);
             act!(Command::Save(false));
             act!(Command::Save(true));
@@ -2620,7 +2618,6 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Folder => window.invoke_work_folder_requested(),
         Command::Recent(path) => open_work_folder(window, live, &path),
         Command::Workspaces => window.invoke_workspace_manager_requested(),
-        Command::GitRepository => window.invoke_git_repository_requested(),
         Command::Save(false) => window.invoke_save_requested(),
         Command::Save(true) => window.invoke_save_as_requested(),
         Command::SaveAll => window.invoke_save_all_requested(),

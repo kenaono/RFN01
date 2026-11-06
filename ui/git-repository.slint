@@ -254,12 +254,10 @@ export component GitRepositoryView inherits Rectangle {
     in property <[string]> branches;
     in property <bool> has-commit;
     in property <bool> has-upstream;
-    in property <bool> on-branch;
     in property <int> incoming;
     in property <int> outgoing;
     in property <bool> busy;
     in property <string> busy-text;
-    in property <bool> can-cancel;
     in property <bool> has-stash;
     in property <bool> has-changes;
     in property <[GitBranchRow]> branch-rows;
@@ -315,13 +313,9 @@ export component GitRepositoryView inherits Rectangle {
     callback shortcut(string, bool, bool, bool) -> bool;
     callback branch-chosen(int);
     callback new-branch();
-    callback pull();
-    callback push();
-    callback fetch();
     callback branch-here();
     callback stash();
     callback pop();
-    callback cancel();
     callback commit-selected(int);
     callback commit-menu(int, int);
     callback show-more();
@@ -344,7 +338,6 @@ export component GitRepositoryView inherits Rectangle {
     // 右の列の幅（差分の段を Rust が折る）。
     callback diff-width-changed(float);
     // WIP の右の列から（Git Changes と同じ操作）。
-    callback changes-commit();
     callback changes-amend-toggled(bool);
     callback changes-stash-all();
     callback changes-row-clicked(int);
@@ -533,26 +526,20 @@ export component GitRepositoryView inherits Rectangle {
                 ToolButton {
                     icon: "M8 2.5v9M4.5 8 8 11.5 11.5 8M3 13.5h10";
                     title: root.incoming > 0 ? @tr("Pull") + " ↓" + root.incoming : @tr("Pull");
-                    enabled: !root.busy && root.has-upstream;
-                    clicked => {
-                        root.pull();
-                    }
+                    enabled: root.allowed("git.pull", false);
+                    clicked => { root.action("git.pull"); }
                 }
                 ToolButton {
                     icon: "M8 13.5v-9M4.5 8 8 4.5 11.5 8M3 2.5h10";
                     title: !root.has-upstream ? @tr("Publish") : root.outgoing > 0 ? @tr("Push") + " ↑" + root.outgoing : @tr("Push");
-                    enabled: !root.busy && root.on-branch && root.has-commit;
-                    clicked => {
-                        root.push();
-                    }
+                    enabled: root.allowed("git.push", false);
+                    clicked => { root.action("git.push"); }
                 }
                 ToolButton {
                     icon: "M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3";
                     title: @tr("Fetch");
-                    enabled: !root.busy && root.has-commit;
-                    clicked => {
-                        root.fetch();
-                    }
+                    enabled: root.allowed("git.fetch", false);
+                    clicked => { root.action("git.fetch"); }
                 }
                 ToolButton {
                     icon: Icons.git;
@@ -587,13 +574,11 @@ export component GitRepositoryView inherits Rectangle {
                         font-size: 12px;
                         vertical-alignment: center;
                     }
-                    if root.can-cancel: VerticalLayout {
+                    if root.allowed("git.cancel", false): VerticalLayout {
                         alignment: center;
                         TextButton {
                             title: @tr("Cancel");
-                            clicked => {
-                                root.cancel();
-                            }
+                            clicked => { root.action("git.cancel"); }
                         }
                     }
                 }
@@ -1504,9 +1489,10 @@ export component GitRepositoryView inherits Rectangle {
                 }
                 if root.detail-mode == 2: GitChangesView {
                     merging: root.merging;
-                    resolve-title: root.action-title("git.merge-resolution");
-                    resolve-allowed: root.allowed("git.merge-resolution", false);
-                    resolve-merge => { root.action("git.merge-resolution"); }
+                    action(id) => { root.action(id); }
+                    allowed(id) => { return root.allowed(id, false); }
+                    action-title(id) => { return root.action-title(id); }
+                    shortcut(event) => { return root.shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject; }
                     mode: root.changes-mode;
                     note: root.changes-note;
                     // リポジトリとブランチはこの画面の上の帯が持つので、ここでは選ばせない。
@@ -1514,14 +1500,12 @@ export component GitRepositoryView inherits Rectangle {
                     repo-index: root.changes-repo-index;
                     branch: root.branch;
                     branches: root.branches;
-                    on-branch: root.on-branch;
                     has-upstream: root.has-upstream;
                     has-commit: root.has-commit;
                     incoming: root.incoming;
                     outgoing: root.outgoing;
                     busy: root.busy;
                     busy-text: root.busy-text;
-                    can-cancel: root.can-cancel;
                     staged-count: root.staged-count;
                     change-count: root.change-count;
                     rows: root.change-rows;
@@ -1530,13 +1514,8 @@ export component GitRepositoryView inherits Rectangle {
                     compact: true;
                     branch-chosen(index) => { root.branch-chosen(index); }
                     new-branch => { root.new-branch(); }
-                    fetch => { root.fetch(); }
-                    pull => { root.pull(); }
-                    push => { root.push(); }
-                    commit => { root.changes-commit(); }
                     amend-toggled(wanted) => { root.changes-amend-toggled(wanted); }
                     stash-all => { root.changes-stash-all(); }
-                    cancel => { root.cancel(); }
                     row-clicked(index) => { root.changes-row-clicked(index); }
                     row-activated(index) => { root.changes-row-activated(index); }
                     row-staged(index) => { root.changes-row-staged(index); }

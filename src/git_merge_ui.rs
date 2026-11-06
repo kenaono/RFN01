@@ -259,10 +259,4 @@ pub(crate) fn wire(window: &AppWindow) {
             preview(&window, true);
         }
     });
-    let weak = window.as_weak();
-    window.on_git_merge_back(move || {
-        if let Some(window) = weak.upgrade() {
-            window.set_git_merge_open(false);
-        }
-    });
 }

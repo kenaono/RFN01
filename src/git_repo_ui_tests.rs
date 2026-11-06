@@ -94,6 +94,71 @@ fn without_a_workspace_it_does_not_open() {
 }
 
 #[test]
+fn repository_palette_keeps_the_original_registered_folder() {
+    let Some((first, harness)) = manuscript("repo-palette-target") else {
+        return;
+    };
+    let second = scratch_directory("repo-palette-other");
+    repository(&second).unwrap();
+    let (window, live) = (&harness.window, &harness.live);
+    let runtime = live.folder.borrow().workspace.clone().unwrap();
+    let workspace = runtime.borrow().active_workspace().unwrap();
+    runtime.borrow_mut().edit(|registry| registry.add_root(workspace, &second)).unwrap();
+    git_ui::wire(window, live);
+    wire(window, live);
+    crate::panel_actions::wire(window, live);
+    crate::command_palette::install(window, live);
+    git_ui::publish(window, live);
+    settle(window, live);
+    assert!(git_ui::chosen_folder().is_some_and(|path| git_ui::same_path(&path, &first)));
+
+    crate::command_palette::open(window, live, true);
+    let index = window.get_palette_rows().iter()
+        .position(|row| row.title.contains("Git Repository…")).unwrap();
+    window.set_palette_selected(index as i32);
+    window.invoke_git_repo_chosen(1);
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert!(git_ui::chosen_folder().is_some_and(|path| git_ui::same_path(&path, &second)));
+    window.invoke_palette_accepted();
+    slint::platform::update_timers_and_animations();
+    assert!(!window.get_git_repo_active());
+
+    window.invoke_surface_action("file.git-repository".into());
+    slint::platform::update_timers_and_animations();
+    assert!(window.get_git_repo_active());
+    assert!(root().is_some_and(|path| git_ui::same_path(&path, &second)));
+}
+
+#[test]
+fn git_toolbar_and_palette_share_merge_availability() {
+    let Some((_root, harness)) = manuscript("repo-palette-availability") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    crate::panel_actions::wire(window, live);
+    open(window, live);
+    settle(window, live);
+    window.set_git_has_upstream(true);
+    for merging in [false, true] {
+        window.set_git_merge_active(merging);
+        crate::command_palette::open(window, live, true);
+        for (id, expected) in [("git.fetch", true), ("git.pull", !merging), ("git.push", !merging)] {
+            let at = crate::actions::index_of(id).unwrap();
+            let title = &crate::actions::all()[at].title;
+            let caption = pick(&title.0, &title.1);
+            assert_eq!(window.invoke_git_action_allowed(id.into(), false, 0), expected, "{id}");
+            assert_eq!(
+                window.get_palette_rows().iter().any(|row| row.title.contains(caption)),
+                expected,
+                "{id}",
+            );
+        }
+        crate::command_palette::close(window);
+    }
+}
+
+#[test]
 fn opens_with_every_branch_in_one_graph() {
     let Some((_root, harness)) = manuscript("repo-open") else {
         return;

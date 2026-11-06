@@ -863,13 +863,9 @@ fn operations_now(
         .enumerate()
         .filter_map(|(at, action)| {
             let command = action.command.clone()?;
-            let enabled = if let menu_commands::Command::PanelAction(action) = command {
-                (!crate::panel_actions::overlay_active(window)
-                    || if window.get_git_catalog_open() {
-                        action.available_in_catalog()
-                    } else {
-                        action.available_in_git_overlay()
-                    })
+            let enabled = if let menu_commands::Command::PanelAction(_) = command {
+                (window.get_git_repo_active() || window.get_git_catalog_open()
+                    || !crate::panel_actions::overlay_active(window))
                     && tree_scene.enabled(&command)
             } else if window.get_git_repo_active() || window.get_git_catalog_open() {
                 false

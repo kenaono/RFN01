@@ -311,13 +311,10 @@ fn build() -> Vec<ActionDef> {
         def(
             "file.git-repository",
             ("Git Repository…", "Git Repository…"),
-            (
-                "Git Changesで選んでいるリポジトリの、全ブランチのグラフを開きます。",
-                "Opens the graph of all branches of the repository chosen in Git Changes.",
-            ),
+            crate::panel_actions::Action::GitRepositoryOpen.description(),
             "",
             Git,
-            C::GitRepository,
+            C::PanelAction(crate::panel_actions::Action::GitRepositoryOpen),
         ),
         def(
             "file.save",
@@ -1871,6 +1868,7 @@ fn build() -> Vec<ActionDef> {
         ("git.merge-stage-deletion", ("削除を採用してStage…", "Accept Deletion and Stage…"), A::GitMergeDelete),
         ("git.merge-continue", ("Mergeを続行", "Continue Merge"), A::GitMergeContinue),
         ("git.merge-abort", ("Mergeを中止…", "Abort Merge…"), A::GitMergeAbort),
+        ("git.merge-back", ("リポジトリに戻る", "Back to Repository"), A::GitMergeBack),
         ("comparison.previous", ("前の差分", "Previous Difference"), A::DiffPrevious),
         ("comparison.next", ("次の差分", "Next Difference"), A::DiffNext),
         ("comparison.close", ("比較を終える", "End Comparison"), A::DiffClose),
@@ -1892,7 +1890,8 @@ fn build() -> Vec<ActionDef> {
             let category = match action {
                 A::WorkspaceClone | A::GitFetch | A::GitPull | A::GitPush | A::GitSync
                 | A::GitCancel | A::GitCommit | A::Repositories(_) => Git,
-                action if action.available_in_git_overlay() => Git,
+                A::GitRepo(_) | A::GitWorktree(_) | A::GitMergeBack => Git,
+                action if action.is_merge_resolution() => Git,
                 _ => Surface,
             };
             def(id, title, action.description(), "", category, C::PanelAction(action))

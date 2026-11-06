@@ -57,6 +57,7 @@ struct Snapshot {
 
 /// 裏で走っている操作。
 struct Job {
+    id: u64,
     done: Receiver<Result<String, GitError>>,
     cancel: Cancel,
     root: PathBuf,
@@ -305,6 +306,10 @@ pub(crate) fn chosen_folder() -> Option<PathBuf> {
     PANE.with(|pane| pane.borrow().chosen.clone())
 }
 
+pub(crate) fn job_id() -> Option<u64> {
+    PANE.with(|pane| pane.borrow().job.as_ref().map(|job| job.id))
+}
+
 pub(crate) fn merge_snapshot() -> Option<(PathBuf, git::MergeState)> {
     PANE.with(|pane| {
         let pane = pane.borrow();
@@ -320,27 +325,32 @@ fn root_of(pane: &Pane) -> Option<PathBuf> {
     snapshot.root.clone()
 }
 
+fn preferred_folder(window: &AppWindow, live: &Live, folders: &[PathBuf]) -> Option<PathBuf> {
+    let chosen = chosen_folder();
+    if let Some(chosen) = chosen.filter(|chosen| folders.iter().any(|folder| same_path(folder, chosen))) {
+        return Some(chosen);
+    }
+    let active = live.active(window);
+    let file = active.file.borrow();
+    file.path()
+        .and_then(|path| folders.iter().find(|folder| inside(path, folder)))
+        .or(folders.first())
+        .cloned()
+}
+
+/// The action captures the same registered folder Git Changes would select.
+pub(crate) fn repository_folder(window: &AppWindow, live: &Live) -> Option<PathBuf> {
+    preferred_folder(window, live, &workspace_folders(live))
+}
+
 /// 面を開いたとき・Workspace が替わったとき（`publish_left`）。
 pub fn publish(window: &AppWindow, live: &Live) {
     let folders = workspace_folders(live);
-    let active = live
-        .active(window)
-        .file
-        .borrow()
-        .path()
-        .map(Path::to_path_buf);
+    let selected = preferred_folder(window, live, &folders);
     PANE.with(|pane| {
         let mut pane = pane.borrow_mut();
-        let kept = pane
-            .chosen
-            .as_ref()
-            .is_some_and(|chosen| folders.iter().any(|f| key(f) == key(chosen)));
-        if !kept {
-            pane.chosen = active
-                .as_ref()
-                .and_then(|path| folders.iter().find(|f| inside(path, f)))
-                .or(folders.first())
-                .cloned();
+        if pane.chosen != selected {
+            pane.chosen = selected;
             pane.snapshot = None;
             pane.error = None;
         }
@@ -358,31 +368,30 @@ pub fn refresh_soon(window: &AppWindow, live: &Live) {
     crate::git_repo_ui::refresh(window, live);
 }
 
-/// Git Repository の画面が使うリポジトリ：Git Changes で選んでいるもの（RFN01-67 PR 2a）。
-/// まだ選んでいなければ、Git Changes を開いたときと同じ決まりで選ぶ。
-pub(crate) fn chosen_root(window: &AppWindow, live: &Live) -> Result<PathBuf, String> {
-    let chosen = PANE.with(|pane| pane.borrow().chosen.clone());
-    if chosen.is_none() {
-        publish(window, live);
-    }
-    if let Some(root) = PANE.with(|pane| root_of(&pane.borrow())) {
-        return Ok(root);
-    }
-    let Some(folder) = PANE.with(|pane| pane.borrow().chosen.clone()) else {
+/// Resolve the captured folder and synchronize Git Changes with the graph.
+pub(crate) fn prepare_repository(window: &AppWindow, live: &Live, folder: Option<&Path>) -> Result<PathBuf, String> {
+    let Some(folder) = folder else {
         return Err(say!(
             "Workspaceを開くと、その登録フォルダのGitを操作できます",
             "Open a Workspace to use Git with its folders"
         ));
     };
-    match git::repository_root(&folder) {
-        Ok(Some(root)) => Ok(root),
-        Ok(None) => Err(say!(
+    let folders = workspace_folders(live);
+    if !folders.iter().any(|registered| same_path(registered, folder)) {
+        return Err(pick("操作対象が変わりました。選び直してください", "The target changed. Please choose again").into());
+    }
+    let root = match git::repository_root(folder) {
+        Ok(Some(root)) => root,
+        Ok(None) => return Err(say!(
             "{}はGitで管理されていません",
             "{} is not a Git repository",
             folder.display()
         )),
-        Err(error) => Err(error.to_string()),
-    }
+        Err(error) => return Err(error.to_string()),
+    };
+    PANE.with(|pane| pane.borrow_mut().folders = folders);
+    choose_folder(window, live, folder.to_path_buf());
+    Ok(root)
 }
 
 /// Git Repository の画面から操作を頼む（確認・未保存の確かめは同じ道）。
@@ -864,6 +873,7 @@ fn start(
         }
         pane.generation += 1;
         pane.job = Some(Job {
+            id: pane.generation,
             done,
             cancel: cancel.clone(),
             root: root.clone(),
@@ -1838,13 +1848,7 @@ fn choose_folder(window: &AppWindow, live: &Live, folder: PathBuf) {
 }
 
 pub(crate) fn select_registered_folder(window: &AppWindow, live: &Live, registered: &Path) {
-    let folders = workspace_folders(live);
-    let Some(folder) = folders.iter().find(|folder| same_path(folder, registered)).cloned() else {
-        return;
-    };
-    PANE.with(|pane| pane.borrow_mut().folders = folders);
-    choose_folder(window, live, folder);
-    crate::git_repo_ui::open(window, live);
+    crate::git_repo_ui::open_folder(window, live, Some(registered));
 }
 
 pub(crate) fn create_worktree(
@@ -2236,14 +2240,6 @@ pub fn wire(window: &AppWindow, live: &Live) {
         index.max(0) as usize
     ));
     on!(on_git_new_branch, |w, l| new_branch(w, l));
-    on!(on_git_open_repository, |w, l| crate::git_repo_ui::open(
-        w, l
-    ));
-    on!(on_git_fetch, |w, l| fetch(w, l));
-    on!(on_git_pull, |w, l| act(w, l, Action::Pull));
-    on!(on_git_push, |w, l| push(w, l));
-    on!(on_git_sync, |w, l| act(w, l, Action::Sync));
-    on!(on_git_commit, |w, l| commit(w, l));
     on!(on_git_stash_all, |w, l| {
         let message = w.get_git_message().to_string();
         act(w, l, Action::StashAll(message))
@@ -2282,7 +2278,6 @@ pub fn wire(window: &AppWindow, live: &Live) {
             amend_toggled(&window, wanted);
         }
     });
-    window.on_git_cancel(cancel);
 }
 
 pub(crate) fn cancel() {
