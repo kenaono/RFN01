@@ -33,6 +33,7 @@ export component TitleMenuBar inherits Rectangle {
     callback palette-step(int);
     callback palette-accepted();
     callback palette-cancelled();
+    callback palette-focus-trace(bool);
     /// 枠の左端と幅。**窓がタイトル行として扱う場所から、この範囲だけを外す**
     /// （`window_chrome`）——外さないと、押してもWindowsが窓のドラッグにしてしまう。
     callback palette-span(length, length);
@@ -40,8 +41,10 @@ export component TitleMenuBar inherits Rectangle {
     out property <length> palette-width: palette-box.width;
     // 「> 」入りで開いたときは、その後ろへ打てるように（選んでしまうと打った字で消える）。
     changed palette-focus-generation => {
+        root.palette-focus-trace(false);
         if root.palette-text == "" { palette-field.take-focus(); }
         else { palette-field.take-focus-at-end(); }
+        root.palette-focus-trace(true);
     }
     // Windows標準のキャプションボタンに合わせる。ホバーは薄い灰、閉じるだけ
     // 赤で記号が白へ変わる。押下はその一段暗い色。**`blocked`では止めない**——

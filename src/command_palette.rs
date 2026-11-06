@@ -88,6 +88,14 @@ enum Shown {
     SettingGroup(crate::settings_items::Group),
 }
 
+// Keep only state and phase markers here. A palette can contain unpublished
+// text and paths, and recording them is unnecessary for crash diagnosis.
+fn trace(live: &Live, category: &str, fields: &str) {
+    if let Ok(mut cache) = live.cache.try_borrow_mut() {
+        cache.log_diag(category, fields);
+    }
+}
+
 pub fn install(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
     let opened = live.clone();
@@ -118,16 +126,39 @@ pub fn install(window: &AppWindow, live: &Live) {
         }
     });
     let weak = window.as_weak();
+    let cancelled = live.clone();
     window.on_palette_cancelled(move || {
         if let Some(window) = weak.upgrade() {
+            trace(&cancelled, "palette", "stage=cancel");
             close(&window);
         }
+    });
+    let focus = live.clone();
+    window.on_palette_focus_trace(move |returned| {
+        trace(
+            &focus,
+            "palette",
+            if returned { "stage=field-focus-returned" } else { "stage=field-focus-begin" },
+        );
     });
 }
 
 /// Open the palette: for operations when `commands`, for files otherwise. A
 /// palette already open switches to what was asked for.
 pub fn open(window: &AppWindow, live: &Live, commands: bool) {
+    trace(
+        live,
+        "palette",
+        &format!(
+            "stage=open-begin mode={} pane={} panes={} left_open={} left_tab={} already_open={}",
+            if commands { "commands" } else { "files" },
+            window.get_focused_pane(),
+            PaneId::count(window),
+            window.get_tree_open(),
+            window.get_left_tab(),
+            window.get_palette_open(),
+        ),
+    );
     if window.get_title_menu_visible() {
         window.invoke_title_menu_dismissed();
     }
@@ -153,7 +184,16 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
     let text = if commands { "> " } else { "" };
     window.set_palette_text(text.into());
     window.set_palette_open(true);
+    prepare_open(window, live, text);
+}
+
+fn prepare_open(window: &AppWindow, live: &Live, text: &str) {
+    trace(live, "palette", "stage=initial-rows-begin");
     refilter(window, live, text);
+    trace(live, "palette", &format!(
+        "stage=initial-rows-published rows={}", window.get_palette_rows().row_count()
+    ));
+    trace(live, "palette", "stage=focus-request");
     window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
 }
 
@@ -170,6 +210,7 @@ pub(crate) fn open_list(window: &AppWindow, live: &Live, list: List) {
 }
 
 fn open_list_for(window: &AppWindow, live: &Live, pane: PaneId, list: List) {
+    trace(live, "palette", "stage=open-begin mode=list");
     if window.get_title_menu_visible() {
         window.invoke_title_menu_dismissed();
     }
@@ -186,15 +227,16 @@ fn open_list_for(window: &AppWindow, live: &Live, pane: PaneId, list: List) {
     });
     window.set_palette_text("".into());
     window.set_palette_open(true);
-    refilter(window, live, "");
-    window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
+    prepare_open(window, live, "");
     // **Asked again after the text has taken the keyboard back**: chosen from
     // the palette itself ("> Insert › Template…"), the palette that closed
     // has just sent the keyboard to the text, and that lands after this.
     let weak = window.as_weak();
+    let live = live.clone();
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         if let Some(window) = weak.upgrade() {
             if window.get_palette_open() {
+                trace(&live, "palette", "stage=focus-request retry=true");
                 window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
             }
         }
@@ -241,6 +283,7 @@ fn setting_row(titles: &(String, String), key: &str) -> PaletteRow {
 }
 
 fn refilter(window: &AppWindow, live: &Live, text: &str) {
+    trace(live, "palette.detail", "stage=filter-begin");
     let rows = PALETTE.with(|held| {
         let mut held = held.borrow_mut();
         let palette = held.as_mut()?;
@@ -345,9 +388,11 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
     } else {
         ""
     };
+    trace(live, "palette.detail", &format!("stage=publish-begin rows={}", rows.len()));
     window.set_palette_note(note.into());
     window.set_palette_selected(0);
     window.set_palette_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+    trace(live, "palette.detail", "stage=publish-returned");
 }
 
 fn accept(window: &AppWindow, live: &Live) {
@@ -1013,6 +1058,43 @@ fn two_lines(shown: &str, other: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_diagnostics_record_stages_without_the_query() {
+        let (harness, _) = crate::saving::Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let window = &harness.window;
+        let live = &harness.live;
+        let directory = app_data::app_directory().unwrap().join("palette-diagnostics");
+        let config = crate::diag::Config::from_args(["--diagnostics=ui".into()]).unwrap();
+        let path = {
+            let mut cache = live.cache.borrow_mut();
+            cache.diag.start_in(&directory, config);
+            cache.diag.path().unwrap().to_owned()
+        };
+        window.set_custom_title(true);
+        install(window, live);
+        window.show().unwrap();
+        window.invoke_palette_requested(true);
+        slint::platform::update_timers_and_animations();
+        let query = "PRIVATE_PALETTE_QUERY";
+        window.invoke_palette_edited(format!("> {query}").into());
+        let written = std::fs::read_to_string(path).unwrap();
+        close(window);
+        let mut after = written.as_str();
+        for stage in [
+            "stage=open-begin",
+            "stage=initial-rows-begin",
+            "stage=initial-rows-published",
+            "stage=focus-request",
+            "stage=field-focus-begin",
+            "stage=field-focus-returned",
+            "stage=filter-begin",
+            "stage=publish-returned",
+        ] {
+            after = after.split_once(stage).unwrap_or_else(|| panic!("missing {stage}: {written}")).1;
+        }
+        assert!(!written.contains(query));
+    }
 
     /// RFN01-87: the letters in order, together counting for more.
     #[test]

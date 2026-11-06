@@ -105,6 +105,11 @@ impl Config {
     }
 
     fn enabled(&self, category: &str) -> bool {
+        // A process abort can bypass the panic hook. Keep the short palette
+        // lifecycle trace in normal mode, with per-edit detail under UI.
+        if category == "palette" {
+            return true;
+        }
         let base = category.split('.').next().unwrap_or(category);
         if matches!(
             base,
@@ -680,6 +685,7 @@ mod tests {
         log.start_in(&dir.0, Config::default());
         for category in [
             "session", "file", "work", "external", "encoding", "error", "print", "spec",
+            "palette",
         ] {
             log.write(category, "important");
         }
@@ -691,11 +697,12 @@ mod tests {
             "edit",
             "find",
             "tab",
+            "palette.detail",
         ] {
             log.write(category, "detail-must-not-appear");
         }
         let written = fs::read_to_string(log.path().unwrap()).unwrap();
-        assert_eq!(written.lines().count(), 8);
+        assert_eq!(written.lines().count(), 9);
         assert!(!written.contains("detail-must-not-appear"));
         assert!(log.performance_log("must not create a file").file.is_none());
         assert!(

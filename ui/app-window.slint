@@ -240,6 +240,7 @@ export component AppWindow inherits Window {
     in-out property <int> palette-focus-generation: 0;
     /// `true`は操作を探す（「>」入り）、`false`はファイル名。
     callback palette-requested(bool);
+    callback palette-focus-trace(bool);
     callback palette-edited(string);
     callback palette-accepted();
     /// RFN01-107: 行の鍵の印。その行の操作でKeysを絞って開く。
@@ -1764,6 +1765,7 @@ export component AppWindow inherits Window {
             : root.work-folder != "" ? root.work-folder : "RFN Edit";
         palette-text <=> root.palette-text;
         palette-focus-generation: root.palette-focus-generation;
+        palette-focus-trace(returned) => { root.palette-focus-trace(returned); }
         palette-requested => { root.palette-requested(false); }
         palette-edited(text) => { root.palette-edited(text); }
         palette-step(delta) => {
