@@ -87,6 +87,8 @@ mod open_document;
 mod pane_layout;
 mod panel_actions;
 mod panel_source;
+#[cfg(test)]
+mod performance_tests;
 mod pictures;
 #[cfg(test)]
 mod print_tests;

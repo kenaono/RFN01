@@ -37,6 +37,7 @@ cargo test --locked --offline read_aloud_tests:: -- --ignored --test-threads=1
 
 ## Windows の実画面で確認すること
 
+- [Windows 性能テスト](Windows性能テスト.md)で、大きな Markdown、長い段落、Terminal 描画を共通の Release 手順で計測する。自動計測と Computer Use での実画面シナリオがある。
 - [Windows実画面のシナリオ](RFN01-116_Windows実画面.md)で、Windowsのファイルダイアログ、IME、印刷ダイアログとの境界を確認する。
 - [ファイルツリーのフォーカス](RFN01-115_ファイルツリーのフォーカス.md)で、連続したキー操作と確認画面からの復帰を確認する。
 
