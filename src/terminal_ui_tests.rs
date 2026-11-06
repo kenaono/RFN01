@@ -713,6 +713,97 @@ fn the_palette_keys_are_the_windows_in_a_shell() {
     assert!(!key("r", false), "and bash's Ctrl+R");
 }
 
+fn add_test_terminal(
+    h: &Harness,
+    number: u32,
+    final_output: Option<&[u8]>,
+) -> (Rc<()>, Rc<RefCell<TerminalSession>>) {
+    let mut session = TerminalSession::waiting(
+        TerminalShell {
+            id: 0,
+            name: "QA".into(),
+            command: "cmd.exe".into(),
+            directory: String::new(),
+        },
+        None,
+        Vec::new(),
+        String::new(),
+    );
+    if let Some(output) = final_output {
+        session.finish_output_for_test(output);
+    }
+    let session = Rc::new(RefCell::new(session));
+    let id = PaneId::FIRST;
+    let tab = PaneTab {
+        terminal: Some(session.clone()),
+        ..PaneTab::showing(
+            &h.window,
+            id,
+            OpenDocument::untitled(number, h.window.as_weak()),
+        )
+    };
+    let identity = tab.identity.clone();
+    add_tab(&h.window, &h.live, id, tab);
+    (identity, session)
+}
+
+#[test]
+fn ctrl_w_after_logout_closes_only_the_terminal_that_received_it() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    let document = h.live.tabs.borrow().of(id).tabs[0].identity.clone();
+    for (offset, text) in ["w", "W", "\u{17}"].into_iter().enumerate() {
+        let (terminal, session) = add_test_terminal(&h, 2 + offset as u32, Some(b"logout\r\n"));
+        assert!(session.borrow().finished());
+        assert!(session.borrow().screen().retained_text().contains("logout"));
+        send_terminal_key(
+            &h.window,
+            &h.live,
+            id,
+            TerminalSpot::Front,
+            text,
+            0,
+            true,
+            false,
+            false,
+        );
+        assert!(Rc::ptr_eq(
+            &h.live.tabs.borrow().of(id).current().unwrap().identity,
+            &terminal
+        ));
+        switch_to_tab(&h.window, &h.live, id, 0);
+        slint::platform::update_timers_and_animations();
+        let tabs = h.live.tabs.borrow();
+        assert_eq!(tabs.of(id).tabs.len(), 1);
+        assert!(Rc::ptr_eq(&tabs.of(id).tabs[0].identity, &document));
+        assert!(!h.window.get_question_open());
+    }
+}
+
+#[test]
+fn ctrl_w_still_sends_delete_word_to_a_shell_that_has_not_exited() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let (terminal, session) = add_test_terminal(&h, 2, None);
+    let input = session.borrow_mut().input_for_test();
+    let id = PaneId::FIRST;
+    send_terminal_key(
+        &h.window,
+        &h.live,
+        id,
+        TerminalSpot::Front,
+        "w",
+        0,
+        true,
+        false,
+        false,
+    );
+    assert_eq!(input.try_recv().unwrap(), [0x17]);
+    assert!(Rc::ptr_eq(
+        &h.live.tabs.borrow().of(id).current().unwrap().identity,
+        &terminal
+    ));
+}
+
 /// RFN01-97: the shells along a document's foot come back as that strip's
 /// Terminal Panel tabs, in order, with the one in front in front — and are
 /// written down again the same way. **No shell is started**: they wait.

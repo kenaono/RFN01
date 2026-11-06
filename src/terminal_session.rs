@@ -316,6 +316,23 @@ impl TerminalSession {
         self.idle.is_some() && !self.finished
     }
 
+    #[cfg(test)]
+    pub(crate) fn finish_output_for_test(&mut self, output: &[u8]) {
+        self.idle
+            .take()
+            .expect("a waiting session owns its output sender")
+            .send(output.to_vec())
+            .unwrap();
+        self.drain();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_for_test(&mut self) -> Receiver<Vec<u8>> {
+        let (input, queued) = sync_channel(1);
+        self.input = Some(input);
+        queued
+    }
+
     pub fn needs_stop_confirmation(&mut self) -> bool {
         self.drain();
         !self.finished() && !self.is_waiting() && !self.terminal.shell_at_prompt()

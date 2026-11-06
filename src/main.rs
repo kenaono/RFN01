@@ -20698,6 +20698,19 @@ fn send_terminal_key(
         );
         return;
     };
+    if spot == TerminalSpot::Front
+        && control
+        && !alt
+        && !shift
+        && matches!(text, "w" | "W" | "\u{17}")
+    {
+        let mut session = session.borrow_mut();
+        session.drain();
+        if session.finished() {
+            terminal_workflow::request_close(window, live, id, spot);
+            return;
+        }
+    }
     // 要件 11.2. **`Ctrl+Shift+C`, because `Ctrl+C` is the interrupt** — the one
     // chord a shell cannot be asked to give up. The pair is what every terminal
     // uses, and pasting comes back the other way: `Ctrl+V` is left to the pane's

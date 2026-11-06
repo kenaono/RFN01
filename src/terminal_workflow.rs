@@ -253,9 +253,8 @@ pub(crate) fn ask_close(window: &AppWindow, live: &Live, identity: Rc<()>) {
     );
 }
 
-pub(crate) fn close(window: &AppWindow, live: &Live, identity: Rc<()>, save: bool) {
-    let target = live
-        .tabs
+fn tab_at_identity(live: &Live, identity: &Rc<()>) -> Option<(PaneId, usize)> {
+    live.tabs
         .borrow()
         .panes
         .iter()
@@ -264,19 +263,48 @@ pub(crate) fn close(window: &AppWindow, live: &Live, identity: Rc<()>, save: boo
             strip
                 .tabs
                 .iter()
-                .position(|t| Rc::ptr_eq(&t.identity, &identity))
-                .map(|index| {
-                    (
-                        PaneId::from_index(pane as i32),
-                        index,
-                        strip.tabs[index].below.entries.clone(),
-                    )
-                })
-        });
-    let Some((pane, index, entries)) = target else {
+                .position(|t| Rc::ptr_eq(&t.identity, identity))
+                .map(|index| (PaneId::from_index(pane as i32), index))
+        })
+}
+
+/// Close on the next tick, after the key handler has finished with the tab row.
+pub(crate) fn request_close(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSpot) {
+    let identity = match spot {
+        TerminalSpot::Front => {
+            let tabs = live.tabs.borrow();
+            let Some(tab) = tabs.of(id).current().filter(|tab| tab.terminal.is_some()) else {
+                return;
+            };
+            Some(tab.identity.clone())
+        }
+        TerminalSpot::Below => None,
+    };
+    let weak = window.as_weak();
+    let live = live.clone();
+    Timer::single_shot(Duration::ZERO, move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        if let Some(identity) = identity {
+            if let Some((pane, index)) = tab_at_identity(&live, &identity) {
+                close_tab(&window, &live, pane, index);
+            }
+        } else {
+            terminal_panels::action(&window, &live, id, 2, 0);
+        }
+    });
+}
+
+pub(crate) fn close(window: &AppWindow, live: &Live, identity: Rc<()>, save: bool) {
+    let Some((pane, index)) = tab_at_identity(live, &identity) else {
         return;
     };
     if save {
+        let entries = live.tabs.borrow().of(pane).tabs[index]
+            .below
+            .entries
+            .clone();
         for entry in &entries {
             let dirty = panel_needs_save(&entry.borrow());
             if dirty && !terminal_panels::save_for_close(window, live, entry) {
@@ -480,20 +508,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
         // would: the shell's own tab, or the strip's Terminal Panel tab. **On
         // the next tick**, like every tab command: the strip is republished.
         23 => {
-            let weak = window.as_weak();
-            let live = live.clone();
-            Timer::single_shot(Duration::ZERO, move || {
-                let Some(window) = weak.upgrade() else {
-                    return;
-                };
-                match spot {
-                    TerminalSpot::Front => {
-                        let index = live.tabs.borrow().of(id).active;
-                        close_tab(&window, &live, id, index);
-                    }
-                    TerminalSpot::Below => terminal_panels::action(&window, &live, id, 2, 0),
-                }
-            });
+            request_close(window, live, id, spot);
             return;
         }
         // RFN01-96: Copy Last Output.
