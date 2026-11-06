@@ -1022,6 +1022,8 @@ export component AppWindow inherits Window {
     /// The shells a terminal tab can be opened on (追加要件 Terminal). **Named
     /// by Rust**, because the list is what can actually be started.
     in property <[string]> terminal-shells;
+    in property <[string]> wsl-distributions;
+    in property <bool> wsl-discovery-complete;
     /// 追加要件 2026-09-08: 設定ファイルが並べているシェルを、書かれたままの
     /// 形で（`名前 | コマンド行`）。
     ///
@@ -4356,7 +4358,8 @@ export component AppWindow inherits Window {
                                             show-terminal-style: root.shows-setting("style.terminal", -1);
                                             show-editor-panel-style: root.shows-setting("style.editor-panel", -1);
                                             shell-profile-names : root.shell-profile-names;
-                                            shell-profile-index : root.shell-profile-index;
+                                            wsl-distributions: root.wsl-distributions;
+                                            shell-profile-index: root.shell-profile-index;
                                             shell-profile-default <=> root.shell-profile-default;
                                             shell-profile-name <=> root.shell-profile-name;
                                             shell-profile-executable <=> root.shell-profile-executable;

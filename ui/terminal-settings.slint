@@ -1,7 +1,7 @@
 import { CheckBox, ComboBox } from "std-widgets.slint";
 import { PanelStyleEditor } from "panel-style-editor.slint";
 import { PanelStyle } from "editor-pane.slint";
-import { Field, TextButton } from "controls.slint";
+import { Field, MenuRow, TextButton } from "controls.slint";
 import { Tok } from "tokens.slint";
 
 export component TerminalSettings inherits VerticalLayout {
@@ -14,6 +14,7 @@ export component TerminalSettings inherits VerticalLayout {
     in property <bool> show-terminal-style;
     in property <bool> show-editor-panel-style;
     in property <[string]> shell-profile-names;
+    in property <[string]> wsl-distributions;
     in property <int> shell-profile-index;
     in-out property <bool> shell-profile-default;
     in-out property <string> shell-profile-name;
@@ -37,17 +38,39 @@ export component TerminalSettings inherits VerticalLayout {
     spacing: 8px; alignment: start; vertical-stretch: 0;
     if root.show-profiles: VerticalLayout {
         spacing: 8px;
-        ComboBox {
-            width: 260px; height: 30px; horizontal-stretch: 0; vertical-stretch: 0;
-            model: root.shell-profile-names;
-            current-index: root.shell-profile-index;
-            selected(value) => { root.shell-profile-action(0, self.current-index); }
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle {
+                background: Tok.paper;
+                border-color: Tok.rule;
+                border-width: 1px;
+                border-radius: 6px;
+
+                VerticalLayout {
+                    padding: 2px;
+                    for name[index] in root.shell-profile-names: MenuRow {
+                        title: name;
+                        checked: index == root.shell-profile-index;
+                        activated => { root.shell-profile-action(0, index); }
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: start;
+                spacing: 2px;
+                TextButton { title: "↑"; enabled: root.shell-profile-index > 0; clicked => { root.shell-profile-action(4, 0); } }
+                TextButton { title: "↓"; enabled: root.shell-profile-index >= 0 && root.shell-profile-index < root.shell-profile-names.length - 1; clicked => { root.shell-profile-action(5, 0); } }
+            }
+        }
+        if root.shell-profile-index < 0: Text {
+            text: @tr("New profile. Apply to save it.");
+            color: Tok.ink-muted;
         }
         HorizontalLayout {
             Text { text: @tr("Profile name"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; }
             spacing: 8px; height: 30px; vertical-stretch: 0;
             Field { width: 260px; horizontal-stretch: 0; placeholder: @tr("Name"); text <=> root.shell-profile-name; }
-            CheckBox { text: @tr("Default"); checked <=> root.shell-profile-default; toggled => { root.shell-profile-action(7, 0); } }
+            CheckBox { text: @tr("Default"); enabled: root.shell-profile-index >= 0; checked <=> root.shell-profile-default; toggled => { root.shell-profile-action(7, 0); } }
         }
         HorizontalLayout { Text { text: @tr("Executable"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Executable"); text <=> root.shell-profile-executable; } }
         HorizontalLayout { Text { text: @tr("Arguments"); color: Tok.ink-faint; width: 100px; vertical-alignment: center; } Field { placeholder: @tr("Arguments"); text <=> root.shell-profile-arguments; } }
@@ -55,10 +78,21 @@ export component TerminalSettings inherits VerticalLayout {
         HorizontalLayout {
             TextButton { title: @tr("Apply"); clicked => { root.shell-profile-action(1, 0); } }
             TextButton { title: @tr("Add"); clicked => { root.shell-profile-action(2, 0); } }
-            TextButton { title: @tr("Duplicate"); clicked => { root.shell-profile-action(3, 0); } }
-            TextButton { title: "↑"; clicked => { root.shell-profile-action(4, 0); } }
-            TextButton { title: "↓"; clicked => { root.shell-profile-action(5, 0); } }
-            TextButton { title: @tr("Remove"); clicked => { root.shell-profile-action(6, 0); } }
+            TextButton { title: @tr("Duplicate"); enabled: root.shell-profile-index >= 0; clicked => { root.shell-profile-action(3, 0); } }
+            if root.shell-profile-index >= 0: TextButton { title: @tr("Remove"); enabled: root.shell-profile-names.length > 1; clicked => { root.shell-profile-action(6, 0); } }
+            if root.shell-profile-index < 0: TextButton { title: @tr("Cancel"); clicked => { root.shell-profile-action(0, 0); } }
+        }
+        if root.wsl-distributions.length > 0: HorizontalLayout {
+            spacing: 8px;
+            distribution := ComboBox {
+                width: 260px; height: 30px; horizontal-stretch: 0;
+                model: root.wsl-distributions;
+                current-index: 0;
+            }
+            TextButton {
+                title: @tr("Add WSL profile");
+                clicked => { root.shell-profile-action(9, distribution.current-index); }
+            }
         }
     }
 

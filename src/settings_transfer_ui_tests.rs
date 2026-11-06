@@ -294,13 +294,13 @@ fn applying_typed_arguments_changes_the_profile() {
     let last = configured_shells(window).len() - 1;
     window.invoke_shell_profile_action(0, last as i32);
     draw();
-    // 引数の欄（PRESETの行の下、4つ目の欄）。
-    click(500.0, 276.0);
+    // 登録済みプロファイルの一覧の下にある引数欄。
+    click(500.0, 334.0);
     key(Key::End.into());
     for c in [" ", "-", "X"] {
         key(c.into());
     }
-    click(264.0, 348.0);
+    click(264.0, 406.0);
     assert!(
         configured_shells(window)[last].command.ends_with(" -X"),
         "{:?}",

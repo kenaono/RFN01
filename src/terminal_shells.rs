@@ -1,6 +1,72 @@
 //! Shell profiles: editable launch settings; existing processes are unchanged.
 use super::*;
 
+/// `--quiet` emits one registered name per line. Some WSL versions use
+/// UTF-16LE when stdout is redirected, even without a BOM.
+fn distribution_names(bytes: &[u8]) -> Vec<String> {
+    let decoded = if bytes.starts_with(&[0xff, 0xfe]) || bytes.contains(&0) {
+        let bytes = bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(bytes);
+        String::from_utf16_lossy(
+            &bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    decoded
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .map(str::trim)
+        .filter(|name| {
+            !name.is_empty() && !name.contains(['"', '\0']) && !name.contains(char::is_whitespace)
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+fn installed_distributions() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    if !on_path("wsl.exe") {
+        return Vec::new();
+    }
+    Command::new("wsl.exe")
+        .args(["--list", "--quiet"])
+        .creation_flags(0x0800_0000)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map_or_else(Vec::new, |output| distribution_names(&output.stdout))
+}
+
+pub(crate) fn discover_distributions(window: &AppWindow) {
+    let weak = window.as_weak();
+    std::thread::spawn(move || {
+        let names = installed_distributions();
+        let _ = weak.upgrade_in_event_loop(move |window| {
+            let previous = shell_at(&window, window.get_default_shell()).name;
+            window.set_wsl_distributions(ModelRc::new(VecModel::from(
+                names
+                    .into_iter()
+                    .map(SharedString::from)
+                    .collect::<Vec<_>>(),
+            )));
+            window.set_wsl_discovery_complete(true);
+            publish_shells(&window);
+            let default = offered_shells(&window)
+                .iter()
+                .position(|shell| shell.name == previous)
+                .unwrap_or_default();
+            window.set_default_shell(default as i32);
+        });
+    });
+}
+
 pub(crate) fn command_parts(command: &str) -> (&str, &str) {
     let command = command.trim();
     if let Some(rest) = command.strip_prefix('"') {
@@ -57,16 +123,26 @@ pub(crate) fn wsl_distribution(command: &str) -> Option<Option<String>> {
     if !wsl {
         return None;
     }
-    let mut words = args.split_whitespace();
-    while let Some(word) = words.next() {
+    Some(wsl_distribution_value(args).map(|value| command_parts(value).0.to_owned()))
+}
+
+fn wsl_distribution_value(args: &str) -> Option<&str> {
+    let mut remaining = args;
+    while !remaining.is_empty() {
+        let (word, rest) = command_parts(remaining);
         if word == "-d" || word == "--distribution" {
-            return Some(words.next().map(|name| name.trim_matches('"').to_owned()));
+            return (!rest.is_empty()).then_some(rest);
         }
-        if word == "--" || word == "-e" || word == "--exec" {
+        if !word.starts_with('-') || matches!(word, "--" | "-e" | "--exec") {
             break;
         }
+        remaining = if matches!(word, "--cd" | "-u" | "--user" | "--shell-type") {
+            command_parts(rest).1
+        } else {
+            rest
+        };
     }
-    Some(None)
+    None
 }
 
 /// RFN01-100: what WSL said a Linux path is, or that it is still being asked.
@@ -197,6 +273,24 @@ pub(crate) fn launch(shell: &TerminalShell) -> (String, Option<PathBuf>) {
     let cwd = shell.directory.trim();
     let (program, args) = command_parts(&shell.command);
     let wsl = is_wsl(shell);
+    // WSL parses this option itself and keeps the quotes as part of the name.
+    // Repair profiles saved by the first RFN01-132 build at launch time.
+    let corrected = wsl
+        .then(|| wsl_distribution_value(args))
+        .flatten()
+        .and_then(|value| {
+            let (name, tail) = value.strip_prefix('"')?.split_once('"')?;
+            if name.is_empty()
+                || name.starts_with('-')
+                || name.contains(char::is_whitespace)
+                || (!tail.is_empty() && !tail.starts_with(char::is_whitespace))
+            {
+                return None;
+            }
+            let prefix = &args[..args.len() - value.len()];
+            Some(format!("{prefix}{name}{tail}"))
+        });
+    let args = corrected.as_deref().unwrap_or(args);
     // WSL inherits a Windows working directory through CreateProcess. Linux
     // paths are passed to WSL itself, never used as Windows currentDirectory.
     if wsl && (cwd.starts_with('/') || cwd == "~") {
@@ -204,7 +298,11 @@ pub(crate) fn launch(shell: &TerminalShell) -> (String, Option<PathBuf>) {
         (format!("\"{program}\" --cd \"{path}\" {args}"), None)
     } else {
         (
-            powershell_launch(program, args).unwrap_or_else(|| shell.command.clone()),
+            if corrected.is_some() {
+                format!("\"{program}\" {args}")
+            } else {
+                powershell_launch(program, args).unwrap_or_else(|| shell.command.clone())
+            },
             (!cwd.is_empty()).then(|| PathBuf::from(cwd)),
         )
     }
@@ -248,14 +346,17 @@ pub(crate) fn wsl_shell_environment(shell: &TerminalShell) -> Option<Vec<u16>> {
     if !is_wsl(shell) {
         return None;
     }
-    let (_, args) = command_parts(&shell.command);
-    let mut words = args.split_whitespace();
-    while let Some(option) = words.next() {
+    let (_, mut args) = command_parts(&shell.command);
+    while !args.is_empty() {
+        let (option, rest) = command_parts(args);
+        let (value, rest) = command_parts(rest);
         if !matches!(option, "-d" | "--distribution" | "-u" | "--user")
-            || !words.next().is_some_and(|value| !value.starts_with('-'))
+            || value.is_empty()
+            || value.starts_with('-')
         {
             return None;
         }
+        args = rest;
     }
     let mut variables: Vec<_> = std::env::vars_os().collect();
     let named = |key: &OsString, name: &str| key.to_string_lossy().eq_ignore_ascii_case(name);
@@ -326,18 +427,30 @@ fn publish(window: &AppWindow, index: usize) {
     window.set_shell_profile_index(index as i32);
     window.set_shell_profile_default(shells.get(index).is_some_and(|s| s.id == default_id));
     if let Some(shell) = shells.get(index) {
-        let (exe, args) = command_parts(&shell.command);
-        window.set_shell_profile_name(shell.name.clone().into());
-        window.set_shell_profile_executable(exe.into());
-        window.set_shell_profile_arguments(args.into());
-        window.set_shell_profile_directory(shell.directory.clone().into());
+        fill_profile(window, &shell.name, &shell.command, &shell.directory);
     }
+}
+
+fn fill_profile(window: &AppWindow, name: &str, command: &str, directory: &str) {
+    let (exe, args) = command_parts(command);
+    window.set_shell_profile_name(name.into());
+    window.set_shell_profile_executable(exe.into());
+    window.set_shell_profile_arguments(args.into());
+    window.set_shell_profile_directory(directory.into());
+}
+
+fn draft_profile(window: &AppWindow, name: &str, command: &str, directory: &str) {
+    window.set_shell_profile_index(-1);
+    window.set_shell_profile_default(false);
+    fill_profile(window, name, command, directory);
 }
 
 pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
     let mut shells = configured_shells(window);
-    let mut index = window.get_shell_profile_index().max(0) as usize;
-    index = index.min(shells.len().saturating_sub(1));
+    let mut index = usize::try_from(window.get_shell_profile_index())
+        .unwrap_or(shells.len())
+        .min(shells.len());
+    let editing_saved = index < shells.len();
     let old_default = shell_at(window, window.get_default_shell()).id;
     // 書き手の報告 2026-09-24（引数を変えてもApplyできない）：押された操作と、どのプロファイルに
     // 効いたかを残す。手元の試験では再現しなかったので、実際の実行の記録で確かめる。
@@ -388,30 +501,38 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
                 window.tell(pick("名前と実行ファイルを確認してください。同じ名前や改行は使えません", "Check the name and executable; names must be unique and fields cannot contain line breaks").into());
                 return;
             }
-            shells[index] = TerminalShell {
-                id: shells[index].id,
+            let profile = TerminalShell {
+                id: shells.get(index).map_or(0, |shell| shell.id),
                 name,
                 command: format!("\"{exe}\" {args}").trim().to_owned(),
                 directory,
             };
+            if editing_saved {
+                shells[index] = profile;
+            } else {
+                shells.push(profile);
+            }
         }
         2 => {
-            shells.push(TerminalShell {
-                id: 0,
-                name: format!("Shell {}", shells.len() + 1),
-                command: "powershell.exe -NoLogo".into(),
-                directory: String::new(),
-            });
-            index = shells.len() - 1;
+            draft_profile(
+                window,
+                &format!("Shell {}", shells.len() + 1),
+                "powershell.exe -NoLogo",
+                "",
+            );
+            return;
         }
-        3 => {
-            let mut copy = shells[index].clone();
-            copy.id = 0;
-            copy.name = format!("{} ({})", copy.name, shells.len() + 1);
-            shells.push(copy);
-            index = shells.len() - 1;
+        3 if editing_saved => {
+            let source = &shells[index];
+            draft_profile(
+                window,
+                &format!("{} ({})", source.name, shells.len() + 1),
+                &source.command,
+                &source.directory,
+            );
+            return;
         }
-        4 if index > 0 => {
+        4 if editing_saved && index > 0 => {
             shells.swap(index, index - 1);
             index -= 1;
         }
@@ -419,11 +540,11 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
             shells.swap(index, index + 1);
             index += 1;
         }
-        6 if shells.len() > 1 => {
+        6 if editing_saved && shells.len() > 1 => {
             shells.remove(index);
             index = index.min(shells.len() - 1);
         }
-        7 => {}
+        7 if editing_saved => {}
         8 => {
             let directory = live
                 .active(window)
@@ -438,6 +559,34 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
                 window
                     .tell(pick("保存済みの文書を選んでください", "Choose a saved document").into());
             }
+            return;
+        }
+        9 => {
+            let Some(distribution) = usize::try_from(at)
+                .ok()
+                .and_then(|at| window.get_wsl_distributions().row_data(at))
+            else {
+                return;
+            };
+            if let Some(existing) = shells.iter().position(|shell| {
+                wsl_distribution(&shell.command)
+                    .flatten()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&distribution))
+            }) {
+                publish(window, existing);
+                return;
+            }
+            let base = format!("WSL ({distribution})");
+            let name = std::iter::once(base.clone())
+                .chain((2..).map(|number| format!("{base} ({number})")))
+                .find(|name| shells.iter().all(|shell| shell.name != *name))
+                .unwrap();
+            draft_profile(
+                window,
+                &name,
+                &format!("wsl.exe --distribution {distribution}"),
+                "",
+            );
             return;
         }
         _ => return,
@@ -480,6 +629,55 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_repairs_a_saved_quoted_wsl_distribution() {
+        let shell = TerminalShell {
+            id: 4,
+            name: "Ubuntu".into(),
+            command: r#"wsl.exe -d "Ubuntu" --exec echo "keep quotes""#.into(),
+            directory: "~".into(),
+        };
+        assert_eq!(
+            launch(&shell),
+            (
+                r#""wsl.exe" --cd "~" -d Ubuntu --exec echo "keep quotes""#.into(),
+                None
+            )
+        );
+        let shell = TerminalShell {
+            command: r#"wsl.exe --exec echo --distribution "Ubuntu""#.into(),
+            directory: String::new(),
+            ..shell
+        };
+        assert_eq!(launch(&shell).0, shell.command);
+    }
+
+    #[test]
+    #[ignore = "starts the installed WSL distributions; run explicitly"]
+    fn launch_starts_each_registered_wsl_distribution_from_saved_profile() {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+
+        let distributions = installed_distributions();
+        assert!(!distributions.is_empty());
+        for distribution in distributions {
+            let shell = TerminalShell {
+                id: 4,
+                name: distribution.clone(),
+                command: format!("wsl.exe --distribution \"{distribution}\" --exec /bin/true"),
+                directory: "~".into(),
+            };
+            let (command, _) = launch(&shell);
+            let (program, args) = command_parts(&command);
+            let output = Command::new(program).raw_arg(args).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{distribution}: {:?}",
+                output.status
+            );
+        }
+    }
 
     /// RFN01-100: which shells are WSL, and which distribution they run.
     #[test]

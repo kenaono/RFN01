@@ -1,6 +1,86 @@
 use super::*;
 
 #[test]
+fn missing_wsl_and_powershell_7_leave_windows_powershell_available() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let directory = app_data::app_directory().unwrap();
+    let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut profiles = TerminalShell::built_in();
+    profiles[0].command = format!("\"{}\"", directory.join("wsl.exe").display());
+    profiles[1].command = format!("\"{}\" -NoLogo", powershell.display());
+    profiles[2].command = format!("\"{}\" -NoLogo", directory.join("pwsh.exe").display());
+    hold_shells(&h.window, &profiles);
+    h.window.set_wsl_discovery_complete(true);
+    h.window.set_default_shell(2);
+
+    publish_shells(&h.window);
+    assert_eq!(offered_shells(&h.window), vec![profiles[1].clone()]);
+    assert_eq!(
+        shell_at(&h.window, h.window.get_default_shell()),
+        profiles[1]
+    );
+    assert_eq!(configured_shells(&h.window), profiles);
+}
+
+#[test]
+fn installed_wsl_distribution_can_be_added_once_as_a_saved_profile() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    h.window
+        .set_wsl_distributions(ModelRc::new(VecModel::from(vec![
+            SharedString::from("Ubuntu-24.04"),
+            SharedString::from("Debian"),
+        ])));
+    let before = configured_shells(&h.window).len();
+    terminal_shells::action(&h.window, &h.live, 9, 0);
+    assert_eq!(h.window.get_shell_profile_index(), -1);
+    assert_eq!(configured_shells(&h.window).len(), before);
+    assert_eq!(
+        h.window.get_shell_profile_arguments(),
+        "--distribution Ubuntu-24.04"
+    );
+    terminal_shells::action(&h.window, &h.live, 1, 0);
+    let profiles = configured_shells(&h.window);
+    let imported = profiles.last().unwrap();
+    assert_eq!(profiles.len(), before + 1);
+    assert_ne!(imported.id, 0);
+    assert_eq!(
+        terminal_shells::command_parts(&imported.command),
+        ("wsl.exe", "--distribution Ubuntu-24.04"),
+    );
+    assert_eq!(
+        terminal_shells::wsl_distribution(&imported.command),
+        Some(Some("Ubuntu-24.04".into()))
+    );
+    terminal_shells::action(&h.window, &h.live, 9, 0);
+    assert_eq!(configured_shells(&h.window), profiles);
+
+    terminal_shells::action(&h.window, &h.live, 6, 0);
+    assert_eq!(h.window.get_shell_profile_index(), (before - 1) as i32);
+    assert_eq!(h.window.get_shell_profile_name(), profiles[before - 1].name);
+
+    terminal_shells::action(&h.window, &h.live, 9, 0);
+    assert_eq!(h.window.get_shell_profile_index(), -1);
+    assert_eq!(configured_shells(&h.window).len(), before);
+    terminal_shells::action(&h.window, &h.live, 1, 0);
+    assert_eq!(h.window.get_shell_profile_index(), before as i32);
+    assert_eq!(h.window.get_shell_profile_name(), "WSL (Ubuntu-24.04)");
+    assert_eq!(
+        h.window.get_shell_profile_names().row_data(before).unwrap(),
+        h.window.get_shell_profile_name(),
+    );
+    terminal_shells::action(&h.window, &h.live, 4, 0);
+    assert_eq!(h.window.get_shell_profile_index(), before as i32 - 1);
+    assert_eq!(
+        h.window
+            .get_shell_profile_names()
+            .row_data(before - 1)
+            .unwrap(),
+        h.window.get_shell_profile_name(),
+    );
+}
+
+#[test]
 fn terminal_close_only_offers_to_save_unsaved_panels() {
     let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
     let id = PaneId::FIRST;

@@ -1197,6 +1197,12 @@ msgstr "削除"
 msgid "Profile name"
 msgstr "プロファイル名"
 
+msgid "Add WSL profile"
+msgstr "WSL プロファイルを追加"
+
+msgid "New profile. Apply to save it."
+msgstr "未登録のプロファイルです。「適用」で登録します。"
+
 msgid "Underline"
 msgstr "下線"
 

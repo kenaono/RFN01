@@ -307,12 +307,25 @@ impl TerminalShell {
 /// of it, because a message the writer can read beats a menu with no rows.
 fn offered_shells(window: &AppWindow) -> Vec<TerminalShell> {
     let configured = configured_shells(window);
-    let found: Vec<TerminalShell> = configured
+    let distributions = window.get_wsl_distributions().iter().map(|name| name.to_string()).collect::<Vec<_>>();
+    let complete = window.get_wsl_discovery_complete();
+    let mut found: Vec<TerminalShell> = configured
         .iter()
-        .filter(|shell| on_path(shell.program()))
+        .filter(|shell| {
+            on_path(shell.program()) && (!complete || match terminal_shells::wsl_distribution(&shell.command) {
+                Some(Some(name)) => distributions.iter().any(|installed| installed.eq_ignore_ascii_case(&name)),
+                Some(None) => !distributions.is_empty(),
+                None => true,
+            })
+        })
         .cloned()
         .collect();
-    if found.is_empty() { configured } else { found }
+    if found.is_empty() && complete {
+        found.extend(TerminalShell::built_in().into_iter().filter(|shell| {
+            !terminal_shells::is_wsl(shell) && on_path(shell.program())
+        }));
+    }
+    if found.is_empty() && !complete { configured } else { found }
 }
 
 /// The whole list the settings file names, whether or not this machine has it.
@@ -369,7 +382,7 @@ fn hold_shells(window: &AppWindow, shells: &[TerminalShell]) {
 /// rather than trusted.
 fn shell_at(window: &AppWindow, index: i32) -> TerminalShell {
     let offered = offered_shells(window);
-    let first = || TerminalShell::built_in().remove(0);
+    let first = || TerminalShell::built_in().remove(1);
     match offered.get(index.max(0) as usize) {
         Some(shell) => shell.clone(),
         None => offered.first().cloned().unwrap_or_else(first),
@@ -413,8 +426,13 @@ fn terminal_look(window: &AppWindow) -> cells::TerminalLook {
 /// built.** Asking Windows to run it would be the other way of finding out, and
 /// that costs a process.
 fn on_path(program: &str) -> bool {
+    let program = Path::new(program);
+    let exists = |path: &Path| path.is_file() || (path.extension().is_none() && path.with_extension("exe").is_file());
+    if program.is_absolute() {
+        return exists(program);
+    }
     std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+        std::env::split_paths(&path).any(|directory| exists(&directory.join(program)))
     })
 }
 
@@ -3632,6 +3650,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // 三つで、設定ファイルはそれを丸ごと置き換えることがある——先に並べて
     // しまうと、書き手が足したシェルがどのメニューにも出ない。
     publish_shells(&window);
+    terminal_shells::discover_distributions(&window);
     // 追加要件 2026-09-15（書き手）: 背景の壁紙。設定を読んだあとに置く。
     show_wallpaper(&window, &render_cache);
     // **窓が動けば、Windowsの壁紙を敷く位置が逆へ動く**（画面に固定しているので）。

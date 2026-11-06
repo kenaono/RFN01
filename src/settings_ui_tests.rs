@@ -383,6 +383,7 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
         let output = PathBuf::from(output);
         std::fs::create_dir_all(&output).unwrap();
         window.set_tree_open(false);
+        terminal_shells::action(&window, &live, 0, 1);
         window.show().unwrap();
         for group in 0..8 {
             window.set_settings_tab(group);
