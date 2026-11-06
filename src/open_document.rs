@@ -180,14 +180,16 @@ impl SharedText {
     /// Undo/Redo compares exact text with the last successful save, not a hash.
     /// Ordinary keystrokes do not scan or clone the saved document.
     pub fn reconcile_saved(&self) {
-        let edited = self
-            .saved_text
-            .borrow()
-            .as_ref()
-            .is_none_or(|saved| *self.text.borrow() != *saved);
         // Keep the pending work: reaching the saved text must retire the old
         // backup through the same writer queue, even if it is still in flight.
-        self.set_edited(edited);
+        self.set_edited(self.differs_from_saved());
+    }
+
+    pub fn differs_from_saved(&self) -> bool {
+        self.saved_text
+            .borrow()
+            .as_ref()
+            .is_none_or(|saved| *self.text.borrow() != *saved)
     }
 
     /// Only the moves are reported. A keystroke in an already-edited document

@@ -102,10 +102,7 @@ fn tell_send_busy(window: &AppWindow) {
 
 pub(crate) fn needs_close(window: &AppWindow, tab: &PaneTab) -> bool {
     let shell = |s: &Rc<RefCell<TerminalSession>>| {
-        // RFN01-97: a shell put back from the last run and never shown has
-        // nothing running to lose.
-        let s = s.borrow();
-        window.get_terminal_confirm_close() && !s.finished() && !s.is_waiting()
+        window.get_terminal_confirm_close() && s.borrow_mut().needs_stop_confirmation()
     };
     tab.terminal
         .as_ref()
@@ -113,24 +110,119 @@ pub(crate) fn needs_close(window: &AppWindow, tab: &PaneTab) -> bool {
         || tab.below.shell.as_ref().is_some_and(shell)
         || tab.below.entries.iter().any(|p| {
             let p = p.borrow();
-            p.document.text.edited() || p.capture.is_some() || p.shell.as_ref().is_some_and(shell)
+            panel_needs_save(&p) || p.capture.is_some() || p.shell.as_ref().is_some_and(shell)
         })
 }
 
+pub(crate) fn panel_needs_save(panel: &terminal_panels::PanelDocument) -> bool {
+    let text = &panel.document.text;
+    text.edited() && text.differs_from_saved()
+}
+
+pub(crate) fn ask_window_close(window: &AppWindow, live: &Live) -> bool {
+    if !live
+        .tabs
+        .borrow()
+        .panes
+        .iter()
+        .flat_map(|p| &p.tabs)
+        .any(|t| needs_close(window, t))
+    {
+        return false;
+    }
+    let unsaved_panels = terminal_panels::entries(live)
+        .iter()
+        .any(|e| panel_needs_save(&e.borrow()));
+    let unsaved_documents = open_documents(live).iter().any(|d| d.text.edited());
+    let title = pick(
+        "Terminalを停止して終了しますか？",
+        "Stop terminals and close?",
+    );
+    let stop = pick(
+        "実行中のシェルとログ取り込みは停止します。",
+        "Running shells and log capture will stop.",
+    );
+    if unsaved_panels || unsaved_documents {
+        let unsaved = if unsaved_panels {
+            pick(
+                "未保存のPanelがあります。",
+                "Some panels have unsaved changes.",
+            )
+        } else {
+            pick(
+                "未保存の文書があります。",
+                "Some documents have unsaved changes.",
+            )
+        };
+        ask_question(
+            window,
+            live,
+            Question::CloseWindow,
+            format!("{title}\n\n{stop} {unsaved}"),
+            &[
+                pick("すべて保存して終了", "Save All and Close"),
+                pick("保存せず終了", "Close Without Saving"),
+                cancel(),
+            ],
+            1,
+        );
+    } else {
+        ask_question(
+            window,
+            live,
+            Question::StopTerminalsAndClose,
+            format!("{title}\n\n{stop}"),
+            &[pick("終了", "Close"), cancel()],
+            0,
+        );
+    }
+    true
+}
+
 pub(crate) fn ask_close(window: &AppWindow, live: &Live, identity: Rc<()>) {
-    let capturing = live
+    let (capturing, unsaved_panels) = live
         .tabs
         .borrow()
         .panes
         .iter()
         .flat_map(|p| &p.tabs)
         .find(|t| Rc::ptr_eq(&t.identity, &identity))
-        .is_some_and(|t| {
-            t.terminal
+        .map(|t| {
+            let capturing = t
+                .terminal
                 .as_ref()
                 .is_some_and(|s| s.borrow().file_log_path().is_some())
-                || t.below.entries.iter().any(|e| e.borrow().capture.is_some())
-        });
+                || t.below.entries.iter().any(|e| e.borrow().capture.is_some());
+            let unsaved_panels = t
+                .below
+                .entries
+                .iter()
+                .any(|e| panel_needs_save(&e.borrow()));
+            (capturing, unsaved_panels)
+        })
+        .unwrap_or_default();
+    if !unsaved_panels {
+        let message = if capturing {
+            pick(
+                "このTABを閉じますか？\n\nこのTABのシェルとログ取り込みが終了します。",
+                "Close this tab?\n\nThis tab's shells and log capture will stop.",
+            )
+        } else {
+            pick(
+                "このTABを閉じますか？\n\nこのTABのシェルが終了します。",
+                "Close this tab?\n\nThis tab's shells will stop.",
+            )
+        };
+        ask_question(
+            window,
+            live,
+            Question::TerminalClose(identity, false),
+            message.into(),
+            &[pick("閉じる", "Close"), cancel()],
+            0,
+        );
+        return;
+    }
     let message = if capturing {
         pick(
             "このTABと付属のPanelを閉じますか？\n\nこのTABのシェルとログ取り込みが終了します。別のTABの取り込みは継続します。Panelの未保存内容は保存してください。",
@@ -145,7 +237,7 @@ pub(crate) fn ask_close(window: &AppWindow, live: &Live, identity: Rc<()>) {
     ask_question(
         window,
         live,
-        Question::TerminalClose(identity),
+        Question::TerminalClose(identity, true),
         message.into(),
         &[
             pick("Panelを保存して続行", "Save Panels and Continue"),
@@ -181,7 +273,7 @@ pub(crate) fn close(window: &AppWindow, live: &Live, identity: Rc<()>, save: boo
     };
     if save {
         for entry in &entries {
-            let dirty = entry.borrow().document.text.edited();
+            let dirty = panel_needs_save(&entry.borrow());
             if dirty && !terminal_panels::save_for_close(window, live, entry) {
                 cancel_close_run(live);
                 return;

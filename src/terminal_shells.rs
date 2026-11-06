@@ -204,10 +204,107 @@ pub(crate) fn launch(shell: &TerminalShell) -> (String, Option<PathBuf>) {
         (format!("\"{program}\" --cd \"{path}\" {args}"), None)
     } else {
         (
-            shell.command.clone(),
+            powershell_launch(program, args).unwrap_or_else(|| shell.command.clone()),
             (!cwd.is_empty()).then(|| PathBuf::from(cwd)),
         )
     }
+}
+
+fn powershell_launch(program: &str, args: &str) -> Option<String> {
+    let stem = Path::new(program).file_stem()?.to_str()?;
+    if !["powershell", "pwsh"]
+        .iter()
+        .any(|name| stem.eq_ignore_ascii_case(name))
+        || !args.split_whitespace().all(|arg| {
+            ["-NoLogo", "-NoProfile"]
+                .iter()
+                .any(|flag| arg.eq_ignore_ascii_case(flag))
+        })
+    {
+        return None;
+    }
+    // Wrap the host's existing reader so profiles and PSReadLine key bindings
+    // still take effect. If the reader is unavailable the session stays unknown.
+    let hook = concat!(
+        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage' ",
+        "-and (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction Ignore)) { ",
+        "$global:RFNEditOriginalReadLine = ${function:PSConsoleHostReadLine}; ",
+        "function global:PSConsoleHostReadLine { ",
+        "[Console]::Write(('{0}]133;A{1}' -f [char]27,[char]7)); ",
+        "$line = & $global:RFNEditOriginalReadLine; ",
+        "[Console]::Write(('{0}]133;C{1}' -f [char]27,[char]7)); ",
+        "$line } }"
+    );
+    Some(format!("\"{program}\" {args} -NoExit -Command \"{hook}\""))
+}
+
+/// Supply Bash's prompt hook through the WSL child's environment. WSL still
+/// chooses the login shell and runs its regular startup files. A startup file
+/// that sets its own PROMPT_COMMAND takes precedence.
+pub(crate) fn wsl_shell_environment(shell: &TerminalShell) -> Option<Vec<u16>> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStrExt;
+
+    if !is_wsl(shell) {
+        return None;
+    }
+    let (_, args) = command_parts(&shell.command);
+    let mut words = args.split_whitespace();
+    while let Some(option) = words.next() {
+        if !matches!(option, "-d" | "--distribution" | "-u" | "--user")
+            || !words.next().is_some_and(|value| !value.starts_with('-'))
+        {
+            return None;
+        }
+    }
+    let mut variables: Vec<_> = std::env::vars_os().collect();
+    let named = |key: &OsString, name: &str| key.to_string_lossy().eq_ignore_ascii_case(name);
+    if variables
+        .iter()
+        .any(|(key, _)| named(key, "PROMPT_COMMAND"))
+    {
+        return None;
+    }
+    let mut wslenv = OsString::new();
+    variables.retain(|(key, value)| {
+        if named(key, "WSLENV") {
+            wslenv = value.clone();
+            false
+        } else {
+            true
+        }
+    });
+    if wslenv.to_string_lossy().split(':').any(|entry| {
+        entry
+            .split('/')
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("PROMPT_COMMAND"))
+    }) {
+        return None;
+    }
+    if !wslenv.is_empty() {
+        wslenv.push(":");
+    }
+    wslenv.push("PROMPT_COMMAND/u");
+    // Stop exporting the hook after the first prompt. A nested Bash is a
+    // foreground command of this shell and must not report it as idle.
+    let hook = r"export -n PROMPT_COMMAND; if [[ ${PS0-} != *$'\e]133;C\a'* ]]; then PS0=$'\e]133;C\a'${PS0-}; fi; printf '\033]133;A\007'";
+    variables.extend([
+        (OsString::from("WSLENV"), wslenv),
+        (OsString::from("PROMPT_COMMAND"), OsString::from(hook)),
+    ]);
+    variables.sort_by_cached_key(|(key, _)| key.to_string_lossy().to_uppercase());
+    let mut block = Vec::new();
+    for (key, value) in variables {
+        block.extend(
+            key.encode_wide()
+                .chain([b'=' as u16])
+                .chain(value.encode_wide())
+                .chain([0]),
+        );
+    }
+    block.push(0);
+    Some(block)
 }
 
 fn publish(window: &AppWindow, index: usize) {
@@ -495,10 +592,12 @@ mod tests {
         };
         assert_eq!(shell.program(), "C:\\Program Files\\PowerShell\\pwsh.exe");
         assert_eq!(TerminalShell::read(&shell.written()), Some(shell.clone()));
-        assert_eq!(
-            launch(&shell),
-            (shell.command.clone(), Some(PathBuf::from(&shell.directory)))
-        );
+        let (command, directory) = launch(&shell);
+        assert!(command.starts_with(&format!("{} -NoExit -Command ", shell.command)));
+        assert_eq!(directory, Some(PathBuf::from(&shell.directory)));
+        let mut scripted = shell.clone();
+        scripted.command.push_str(" -File script.ps1");
+        assert_eq!(launch(&scripted).0, scripted.command);
         let linux = TerminalShell {
             id: 0,
             name: "WSL".into(),

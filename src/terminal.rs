@@ -1609,6 +1609,7 @@ enum State {
 #[derive(Debug, Default)]
 pub struct Parser {
     state: State,
+    shell_at_prompt: bool,
     groups: Vec<Vec<u16>>,
     group: Vec<u16>,
     number: Option<u16>,
@@ -1937,6 +1938,15 @@ impl Parser {
         let mut parts = string.splitn(2, |byte| *byte == b';');
         let kind = parts.next().unwrap_or(b"");
         let rest = parts.next().unwrap_or(b"");
+        // Final Term shell integration. Only the next primary prompt makes a
+        // session idle again, including after an empty or interrupted command.
+        if kind == b"133" {
+            match rest {
+                b"A" => self.shell_at_prompt = true,
+                b"C" => self.shell_at_prompt = false,
+                _ => {}
+            }
+        }
         // 0 sets both the icon name and the title; 2 sets the title. Nothing
         // here has an icon name, so they are the same thing.
         if kind == b"0" || kind == b"2" {
@@ -1983,6 +1993,14 @@ impl Terminal {
     /// Read what the shell wrote. **Any split is allowed**: the parser resumes.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.feed(bytes, &mut self.screen);
+    }
+
+    pub fn shell_at_prompt(&self) -> bool {
+        self.parser.shell_at_prompt && !self.screen.modes().alternate_screen
+    }
+
+    pub fn command_submitted(&mut self) {
+        self.parser.shell_at_prompt = false;
     }
 }
 

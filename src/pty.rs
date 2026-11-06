@@ -20,8 +20,8 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     STARTUPINFOW, UpdateProcThreadAttribute,
 };
@@ -127,13 +127,14 @@ impl Pty {
         Self::open_in(command, None, columns, rows)
     }
 
+    #[cfg(test)]
     pub fn open_in(
         command: &str,
         directory: Option<&std::path::Path>,
         columns: u16,
         rows: u16,
     ) -> windows::core::Result<Self> {
-        Self::open_with(command, directory, columns, rows, false)
+        Self::open_with(command, directory, columns, rows, false, None)
     }
 
     /// RFN01-97: `inherit_cursor` starts the console where the screen's cursor
@@ -146,6 +147,7 @@ impl Pty {
         columns: u16,
         rows: u16,
         inherit_cursor: bool,
+        environment: Option<&[u16]>,
     ) -> windows::core::Result<Self> {
         unsafe {
             let (input_read, input_write) = pipe()?;
@@ -212,8 +214,8 @@ impl Pty {
                 None,
                 None,
                 false,
-                EXTENDED_STARTUPINFO_PRESENT,
-                None,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                environment.map(|block| block.as_ptr().cast()),
                 directory
                     .as_ref()
                     .map_or(windows::core::PCWSTR::null(), |p| {

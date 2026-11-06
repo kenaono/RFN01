@@ -7114,12 +7114,55 @@ export component AppWindow inherits Window {
         // name field has the keyboard: a key a field does not use goes up to
         // the scopes above it, and a scope beside it is not above it.
         question-keys := FocusScope {
+            property <int> selected-choice: -1;
+            property <int> generation: root.question-generation;
+            property <int> first-choice: root.question-is-clone && root.workspace-cloning ? 1 : 0;
+            property <bool> name-focused: false;
+            property <bool> destination-focused: false;
+            property <int> focus-field: 0;
+            changed generation => {
+                self.selected-choice = -1;
+            }
             init => {
                 self.focus();
             }
             key-pressed(event) => {
                 if event.text == Key.Escape {
                     root.question-answered(root.question-choices.length - 1);
+                    accept
+                } else if !event.modifiers.control && !event.modifiers.alt
+                        && (event.text == Key.Tab || event.text == Key.Backtab
+                            || event.text == Key.UpArrow || event.text == Key.DownArrow)
+                        && root.question-choices.length > self.first-choice {
+                    let last = root.question-choices.length - 1;
+                    let backwards = event.text == Key.Backtab || event.text == Key.UpArrow
+                        || (event.text == Key.Tab && event.modifiers.shift);
+                    let tab = event.text == Key.Tab || event.text == Key.Backtab;
+                    if tab && root.question-is-clone && !root.workspace-cloning
+                            && ((self.name-focused && !backwards) || (self.destination-focused && backwards)) {
+                        self.focus-field = backwards ? 1 : 2;
+                        return accept;
+                    }
+                    if tab && !self.name-focused && !self.destination-focused && root.question-asks-name
+                            && (!root.question-is-clone || !root.workspace-cloning)
+                            && ((backwards && self.selected-choice == self.first-choice)
+                                || (!backwards && self.selected-choice == last)) {
+                        self.focus-field = backwards && root.question-is-clone ? 2 : 1;
+                        return accept;
+                    }
+                    if backwards {
+                        self.selected-choice = self.selected-choice <= self.first-choice
+                            ? last : self.selected-choice - 1;
+                    } else {
+                        self.selected-choice = self.selected-choice < self.first-choice || self.selected-choice == last
+                            ? self.first-choice : self.selected-choice + 1;
+                    }
+                    self.focus();
+                    accept
+                } else if (event.text == Key.Return || event.text == " ")
+                        && self.selected-choice >= self.first-choice
+                        && self.selected-choice < root.question-choices.length {
+                    root.question-answered(self.selected-choice);
                     accept
                 } else if event.text == Key.Return && root.question-enter-sends {
                     root.question-answered(0);
@@ -7184,6 +7227,17 @@ export component AppWindow inherits Window {
                             if root.question-asks-name: Field {
                                 enabled: !root.question-is-clone || !root.workspace-cloning;
                                 property <int> asked: root.question-generation;
+                                property <int> focus-request: question-keys.focus-field;
+                                changed focus-request => {
+                                    if self.focus-request == 1 {
+                                        self.take-focus();
+                                        question-keys.focus-field = 0;
+                                    }
+                                }
+                                changed has-focus => {
+                                    question-keys.name-focused = self.has-focus;
+                                    if self.has-focus { question-keys.selected-choice = -1; }
+                                }
                                 text <=> root.question-name;
                                 edited => { if root.question-is-clone { root.workspace-clone-url-edited(); } }
                                 focus-lost => { if root.question-is-clone { root.workspace-clone-url-check(); } }
@@ -7248,6 +7302,17 @@ export component AppWindow inherits Window {
                                 spacing: 6px;
                                 Field {
                                     horizontal-stretch: 1;
+                                    property <int> focus-request: question-keys.focus-field;
+                                    changed focus-request => {
+                                        if self.focus-request == 2 {
+                                            self.take-focus();
+                                            question-keys.focus-field = 0;
+                                        }
+                                    }
+                                    changed has-focus => {
+                                        question-keys.destination-focused = self.has-focus;
+                                        if self.has-focus { question-keys.selected-choice = -1; }
+                                    }
                                     text <=> root.workspace-clone-destination;
                                     focus-lost => { root.workspace-clone-destination-check(); }
                                     edited => { root.workspace-clone-destination-error = ""; }
@@ -7278,6 +7343,7 @@ export component AppWindow inherits Window {
 
                                 for choice[index] in root.question-choices: TextButton {
                                     enabled: !root.question-is-clone || !root.workspace-cloning || index != 0;
+                                    keyboard-selected: index == question-keys.selected-choice && question-keys.has-focus;
                                     title: choice;
                                     wide: true;
                                     role: index == 0

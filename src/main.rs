@@ -4151,10 +4151,7 @@ fn main() -> Result<(), slint::PlatformError> {
         // 数秒ぶんが、静かに消える。**成功すれば何も起きない**（普段はここで
         // 一往復、数ミリ秒）。
         sync_active_tab(&window, live);
-        if live.tabs.borrow().panes.iter().flat_map(|p| &p.tabs).any(|t| terminal_workflow::needs_close(&window, t)) {
-            ask_question(&window, live, Question::CloseWindow,
-                pick("TerminalとPanelを含めて終了しますか？\n\n実行中のシェルとログ取り込みは停止します。未保存のPanelは保存してください。", "Close including terminals and panels?\n\nRunning shells and log capture will stop. Save any unsaved panels.").into(),
-                &[pick("すべて保存して終了", "Save All and Close"), pick("保存せず終了", "Close Without Saving"), cancel()], 1);
+        if terminal_workflow::ask_window_close(&window, live) {
             return CloseRequestResponse::KeepWindowShown;
         }
         if ask_about_the_last_work_copy(&window, live) {
@@ -13821,7 +13818,7 @@ enum Question {
         identity: Rc<()>,
         shell: TerminalShell,
     },
-    TerminalClose(Rc<()>),
+    TerminalClose(Rc<()>, bool),
     PanelSwitch {
         pane: PaneId,
         entry: Rc<RefCell<terminal_panels::PanelDocument>>,
@@ -13905,6 +13902,7 @@ enum Question {
     /// （2026-09-08、要件 8.1・8.4）。**退避が働いていれば訊かない**——
     /// そちらは閉じても失われないので、問いは書き手の邪魔でしかない。
     CloseWindow,
+    StopTerminalsAndClose,
     /// 未保存の本文があるまま、別の文字コードで開き直そうとしている
     /// （要件 E2 の②）。**文書は道で覚える**——答えは1周あとに返り、その
     /// あいだに書き手は別のペインを触っているかもしれない（`CloseTab`が
@@ -14002,6 +14000,7 @@ impl Question {
             Self::DeleteEdited(..) => "DeleteEdited",
             Self::ReplaceOnMove(..) => "ReplaceOnMove",
             Self::CloseWindow => "CloseWindow",
+            Self::StopTerminalsAndClose => "StopTerminalsAndClose",
             Self::ReopenAs { .. } => "ReopenAs",
             Self::ResetAll => "ResetAll",
             Self::LastWorkCopyFailed => "LastWorkCopyFailed",
@@ -14263,8 +14262,10 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             }
         }
         (Question::TerminalInput(input), 0) => terminal_workflow::send(window, live, input),
-        (Question::TerminalClose(identity), choice @ 0..=1) => {
-            terminal_workflow::close(window, live, identity, choice == 0)
+        (Question::TerminalClose(identity, unsaved_panels), choice)
+            if choice == 0 || (unsaved_panels && choice == 1) =>
+        {
+            terminal_workflow::close(window, live, identity, unsaved_panels && choice == 0)
         }
         (
             Question::PanelClose {
@@ -14423,7 +14424,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         }
         (Question::CloseWindow, 0) => {
             for entry in terminal_panels::entries(live) {
-                let dirty = entry.borrow().document.text.edited();
+                let dirty = terminal_workflow::panel_needs_save(&entry.borrow());
                 if dirty && !terminal_panels::save_for_close(window, live, &entry) {
                     return;
                 }
@@ -14446,7 +14447,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
                 window.hide().ok();
             }
         }
-        (Question::CloseWindow, 1) => {
+        (Question::CloseWindow, 1) | (Question::StopTerminalsAndClose, 0) => {
             // 破棄して閉じる。**退避は切ってあるので、消すものは無い**——
             // 作業コピーはそもそも書かれていない。
             if terminal_panels::stop_for_close(window, live) {
@@ -20256,10 +20257,12 @@ fn start_shell(
     let folder = terminal_start_folder(live);
     let started = terminal_shells::with_start_folder(shell, folder.as_deref());
     let (command, directory) = terminal_shells::launch(&started);
+    let environment = terminal_shells::wsl_shell_environment(&started);
     match TerminalSession::start_in(
         &shell.name,
         &command,
         directory.as_deref(),
+        environment.as_deref(),
         columns,
         rows,
         wake,

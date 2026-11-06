@@ -1,6 +1,137 @@
 use super::*;
 
 #[test]
+fn terminal_close_only_offers_to_save_unsaved_panels() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    let identity = h.live.tabs.borrow().of(id).tabs[0].identity.clone();
+    terminal_workflow::ask_close(&h.window, &h.live, identity.clone());
+    assert_eq!(h.window.get_question_choices().row_count(), 2);
+    answer_question(&h.window, &h.live, 1);
+    assert!(Rc::ptr_eq(
+        &h.live.tabs.borrow().of(id).tabs[0].identity,
+        &identity
+    ));
+
+    terminal_panels::ensure(&h.window, &h.live, id);
+    let panel = terminal_panels::current(&h.live, id).unwrap();
+    let document = panel.borrow().document.clone();
+    document.text.borrow_mut().push_str("unsaved");
+    assert!(close_tab(&h.window, &h.live, id, 0));
+    assert_eq!(h.window.get_question_choices().row_count(), 3);
+    answer_question(&h.window, &h.live, 2);
+
+    document.text.borrow_mut().clear();
+    assert!(document.text.edited(), "the edit flag remains set");
+    assert!(!terminal_workflow::needs_close(
+        &h.window,
+        &h.live.tabs.borrow().of(id).tabs[0],
+    ));
+    terminal_workflow::ask_close(&h.window, &h.live, identity);
+    assert_eq!(h.window.get_question_choices().row_count(), 2);
+}
+
+#[test]
+fn closing_window_with_terminal_only_does_not_offer_to_save_panels() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    let mut terminal = TerminalSession::waiting(
+        TerminalShell {
+            id: 0,
+            name: "QA".into(),
+            command: "cmd.exe".into(),
+            directory: String::new(),
+        },
+        None,
+        Vec::new(),
+        String::new(),
+    );
+    let path = app_data::app_directory().unwrap().join("terminal.log");
+    terminal.start_file_log(path.clone(), std::fs::File::create(path).unwrap(), None);
+    let terminal = Rc::new(RefCell::new(terminal));
+    h.live.tabs.borrow_mut().of_mut(id).unwrap().tabs[0].terminal = Some(terminal.clone());
+
+    assert!(terminal_workflow::ask_window_close(&h.window, &h.live));
+    assert_eq!(h.window.get_question_choices().row_count(), 2);
+    assert!(matches!(
+        *h.live.pending.borrow(),
+        Some(Question::StopTerminalsAndClose)
+    ));
+    answer_question(&h.window, &h.live, 1);
+    assert!(terminal.borrow().file_log_path().is_some());
+
+    terminal_panels::ensure(&h.window, &h.live, id);
+    let panel = terminal_panels::current(&h.live, id).unwrap();
+    panel
+        .borrow()
+        .document
+        .text
+        .borrow_mut()
+        .push_str("unsaved");
+    assert!(terminal_workflow::ask_window_close(&h.window, &h.live));
+    assert_eq!(h.window.get_question_choices().row_count(), 3);
+    assert!(matches!(
+        *h.live.pending.borrow(),
+        Some(Question::CloseWindow)
+    ));
+}
+
+#[test]
+fn question_keyboard_selects_buttons_and_resets_on_reopen() {
+    use slint::platform::{Key, WindowEvent};
+
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let answer = Rc::new(Cell::new(None));
+    let observed = answer.clone();
+    h.window
+        .on_question_answered(move |choice| observed.set(Some(choice)));
+    h.window.show().unwrap();
+    h.window
+        .set_question_choices(ModelRc::from(Rc::new(VecModel::from(vec![
+            "Save".into(),
+            "Discard".into(),
+            "Cancel".into(),
+        ]))));
+    let open = || {
+        h.window.set_question_open(true);
+        h.window.window().request_redraw();
+        let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+        h.surface.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, 1000);
+        });
+    };
+    let key = |text: SharedString| {
+        h.window
+            .window()
+            .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        h.window
+            .window()
+            .dispatch_event(WindowEvent::KeyReleased { text });
+    };
+    open();
+    key(Key::Return.into());
+    assert_eq!(answer.get(), None);
+    key(Key::Tab.into());
+    key(Key::DownArrow.into());
+    key(" ".into());
+    assert_eq!(answer.get(), Some(1));
+
+    h.window.set_question_open(false);
+    answer.set(None);
+    h.window.set_question_generation(1);
+    open();
+    key(Key::Return.into());
+    assert_eq!(answer.get(), None);
+    key(Key::Backtab.into());
+    key(Key::Return.into());
+    assert_eq!(answer.get(), Some(2));
+    answer.set(None);
+    key(Key::UpArrow.into());
+    key(Key::Escape.into());
+    assert_eq!(answer.get(), Some(2));
+}
+
+#[test]
 fn read_only_policy_is_shared_by_editor_and_panel() {
     let mut state = EditorState::default();
     state.preedit = "composition".into();
@@ -1204,7 +1335,8 @@ fn terminal_start_folder_handles_spaces_and_japanese() {
         "wsl.exe --exec pwd",
     ] {
         let mut session =
-            TerminalSession::start_in("QA", command, Some(&directory), 160, 12, || {}).unwrap();
+            TerminalSession::start_in("QA", command, Some(&directory), None, 160, 12, || {})
+                .unwrap();
         let until = Instant::now() + Duration::from_secs(15);
         while Instant::now() < until && !session.screen().retained_text().contains("原稿 作業")
         {

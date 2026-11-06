@@ -1175,7 +1175,10 @@ fn request_close(window: &AppWindow, live: &Live, id: PaneId) {
     if held.document.text.edited()
         || held.capture.is_some()
         || (window.get_terminal_confirm_close()
-            && held.shell.as_ref().is_some_and(|s| !s.borrow().finished()))
+            && held
+                .shell
+                .as_ref()
+                .is_some_and(|s| s.borrow_mut().needs_stop_confirmation()))
     {
         let save = held.document.text.edited() || held.capture.is_some();
         let capturing = held.capture.is_some();

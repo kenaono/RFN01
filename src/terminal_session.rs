@@ -153,18 +153,26 @@ impl TerminalSession {
         rows: usize,
         wake: impl Fn() + Send + 'static,
     ) -> windows::core::Result<Self> {
-        Self::start_in(name, command, None, columns, rows, wake)
+        Self::start_in(name, command, None, None, columns, rows, wake)
     }
 
     pub fn start_in(
         name: &str,
         command: &str,
         directory: Option<&std::path::Path>,
+        environment: Option<&[u16]>,
         columns: usize,
         rows: usize,
         wake: impl Fn() + Send + 'static,
     ) -> windows::core::Result<Self> {
-        let pty = Pty::open_in(command, directory, columns as u16, rows as u16)?;
+        let pty = Pty::open_with(
+            command,
+            directory,
+            columns as u16,
+            rows as u16,
+            false,
+            environment,
+        )?;
         let TerminalIo {
             console,
             output,
@@ -230,6 +238,11 @@ impl TerminalSession {
         self.idle.is_some() && !self.finished
     }
 
+    pub fn needs_stop_confirmation(&mut self) -> bool {
+        self.drain();
+        !self.finished() && !self.is_waiting() && !self.terminal.shell_at_prompt()
+    }
+
     /// RFN01-97: start a shell that was waiting. The last run's output goes on
     /// the screen first, faint, with a line saying where it ends; the console
     /// then starts below it.
@@ -250,12 +263,14 @@ impl TerminalSession {
             self.terminal.feed(&restored_screen(&lines, &when));
         }
         let (command, directory) = crate::terminal_shells::launch(&shell);
+        let environment = crate::terminal_shells::wsl_shell_environment(&shell);
         let started = Pty::open_with(
             &command,
             directory.as_deref(),
             columns as u16,
             rows as u16,
             true,
+            environment.as_deref(),
         )
         .and_then(|pty| start_io(pty, wake));
         match started {
@@ -711,12 +726,20 @@ impl TerminalSession {
             return true;
         }
         self.flush_replies();
-        bytes.len() <= MAX_INPUT_BYTES
+        let submits = bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n'));
+        if submits {
+            self.drain();
+        }
+        let sent = bytes.len() <= MAX_INPUT_BYTES
             && self.pending_replies.is_empty()
             && self
                 .input
                 .as_ref()
-                .is_some_and(|input| input.try_send(bytes.to_vec()).is_ok())
+                .is_some_and(|input| input.try_send(bytes.to_vec()).is_ok());
+        if sent && submits {
+            self.terminal.command_submitted();
+        }
+        sent
     }
 
     /// The pane changed size (要件 6.4).
@@ -1138,7 +1161,10 @@ mod tests {
 
         // This test injects keys faster than a user can type. Wait for the
         // bounded input queue instead of counting a refused write as a keypress.
-        let keys = "echo RFN-SESSION-OK".chars().map(Key::Char).chain([Key::Enter]);
+        let keys = "echo RFN-SESSION-OK"
+            .chars()
+            .map(Key::Char)
+            .chain([Key::Enter]);
         for key in keys {
             let bytes = encode_key(key, Modifiers::none(), session.screen().modes());
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -1509,5 +1535,74 @@ mod backpressure_tests {
         blocked.resize(90, 26);
         drop(blocked);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+}
+#[cfg(test)]
+mod shell_integration_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn shell_close_only_skips_confirmation_at_a_reported_prompt() {
+        let mut terminal = Terminal::new(80, 24);
+        assert!(!terminal.shell_at_prompt());
+        terminal.feed(b"\x1b]13");
+        terminal.feed(b"3;A\x07");
+        assert!(terminal.shell_at_prompt());
+        terminal.command_submitted();
+        assert!(!terminal.shell_at_prompt());
+        terminal.feed(b"\x1b]133;C\x1b\\");
+        assert!(!terminal.shell_at_prompt());
+        terminal.feed(b"\x1b]133;A\x1b\\");
+        assert!(terminal.shell_at_prompt());
+    }
+
+    #[test]
+    #[ignore = "starts real ConPTY shells, including WSL Bash"]
+    fn shell_integration_reports_idle_and_running_through_conpty() {
+        for (command, work) in [
+            (
+                "powershell.exe -NoLogo -NoProfile",
+                "Start-Sleep -Seconds 1\r",
+            ),
+            ("pwsh.exe -NoLogo -NoProfile", "Start-Sleep -Seconds 1\r"),
+            ("wsl.exe", "sleep 1\r"),
+        ] {
+            let shell = crate::TerminalShell {
+                id: 0,
+                name: "QA".into(),
+                command: command.into(),
+                directory: String::new(),
+            };
+            let (launch, directory) = crate::terminal_shells::launch(&shell);
+            let environment = crate::terminal_shells::wsl_shell_environment(&shell);
+            let mut session = TerminalSession::start_in(
+                "QA",
+                &launch,
+                directory.as_deref(),
+                environment.as_deref(),
+                80,
+                24,
+                || {},
+            )
+            .unwrap();
+            let wait_for_idle = |session: &mut TerminalSession| {
+                let until = Instant::now() + Duration::from_secs(8);
+                while session.needs_stop_confirmation() && Instant::now() < until {
+                    session.wait(Duration::from_millis(30));
+                }
+                assert!(
+                    session.terminal.shell_at_prompt(),
+                    "{command}: no prompt marker"
+                );
+            };
+            wait_for_idle(&mut session);
+            session.type_text(work);
+            assert!(
+                session.needs_stop_confirmation(),
+                "{command}: command submitted"
+            );
+            wait_for_idle(&mut session);
+        }
     }
 }

@@ -1105,6 +1105,7 @@ export component TextButton inherits Rectangle {
     in property <Role> role: Role.normal;
     in property <bool> enabled: true;
     in property <bool> emphasize-hover: false;
+    in property <bool> keyboard-selected: false;
     /// 長押しで別のことをする釦（書き手の求め 2026-09-08）。
     ///
     /// **タブの名前を変えるのと同じ作法**（追加要件 2026-09-06）——半秒押したままに
@@ -1143,6 +1144,16 @@ export component TextButton inherits Rectangle {
         ? (touch.has-hover ? Tok.accent-strong : Tok.accent)
         : (touch.has-hover && root.enabled ? (root.emphasize-hover ? Tok.accent-soft : Tok.accent-faint) : (root.role == Role.quiet ? transparent : Tok.paper));
     opacity: root.enabled ? 1.0 : 0.45;
+
+    if root.keyboard-selected && root.enabled: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        border-radius: 3px;
+        border-width: 2px;
+        border-color: root.role == Role.primary ? Tok.paper : Tok.accent;
+    }
 
     if root.show-swatch: Rectangle {
         x: 7px;
