@@ -502,6 +502,7 @@ fn clicking_end_comparison_closes_the_history() {
     let window = &harness.window;
     let live = &harness.live;
     diff_view::wire(window, live);
+    crate::panel_actions::wire(window, live);
     with_backups(&harness, &root.join("draft.md"), &["一\n"], "現在\n");
     window.show().unwrap();
     open_history(window, live);

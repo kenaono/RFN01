@@ -556,22 +556,13 @@ mod tests {
     #[test]
     #[ignore = "offscreen comparison window and click verification"]
     fn diff_window_renders_and_navigates() {
-        use slint::platform::{
-            PointerEventButton, WindowEvent, software_renderer::MinimalSoftwareWindow,
-        };
-        struct Offscreen(Rc<MinimalSoftwareWindow>);
-        impl slint::platform::Platform for Offscreen {
-            fn create_window_adapter(
-                &self,
-            ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
-                Ok(self.0.clone())
-            }
-        }
-        let surface = MinimalSoftwareWindow::new(Default::default());
-        slint::platform::set_platform(Box::new(Offscreen(surface.clone()))).unwrap();
-        let window = AppWindow::new().unwrap();
-        let weak = window.as_weak();
-        window.on_diff_dismissed(move || dismiss(&weak.unwrap()));
+        use crate::saving::Harness;
+        use slint::platform::{PointerEventButton, WindowEvent};
+        let (harness, _) = Harness::new(|weak| crate::OpenDocument::untitled(1, weak));
+        let window = &harness.window;
+        let surface = &harness.surface;
+        crate::panel_actions::wire(window, &harness.live);
+        wire(window, &harness.live);
         surface.set_size(slint::PhysicalSize::new(1120, 740));
         window.set_diff_left_path("28_diff_左.md".into());
         window.set_diff_right_path("28_diff_右.md".into());
@@ -598,6 +589,7 @@ mod tests {
             ] {
                 window.window().dispatch_event(event);
             }
+            slint::platform::update_timers_and_animations();
         };
         let mut pixels = vec![slint::Rgb8Pixel::default(); 1120 * 740];
         surface.draw_if_needed(|renderer| {
