@@ -2199,7 +2199,7 @@ fn insert_words(
         }
         _ => (ja.to_owned(), en.to_owned()),
     };
-    let description = match shape {
+    let mut description = match shape {
         InsertShape::Edit(edit) if edit.needs_a_picked_word() => (
             format!("選んだ字に「{title_ja}」を付けます。"),
             format!("Adds \u{201c}{title_en}\u{201d} to the picked text."),
@@ -2229,6 +2229,14 @@ fn insert_words(
             "Picks a template from the Templates Folder and inserts it at the caret.".to_owned(),
         ),
     };
+    if matches!(shape, InsertShape::Edit(edit) if edit.supports_rectangle()) {
+        description
+            .0
+            .push_str("矩形選択では、文字が選ばれた表示行ごとに適用します。");
+        description.1.push_str(
+            " With a rectangular selection, applies to the selected text on each display line.",
+        );
+    }
     ((title_ja, title_en), description)
 }
 

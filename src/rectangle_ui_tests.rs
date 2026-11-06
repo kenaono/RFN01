@@ -210,3 +210,54 @@ fn rectangle_insert_and_undo_use_the_displayed_selection() {
         assert_eq!(r.source(), source);
     }
 }
+
+#[test]
+fn command_palette_inserts_into_the_displayed_rectangle() {
+    let source = "前東京後\n\n先京都末";
+    let r = rig(source, (1000, 600));
+    let (window, live) = (&r.window, &r.live);
+    command_palette::install(window, live);
+
+    let state = live.states.of(r.id);
+    let select_rectangle = |anchor, caret| {
+        {
+            let mut state = state.borrow_mut();
+            state.rectangular = true;
+            state.selection_anchor_source_byte = Some(anchor);
+            state.caret_source_byte = Some(caret);
+        }
+        refresh_pane_from_state(window, &live.cache, &r.document, r.id, &state, source);
+    };
+    let find_row = |edit| {
+        let action_id = actions::insert_id(menu_commands::InsertShape::Edit(edit));
+        window
+            .get_palette_rows()
+            .iter()
+            .position(|row| row.assign.as_str() == action_id)
+    };
+    let dots = document::InsertEdit::EmphasisDots;
+
+    select_rectangle(0, "前東京後\n\n".len());
+    assert!(selected_runs(&live.cache, r.id).iter().all(|(a, b)| a == b));
+    window.invoke_palette_requested(true);
+    assert!(window.get_palette_open());
+    window.invoke_palette_edited("> 傍点".into());
+    assert!(find_row(dots).is_none());
+    window.invoke_palette_cancelled();
+
+    select_rectangle("前".len(), "前東京後\n\n先京都".len());
+    assert_eq!(
+        selected_text(source, &selected_runs(&live.cache, r.id)),
+        "東京\n\n京都"
+    );
+    window.invoke_palette_requested(true);
+    window.invoke_palette_edited("> 脚注".into());
+    assert!(find_row(document::InsertEdit::Footnote).is_none());
+    window.invoke_palette_edited("> 傍点".into());
+    window.set_palette_selected(find_row(dots).expect("Emphasis Dots row") as i32);
+    window.invoke_palette_accepted();
+    slint::platform::update_timers_and_animations();
+
+    assert!(!window.get_palette_open());
+    assert_eq!(r.source(), "前《《東京》》後\n\n先《《京都》》末");
+}

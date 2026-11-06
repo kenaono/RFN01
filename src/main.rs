@@ -2989,11 +2989,8 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_pane_menu_opened(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
-            *opened_target.borrow_mut() = Some((
-                pane,
-                menu_commands::Target::for_pane(&window, &insert_live, id),
-            ));
-            menu_commands::publish_context_insert(&window, &insert_live, id);
+            let target = menu_commands::publish_context_insert(&window, &insert_live, id);
+            *opened_target.borrow_mut() = Some((pane, target));
         }
     });
     // 書式のボタン（2026-09-23）。**押された番号はメニューと同じ操作へ戻す。**

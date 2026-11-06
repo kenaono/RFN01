@@ -510,13 +510,10 @@ fn context_insert_state(
 
 /// 右クリックメニューへ出す挿入の行（RFN01-47）。返すのは1段目と、組の中身。
 fn context_insert_rows(
-    editable: bool,
-    selection: InsertSelection,
-    notes: document::LineNoteState,
-    places: Places,
+    state: impl Fn(InsertShape) -> (bool, bool),
 ) -> (Vec<crate::InsertRow>, Vec<crate::InsertRow>) {
     let entry = |shape: InsertShape, title: (&str, &str), group: i32| {
-        let (enabled, checked) = context_insert_state(shape, editable, selection, &notes, places);
+        let (enabled, checked) = state(shape);
         crate::InsertRow {
             title: pick(title.0, title.1).into(),
             flyout: false,
@@ -597,31 +594,23 @@ struct Places {
 /// 本文の右クリックメニューの挿入の行を組み直す（RFN01-47）。
 ///
 /// **開いた時点の状態で組む**——選んだ字や、いまの行の体裁で押せる行が変わる。
-pub fn publish_context_insert(window: &AppWindow, live: &Live, id: PaneId) {
+/// 行の表示に使った対象は、選ばれた操作の実行にも使う。
+pub(crate) fn publish_context_insert(window: &AppWindow, live: &Live, id: PaneId) -> Target {
+    let target = Target::for_pane(window, live, id);
     if id.is_panel() {
-        return;
+        return target;
     }
-    let screen = id.screen(window);
-    let document = live.states.document(id);
-    let empty = live
-        .tabs
-        .borrow()
-        .of(id)
-        .current()
-        .is_some_and(|tab| tab.empty);
-    let text = !screen.settings && !screen.terminal && !empty;
-    let editable = text && !screen.viewer && !document.read_only();
-    let selection = InsertSelection::read(live, id);
-    let (notes, places) = insert_inputs(window, live, id, &document);
-    let (top, children) = context_insert_rows(editable, selection, notes, places);
+    let scene = Scene::read(window, live, &target);
+    let (top, children) = context_insert_rows(|shape| scene.insert_menu_state(shape));
     window.set_insert_rows(slint::ModelRc::new(slint::VecModel::from(top)));
     window.set_insert_children(slint::ModelRc::new(slint::VecModel::from(children)));
-    let table = if editable && !selection.rectangular {
-        table_rows(window, live, id, &document)
+    let table = if scene.editable && !live.states.of(id).borrow().rectangular {
+        table_rows(window, live, id, &target.document)
     } else {
         Vec::new()
     };
     window.set_table_rows(slint::ModelRc::new(slint::VecModel::from(table)));
+    target
 }
 
 /// 右クリックの「Edit Table ▸」の中身（RFN01-49 ②）。キャレットが表の中になければ空で、
@@ -758,8 +747,8 @@ type FormatKey = (
 
 /// 書式のボタンと組の中身を、いま字を入れているPaneについて組み直す（2026-09-23）。
 ///
-/// **押せる条件はタイトルバーの挿入メニューと同じ**（[`text_state`]・
-/// [`context_insert_state`]、箇条書きは記号を読むか）。出していない間は何もしない。
+/// **挿入の行はタイトルバーのメニューと同じ前提で押せる**（[`Scene::enabled`]）。
+/// 出していない間は何もしない。
 /// 変わっていなければ画面へ渡さない——渡すたびにボタンが作り直され、指の下の
 /// 明るさや開いた行が消える。
 pub fn publish_format(window: &AppWindow, live: &Live, cache: &RefCell<FormatCache>) {
@@ -768,9 +757,8 @@ pub fn publish_format(window: &AppWindow, live: &Live, cache: &RefCell<FormatCac
     }
     let t = Target::for_shortcut(window, live);
     window.set_format_vertical(t.id.vertical(window));
-    let (_, editable) = text_state(window, live, &t);
     let selection = InsertSelection::read(live, t.id);
-    let inputs = {
+    let (notes, places) = {
         let source = t.document.text.borrow();
         let range = chosen_source_range(&live.states.of(t.id).borrow(), source.len());
         let key = (
@@ -788,7 +776,15 @@ pub fn publish_format(window: &AppWindow, live: &Live, cache: &RefCell<FormatCac
         }
         cache.inputs
     };
-    let rows = format_rows(editable, selection, inputs, bullet_marks_of(window));
+    let scene = Scene {
+        inserts: OnceCell::from((selection, notes, places)),
+        ..Scene::read(window, live, &t)
+    };
+    let rows = format_rows(
+        scene.editable,
+        |shape| scene.insert_menu_state(shape),
+        bullet_marks_of(window),
+    );
     let mut cache = cache.borrow_mut();
     if cache.shown.as_ref() == Some(&rows) {
         return;
@@ -801,11 +797,10 @@ pub fn publish_format(window: &AppWindow, live: &Live, cache: &RefCell<FormatCac
 /// ボタンと組の中身。1段目は挿入メニューの表の順、そのあとに箇条書きの束。
 fn format_rows(
     editable: bool,
-    selection: InsertSelection,
-    (notes, places): (document::LineNoteState, Places),
+    insert_state: impl Fn(InsertShape) -> (bool, bool),
     marks: document::BulletMarks,
 ) -> (Vec<crate::FormatButton>, Vec<crate::InsertRow>) {
-    let (top, mut children) = context_insert_rows(editable, selection, notes, places);
+    let (top, mut children) = context_insert_rows(insert_state);
     let mut buttons: Vec<crate::FormatButton> = INSERT_MENU
         .iter()
         .zip(top)
@@ -1013,9 +1008,9 @@ fn title_submenu(shape: InsertShape) -> Option<Title> {
 }
 
 /// 挿入メニューの**実行できる項目**（RFN01-38）。並び・文言・押せる条件は
-/// [`INSERT_MENU`]と[`context_insert_state`]——右クリックメニューと同じものを読む。
+/// [`INSERT_MENU`]と[`Scene::insert_menu_state`]——右クリックメニューと同じものを読む。
 fn insert_rows(scene: &Scene, root: &mut Vec<Item>) {
-    insert_rows_by(root, |shape| scene.insert_state(shape));
+    insert_rows_by(root, |shape| scene.insert_menu_state(shape));
 }
 
 /// 挿入の行を、形ごとの「押せるか・いまの形か」（`state`）から組む。
@@ -1627,6 +1622,11 @@ impl<'a> Scene<'a> {
         context_insert_state(shape, self.editable, *selection, notes, *places)
     }
 
+    fn insert_menu_state(&self, shape: InsertShape) -> (bool, bool) {
+        let enabled = self.enabled(&Command::Insert(shape));
+        (enabled, self.insert_state(shape).1)
+    }
+
     /// その操作が、いまの場面で実行できるか。
     pub(crate) fn enabled(&self, command: &Command) -> bool {
         let t = self.t;
@@ -1819,11 +1819,7 @@ impl<'a> Scene<'a> {
     }
     /// メニューの1行。押せるかは[`Scene::enabled`]が決める。
     fn row(&self, ja: &str, en: &str, command: Command, checked: bool) -> Item {
-        let enabled = match &command {
-            // 挿入の形は、押せるかと一緒に「いまの行がその形か」も同じ答えから読む。
-            Command::Insert(shape) => self.insert_state(*shape).0,
-            command => self.enabled(command),
-        };
+        let enabled = self.enabled(&command);
         Item::Row {
             ja: ja.to_owned(),
             en: en.to_owned(),
@@ -3238,8 +3234,15 @@ mod tests {
             .unwrap();
             let native = titled_leaves(menu.handle);
 
-            let (top, children) =
-                context_insert_rows(true, ordinary_selection(picked), notes, places(false));
+            let (top, children) = context_insert_rows(|shape| {
+                context_insert_state(
+                    shape,
+                    true,
+                    ordinary_selection(picked),
+                    &notes,
+                    places(false),
+                )
+            });
             let mut ours: Vec<(&str, bool, bool)> = Vec::new();
             let (mut at_top, mut at_child) = (0, 0);
             for what in INSERT_MENU {
@@ -3710,12 +3713,7 @@ mod tests {
             }
             assert!(format_face(first).is_some(), "{first:?}");
         }
-        let (buttons, _) = format_rows(
-            true,
-            ordinary_selection(true),
-            (bare_notes(), places(true)),
-            document::BulletMarks::all(),
-        );
+        let (buttons, _) = format_rows(true, |_| (true, false), document::BulletMarks::all());
         // テンプレートだけは書式のボタンを持たない（RFN01-88）。
         assert_eq!(buttons.len(), INSERT_MENU.len() - 1 + 3);
         assert!(
@@ -3740,12 +3738,8 @@ mod tests {
     /// **押した番号は、メニューと同じ操作へ戻る**——組の中身も、箇条書きも。
     #[test]
     fn a_format_button_runs_the_menu_command() {
-        let (buttons, children) = format_rows(
-            true,
-            ordinary_selection(true),
-            (bare_notes(), places(true)),
-            document::BulletMarks::all(),
-        );
+        let (buttons, children) =
+            format_rows(true, |_| (true, false), document::BulletMarks::all());
         for button in &buttons {
             assert_eq!(button.flyout, button.action == -1, "{}", button.tip);
             assert_eq!(button.flyout, button.group >= 0, "{}", button.tip);
@@ -3804,10 +3798,13 @@ mod tests {
     /// 書けないとき、**ボタンも組の中身も押せない**（メニューと同じ）。
     #[test]
     fn no_format_button_is_pickable_when_the_body_cannot_be_written() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        PaneId::FIRST.update_screen(&h.window, |screen| screen.viewer = true);
+        let target = Target::for_shortcut(&h.window, &h.live);
+        let scene = Scene::read(&h.window, &h.live, &target);
         let (buttons, children) = format_rows(
-            false,
-            ordinary_selection(true),
-            (bare_notes(), places(true)),
+            scene.editable,
+            |shape| scene.insert_menu_state(shape),
             document::BulletMarks::all(),
         );
         assert!(buttons.iter().all(|button| !button.enabled));
