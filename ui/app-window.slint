@@ -3423,7 +3423,7 @@ export component AppWindow inherits Window {
                     // window had not been told there was one. Rust keeps
                     // `focused-pane` naming a pane that is on screen
                     // (`place_panes`), so this needs no second condition.
-                    takes-focus: pane.id == root.focused-pane;
+                    takes-focus: pane.id == root.focused-pane && !root.question-open;
 
                         resized => { root.pane-resized(pane.id); }
                         scrolled(offset) => { root.pane-scroll-changed(pane.id, offset); }
@@ -7204,6 +7204,7 @@ export component AppWindow inherits Window {
             }
             changed generation => {
                 self.selected-choice = -1;
+                if !root.question-asks-name { self.focus(); }
             }
             init => {
                 self.focus();

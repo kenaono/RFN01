@@ -185,6 +185,113 @@ fn file_tree_keeps_focus_through_file_open_and_confirmation() {
 }
 
 #[test]
+fn memo_discard_confirmation_takes_focus_and_resets_the_choice() {
+    use crate::saving::Harness;
+    use slint::platform::{Key, WindowEvent};
+
+    let (h, memo) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let (window, live) = (&h.window, &h.live);
+    let id = PaneId::FIRST;
+    *memo.text.borrow_mut() = "残す本文".into();
+    let current = live.tabs.borrow().of(id).tabs[0].clone();
+    live.show_tab(window, id, &current);
+
+    let weak = window.as_weak();
+    let answered = live.clone();
+    window.on_question_answered(move |choice| {
+        let weak = weak.clone();
+        let live = answered.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                answer_question(&window, &live, choice);
+            }
+        });
+    });
+    let entered = Rc::new(RefCell::new(Vec::new()));
+    let observed = entered.clone();
+    let weak = window.as_weak();
+    window.on_pane_text_input(move |pane, text, _| {
+        observed.borrow_mut().push(text.to_string());
+        if let Some(window) = weak.upgrade() {
+            PaneId::from_index(pane).set_ime_buffer(&window, "");
+        }
+    });
+    window.show().unwrap();
+    let settle = || {
+        slint::platform::update_timers_and_animations();
+        window.window().request_redraw();
+        h.surface.draw_if_needed(|renderer| {
+            let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+            renderer.render(&mut pixels, 1000);
+        });
+    };
+    let press = |text: SharedString| {
+        window
+            .window()
+            .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        window
+            .window()
+            .dispatch_event(WindowEvent::KeyReleased { text });
+        settle();
+    };
+    restore_editor_focus(window);
+    settle();
+    press("x".into());
+    assert_eq!(&*entered.borrow(), &["x"]);
+    entered.borrow_mut().clear();
+
+    let ask_to_discard = || {
+        assert!(close_tab(window, live, id, 0));
+        settle();
+        assert!(matches!(
+            *live.pending.borrow(),
+            Some(Question::CloseMemo { .. })
+        ));
+        press(Key::Tab.into());
+        press(Key::DownArrow.into());
+        press(Key::Return.into());
+        assert!(matches!(
+            *live.pending.borrow(),
+            Some(Question::DiscardOnClose { .. })
+        ));
+    };
+    ask_to_discard();
+    press(Key::Return.into());
+    press("z".into());
+    assert!(matches!(
+        *live.pending.borrow(),
+        Some(Question::DiscardOnClose { .. })
+    ));
+    assert!(
+        entered.borrow().is_empty(),
+        "typing must stay out of the editor"
+    );
+    press(Key::Escape.into());
+    assert!(live.pending.borrow().is_none());
+    assert_eq!(memo.text.borrow().as_str(), "残す本文");
+    press("y".into());
+    assert_eq!(
+        &*entered.borrow(),
+        &["y"],
+        "cancel returns focus to the editor"
+    );
+
+    ask_to_discard();
+    press(Key::Tab.into());
+    press(Key::Return.into());
+    assert!(live.pending.borrow().is_none());
+    assert!(
+        !live
+            .tabs
+            .borrow()
+            .of(id)
+            .tabs
+            .iter()
+            .any(|tab| Rc::ptr_eq(&tab.document, &memo))
+    );
+}
+
+#[test]
 fn explorer_menu_blocks_refresh_until_dismissed() {
     use slint::platform::{PointerEventButton, WindowEvent};
     let surface = MinimalSoftwareWindow::new(Default::default());

@@ -9252,16 +9252,15 @@ fn workspace_clone_requested(window: &AppWindow, live: &Live) {
     window.set_workspace_clone_url_checking(false);
     window.set_question_name("".into());
     window.set_workspace_clone_destination("".into());
-    ask_question(
+    show_question(
         window,
         live,
         Question::CloneWorkspaceUrl,
         pick("リポジトリを取得", "Clone Repository").into(),
         &[pick("取得", "Clone"), cancel()],
         -1,
+        true,
     );
-    window.set_question_asks_name(true);
-    window.set_question_generation(window.get_question_generation() + 1);
 }
 
 fn workspace_clone_url_edited(window: &AppWindow, live: &Live) {
@@ -14413,6 +14412,18 @@ fn ask_question(
     choices: &[&str],
     danger: i32,
 ) {
+    show_question(window, live, question, text, choices, danger, false);
+}
+
+fn show_question(
+    window: &AppWindow,
+    live: &Live,
+    question: Question,
+    text: String,
+    choices: &[&str],
+    danger: i32,
+    asks_name: bool,
+) {
     // Described before it is handed over: a question carries a path now, so
     // storing it moves it.
     let described = question.diagnostic_name();
@@ -14441,7 +14452,8 @@ fn ask_question(
     window.set_question_detail(detail.into());
     window.set_question_choices(ModelRc::new(VecModel::from(named)));
     window.set_question_danger(danger);
-    window.set_question_asks_name(false);
+    window.set_question_asks_name(asks_name);
+    window.set_question_generation(window.get_question_generation() + 1);
     window.set_question_open(true);
     live.cache.borrow_mut().log_diag("ask", described);
 }
@@ -14460,17 +14472,15 @@ fn ask_for_name(
     suggested_name: &str,
 ) {
     window.set_question_name(suggested_name.into());
-    ask_question(
+    show_question(
         window,
         live,
         question,
         text,
         &[pick("決定", "OK"), cancel()],
         -1,
+        true,
     );
-    window.set_question_asks_name(true);
-    let asked = window.get_question_generation();
-    window.set_question_generation(asked + 1);
 }
 
 /// Act on the answer to the question that was standing.
@@ -14496,17 +14506,24 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     {
         live.folder.borrow_mut().pending_workspace_cleanup = None;
     }
+    let return_to_tree = window.get_question_return_to_tree();
     window.set_question_open(false);
-    // The question took the keyboard away from the pane to ask (6.14).
-    if window.get_question_return_to_tree() {
-        tree_actions::restore_focus(window);
-    } else if git_catalog_ui::visible(window) {
-        git_catalog_ui::regain_focus(window);
-    } else if window.get_git_repo_active() && !window.get_diff_active() {
-        git_repo_ui::regain_focus(window);
-    } else {
-        restore_editor_focus(window);
+    apply_question_answer(window, live, question, choice);
+    // A follow-up question owns the keyboard until its own answer.
+    if !window.get_question_open() {
+        if return_to_tree {
+            tree_actions::restore_focus(window);
+        } else if git_catalog_ui::visible(window) {
+            git_catalog_ui::regain_focus(window);
+        } else if window.get_git_repo_active() && !window.get_diff_active() {
+            git_repo_ui::regain_focus(window);
+        } else {
+            restore_editor_focus(window);
+        }
     }
+}
+
+fn apply_question_answer(window: &AppWindow, live: &Live, question: Question, choice: i32) {
     live.cache.borrow_mut().log_diag(
         "answer",
         &format!("{} choice={choice}", question.diagnostic_name()),
