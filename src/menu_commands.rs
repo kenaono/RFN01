@@ -13,6 +13,7 @@ use windows::{
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Command {
     Tree(crate::tree_actions::Action),
+    PanelAction(crate::panel_actions::Action),
     NewFile,
     /// RFN01-88: 新規文書をテンプレートから（名前で）。
     NewFromTemplate(String),
@@ -1053,6 +1054,7 @@ pub(crate) struct Target {
     spot: TerminalSpot,
     field: i32,
     tree: Option<crate::tree_actions::Target>,
+    panel_context: Option<crate::panel_actions::Context>,
 }
 impl Target {
     fn capture(window: &AppWindow, live: &Live) -> Self {
@@ -1109,6 +1111,7 @@ impl Target {
             spot,
             field,
             tree: None,
+            panel_context: None,
         }
     }
     fn with_tree(mut self, tree: crate::tree_actions::Target) -> Self {
@@ -1118,6 +1121,19 @@ impl Target {
 
     pub(crate) fn for_tree(window: &AppWindow, live: &Live) -> Self {
         Self::with_field(window, live, 0).with_tree(crate::tree_actions::Target::capture(window, live))
+    }
+
+    pub(crate) fn for_panels(window: &AppWindow, live: &Live) -> Self {
+        Self::for_tree(window, live).with_panel_context(window, live)
+    }
+
+    pub(crate) fn for_surface(window: &AppWindow, live: &Live) -> Self {
+        Self::with_field(window, live, 0).with_panel_context(window, live)
+    }
+
+    fn with_panel_context(mut self, window: &AppWindow, live: &Live) -> Self {
+        self.panel_context = Some(crate::panel_actions::Context::capture(window, live));
+        self
     }
 
     fn valid(&self, window: &AppWindow, live: &Live) -> bool {
@@ -1142,6 +1158,7 @@ impl Target {
 
 pub fn install(window: &AppWindow, live: &Live) {
     install_menu_actions(window, live);
+    crate::panel_actions::wire(window, live);
     let weak = window.as_weak();
     window.global::<MenuInput>().on_open_menu(move || {
         if let Some(window) = weak.upgrade() {
@@ -1602,6 +1619,7 @@ impl<'a> Scene<'a> {
             (self.text, self.editable, self.main, self.path, self.field);
         let panel = t.id.is_panel();
         match command {
+            Command::PanelAction(action) => crate::panel_actions::enabled(window, *action, text, self.screen.settings),
             Command::Tree(action) => {
                 t.tree.as_ref().is_some_and(|tree| tree.enabled(window, self.live, *action))
                     && (*action != crate::tree_actions::Action::RevealDocument
@@ -2449,6 +2467,7 @@ pub(crate) fn allowed_for(
 /// 変わることがある）。断ったときは`name`で知らせる（その時の状態だけの操作は黙る）。
 pub(crate) fn run(window: &AppWindow, live: &Live, t: &Target, command: Command, name: &str) {
     let valid = match &command {
+        Command::PanelAction(action) => t.valid(window, live) && t.panel_context.as_ref().is_some_and(|context| context.valid(window, live, *action)),
         Command::Tree(action) => t.tree.as_ref().is_some_and(|tree| tree.valid(window, live))
             && (*action != crate::tree_actions::Action::RevealDocument || t.valid(window, live)),
         _ => t.valid(window, live),
@@ -2569,6 +2588,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
     let p = t.id.index();
     let parent = t.parent.index();
     match command {
+        Command::PanelAction(action) => crate::panel_actions::execute(window, live, action),
         Command::Tree(action) => {
             if let Some(tree) = &t.tree {
                 crate::tree_actions::execute(window, live, tree, t.id, action);
@@ -2789,6 +2809,7 @@ fn takes_keyboard(command: &Command) -> bool {
         command,
         Command::CommandPalette(_)
             | Command::Tree(_)
+            | Command::PanelAction(_)
             | Command::TemplatePicker
             | Command::RecentPicker
             | Command::WordModePicker

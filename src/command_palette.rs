@@ -136,7 +136,7 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
         PALETTE.with(|held| {
             *held.borrow_mut() = Some(Palette {
                 pane,
-                tree: menu_commands::Target::for_tree(window, live),
+                tree: menu_commands::Target::for_panels(window, live),
                 files: None,
                 operations: None,
                 templates: None,
@@ -176,7 +176,7 @@ fn open_list_for(window: &AppWindow, live: &Live, pane: PaneId, list: List) {
     PALETTE.with(|held| {
         *held.borrow_mut() = Some(Palette {
             pane,
-            tree: menu_commands::Target::for_tree(window, live),
+            tree: menu_commands::Target::for_panels(window, live),
             files: None,
             operations: None,
             templates: None,
@@ -393,7 +393,7 @@ fn accept(window: &AppWindow, live: &Live) {
         match chosen {
             Chosen::File(path) => open_path_in_focused_pane(&window, &live, &path, Opening::Kept),
             Chosen::Operation(command, name) => {
-                let target = if matches!(command, menu_commands::Command::Tree(_)) {
+                let target = if matches!(command, menu_commands::Command::Tree(_) | menu_commands::Command::PanelAction(_)) {
                     tree
                 } else {
                     menu_commands::Target::for_pane(&window, &live, pane)
@@ -800,8 +800,9 @@ fn operations_now(
         .enumerate()
         .filter_map(|(at, action)| {
             let command = action.command.clone()?;
-            let enabled = if matches!(command, menu_commands::Command::Tree(_)) {
-                tree_scene.enabled(&command)
+            let enabled = if matches!(command, menu_commands::Command::Tree(_) | menu_commands::Command::PanelAction(_)) {
+                (!matches!(command, menu_commands::Command::PanelAction(_)) || !crate::panel_actions::overlay_active(window))
+                    && tree_scene.enabled(&command)
             } else {
                 menu_commands::allowed_for(window, live, pane, &command) == menu_commands::Allowed::Yes
             };

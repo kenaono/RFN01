@@ -54,6 +54,7 @@ export component DiffView inherits Rectangle {
     callback select-difference(int);
     callback copy-side(bool);
     callback dismissed();
+    callback shortcut(KeyEvent) -> EventResult;
     in property <bool> merge-enabled;
     in property <bool> can-apply;
     callback choose-side(bool);
@@ -61,6 +62,7 @@ export component DiffView inherits Rectangle {
     FocusScope {
         init => { self.focus(); }
         key-pressed(event) => {
+            if root.shortcut(event) == accept { return accept; }
             if event.text == Key.Escape { root.dismissed(); }
             return accept;
         }

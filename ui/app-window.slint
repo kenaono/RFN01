@@ -1599,6 +1599,8 @@ export component AppWindow inherits Window {
     callback shortcut-capture(string, bool, bool, bool);
     callback shortcut-is-tree(int) -> bool;
     callback shortcut-key(string, bool, bool, bool) -> bool;
+    callback surface-action(string);
+    callback panel-shortcut(string, bool, bool, bool) -> bool;
 
     // 要件 7.10: 紙の形で見る——印刷プレビュー。
     in-out property <bool> print-active: false;
@@ -2073,8 +2075,8 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                            IconButton { icon: Icons.plus; tip: @tr("Add Folder…"); clicked => { root.workspace-tree-command(0); } }
-                            IconButton { icon: "M8 1v9M4 6l4 4 4-4M2 11v4h12v-4"; tip: root.workspace-cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…"); enabled: !root.workspace-cloning; clicked => { root.workspace-tree-command(1); } }
+                            IconButton { icon: Icons.plus; tip: @tr("Add Folder…"); clicked => { root.surface-action("workspace.attach-folder"); } }
+                            IconButton { icon: "M8 1v9M4 6l4 4 4-4M2 11v4h12v-4"; tip: root.workspace-cloning ? @tr("Cloning Repository…") : @tr("Clone Repository…"); enabled: !root.workspace-cloning; clicked => { root.surface-action("workspace.clone-repository"); } }
                             IconButton { icon: Icons.search; tip: @tr("Search in Folder"); checked: root.tree-searching; clicked => { root.tree-search-toggled(); } }
                             IconButton { icon: "M1 2h14L9 8v6l-2-1V8z"; tip: @tr("Filter files…"); checked: root.workspace-filter-visible; clicked => { root.workspace-filter-visible = !root.workspace-filter-visible; } }
                         }
@@ -2105,14 +2107,14 @@ export component AppWindow inherits Window {
                         create-repository => { root.git-create-repository(); }
                         branch-chosen(index) => { root.git-branch-chosen(index); }
                         new-branch => { root.git-new-branch(); }
-                        fetch => { root.git-fetch(); }
-                        pull => { root.git-pull(); }
-                        push => { root.git-push(); }
-                        sync => { root.git-sync(); }
-                        commit => { root.git-commit(); }
+                        fetch => { root.surface-action("git.fetch"); }
+                        pull => { root.surface-action("git.pull"); }
+                        push => { root.surface-action("git.push"); }
+                        sync => { root.surface-action("git.sync"); }
+                        commit => { root.surface-action("git.commit-changes"); }
                         amend-toggled(wanted) => { root.git-amend-toggled(wanted); }
                         stash-all => { root.git-stash-all(); }
-                        cancel => { root.git-cancel(); }
+                        cancel => { root.surface-action("git.cancel"); }
                         row-clicked(index) => { root.git-row-clicked(index); }
                         row-activated(index) => { root.git-row-activated(index); }
                         row-staged(index) => { root.git-row-staged(index); }
@@ -2142,8 +2144,8 @@ export component AppWindow inherits Window {
                         activated(row) => { root.bookmark-activated(row); }
                         toggled(row) => { root.bookmark-toggled(row); }
                         cleared => { root.bookmark-cleared(); }
-                        add-current => { root.bookmark-add-current(); }
-                        create-group => { root.bookmark-create-group(); }
+                        add-current => { root.surface-action("bookmarks.add-current"); }
+                        create-group => { root.surface-action("bookmarks.create-group"); }
                         sort-toggled => { root.bookmark-sort-toggled(); }
                         filter-changed => { root.bookmark-filter-changed(); }
                         rename(row) => { root.bookmark-rename(row); }
@@ -2155,15 +2157,15 @@ export component AppWindow inherits Window {
                     if root.left-tab == 3: HorizontalLayout {
                         padding: 6px; spacing: 2px; vertical-stretch: 0;
                         alignment: start;
-                        IconButton { icon: Icons.collapse-all; tip: @tr("Collapse All"); clicked => { root.outline-fold-all(true); } }
-                        IconButton { icon: Icons.expand-all; tip: @tr("Expand All"); clicked => { root.outline-fold-all(false); } }
+                        IconButton { icon: Icons.collapse-all; tip: @tr("Collapse All"); clicked => { root.surface-action("outline.collapse-all"); } }
+                        IconButton { icon: Icons.expand-all; tip: @tr("Expand All"); clicked => { root.surface-action("outline.expand-all"); } }
                     }
                     // 書き手の求め 2026-09-23: Tag Viewの上。Outlineと同じ2つに、絞り込みを1つ。
                     if root.left-tab == 6: HorizontalLayout {
                         padding: 6px; spacing: 2px; vertical-stretch: 0;
                         alignment: start;
-                        IconButton { icon: Icons.collapse-all; tip: @tr("Collapse All"); enabled: root.tag-available; clicked => { root.tag-fold-all(true); } }
-                        IconButton { icon: Icons.expand-all; tip: @tr("Expand All"); enabled: root.tag-available; clicked => { root.tag-fold-all(false); } }
+                        IconButton { icon: Icons.collapse-all; tip: @tr("Collapse All"); enabled: root.tag-available; clicked => { root.surface-action("tags.collapse-all"); } }
+                        IconButton { icon: Icons.expand-all; tip: @tr("Expand All"); enabled: root.tag-available; clicked => { root.surface-action("tags.expand-all"); } }
                         IconButton {
                             icon: Icons.filter;
                             tip: @tr("Filter Tags…");
@@ -3137,7 +3139,7 @@ export component AppWindow inherits Window {
                     }
                     if root.left-tab == 4 && root.workspace-active: TextButton {
                         wide: true; title: @tr("Close Workspace");
-                        clicked => { root.workspace-leave-requested(); }
+                        clicked => { root.surface-action("workspace.leave"); }
                     }
                 }
             }
@@ -4302,11 +4304,11 @@ export component AppWindow inherits Window {
                                                     spacing: 6px;
                                                     TextButton {
                                                         title: @tr("Export…");
-                                                        clicked => { root.settings-export-requested(); }
+                                                        clicked => { root.surface-action("settings.export-all"); }
                                                     }
                                                     TextButton {
                                                         title: @tr("Import…");
-                                                        clicked => { root.settings-import-requested(); }
+                                                        clicked => { root.surface-action("settings.import-all"); }
                                                     }
                                                 }
                                                 Text {
@@ -4327,7 +4329,7 @@ export component AppWindow inherits Window {
                                                 TextButton {
                                                     title: @tr("Reset All");
                                                     role: Role.danger;
-                                                    clicked => { root.reset-all-requested(); }
+                                                    clicked => { root.surface-action("settings.reset-all"); }
                                                 }
                                                 Text {
                                                     text: @tr("Restores General, Terminal, Left Pane, Text, Layout, Page and Keys to their defaults and sets each document's mode to \"None\". Word sets and modes are kept.");
@@ -6914,6 +6916,7 @@ export component AppWindow inherits Window {
         background: Tok.chrome-sunken;
         TouchArea { }
         PrintView {
+            shortcut(event) => { return root.panel-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject; }
             width: parent.width;
             height: parent.height;
             title: root.print-title;
@@ -6939,9 +6942,10 @@ export component AppWindow inherits Window {
             paper-pressed => { root.print-paper-pressed(); }
             working: root.print-working;
             turned(to) => { root.print-turned(to); }
+            step(forward) => { root.surface-action(forward ? "print-preview.next" : "print-preview.previous"); }
             margin-stepped(by) => { root.print-margin-stepped(by); }
-            print-requested => { root.print-requested(); }
-            dismissed => { root.print-dismissed(); }
+            print-requested => { root.surface-action("print-preview.print"); }
+            dismissed => { root.surface-action("print-preview.close"); }
         }
     }
 
@@ -7013,13 +7017,13 @@ export component AppWindow inherits Window {
             shortcut(text, control, alt, shift) => { return root.shortcut-key(text, control, alt, shift); }
             branch-chosen(index) => { root.git-branch-chosen(index); }
             new-branch => { root.git-new-branch(); }
-            pull => { root.git-pull(); }
-            push => { root.git-push(); }
-            fetch => { root.git-fetch(); }
+            pull => { root.surface-action("git.pull"); }
+            push => { root.surface-action("git.push"); }
+            fetch => { root.surface-action("git.fetch"); }
             branch-here => { root.git-repo-branch-here(); }
             stash => { root.git-stash-all(); }
             pop => { root.git-repo-pop(); }
-            cancel => { root.git-cancel(); }
+            cancel => { root.surface-action("git.cancel"); }
             commit-selected(index) => { root.git-repo-commit-selected(index); }
             commit-menu(index, action) => { root.git-repo-commit-menu(index, action); }
             show-more => { root.git-repo-show-more(); }
@@ -7029,7 +7033,7 @@ export component AppWindow inherits Window {
             branch-dropped(from, to) => { root.git-repo-branch-dropped(from, to); }
             file-clicked(index) => { root.git-repo-file-clicked(index); }
             file-menu(index, action) => { root.git-repo-file-menu(index, action); }
-            changes-commit => { root.git-commit(); }
+            changes-commit => { root.surface-action("git.commit-changes"); }
             changes-amend-toggled(wanted) => { root.git-amend-toggled(wanted); }
             changes-stash-all => { root.git-stash-all(); }
             changes-row-clicked(index) => { root.git-repo-changes-clicked(index); }
@@ -7064,10 +7068,11 @@ export component AppWindow inherits Window {
             any-checked: root.backup-history-any;
             chosen(index) => { root.backup-history-chosen(index); }
             toggled(index) => { root.backup-history-toggled(index); }
-            all-toggled => { root.backup-history-all-toggled(); }
-            delete-requested => { root.backup-history-delete(); }
+            all-toggled => { root.surface-action("backups.toggle-all"); }
+            delete-requested => { root.surface-action("backups.delete-checked"); }
         }
         DiffView {
+            shortcut(event) => { return root.panel-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject; }
             rows: root.diff-rows;
             left-path: root.diff-left-path;
             right-path: root.diff-right-path;
@@ -7076,14 +7081,14 @@ export component AppWindow inherits Window {
             content-width: root.diff-content-width;
             can-previous: root.diff-can-previous;
             can-next: root.diff-can-next;
-            next-difference(forward) => { root.diff-next-difference(forward); }
+            next-difference(forward) => { root.surface-action(forward ? "comparison.next" : "comparison.previous"); }
             select-difference(row) => { root.diff-select-difference(row); }
-            copy-side(right) => { root.diff-copy-side(right); }
-            dismissed => { root.diff-dismissed(); }
+            copy-side(right) => { root.surface-action(right ? "comparison.copy-right" : "comparison.copy-left"); }
+            dismissed => { root.surface-action("comparison.close"); }
             merge-enabled: root.diff-merge-enabled;
             can-apply: root.diff-can-apply;
-            choose-side(right) => { root.diff-choose-side(right); }
-            apply-merge => { root.diff-apply-merge(); }
+            choose-side(right) => { root.surface-action(right ? "comparison.take-right" : "comparison.keep-left"); }
+            apply-merge => { root.surface-action("comparison.apply"); }
         }
         }
     }
@@ -7419,9 +7424,9 @@ export component AppWindow inherits Window {
                     if root.workspace-context-folder: MenuRow { title: @tr("Detach Workspace Folder…"); activated => { root.workspace-tree-command(3); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Move Up"); activated => { root.workspace-tree-command(5); root.close-tree-menu(); } }
                     if root.workspace-context-folder: MenuRow { title: @tr("Move Down"); activated => { root.workspace-tree-command(6); root.close-tree-menu(); } }
-                    MenuRow { title: @tr("Reset View…"); activated => { root.workspace-tree-command(4); root.close-tree-menu(); } }
-                    MenuRow { title: @tr("Add Folder…"); activated => { root.workspace-tree-command(0); root.close-tree-menu(); } }
-                    MenuRow { title: @tr("Clone Repository…"); enabled: !root.workspace-cloning; activated => { root.workspace-tree-command(1); root.close-tree-menu(); } }
+                    MenuRow { title: @tr("Reset View…"); activated => { root.surface-action("workspace.reset-view"); root.close-tree-menu(); } }
+                    MenuRow { title: @tr("Add Folder…"); activated => { root.surface-action("workspace.attach-folder"); root.close-tree-menu(); } }
+                    MenuRow { title: @tr("Clone Repository…"); enabled: !root.workspace-cloning; activated => { root.surface-action("workspace.clone-repository"); root.close-tree-menu(); } }
                 }
             }
         }

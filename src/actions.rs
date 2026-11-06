@@ -24,9 +24,10 @@ pub(crate) enum Category {
     Terminal,
     LeftPane,
     QuickDraft,
+    Surface,
 }
 impl Category {
-    pub(crate) const ALL: [Category; 11] = [
+    pub(crate) const ALL: [Category; 12] = [
         Category::File,
         Category::Edit,
         Category::Insert,
@@ -38,6 +39,7 @@ impl Category {
         Category::Terminal,
         Category::LeftPane,
         Category::QuickDraft,
+        Category::Surface,
     ];
     pub(crate) fn index(self) -> i32 {
         Self::ALL.iter().position(|c| *c == self).unwrap_or(0) as i32
@@ -55,6 +57,7 @@ impl Category {
             Category::Terminal => ("Terminal", "Terminal"),
             Category::LeftPane => ("左ペイン", "Left Pane"),
             Category::QuickDraft => ("Quick Draft", "Quick Draft"),
+            Category::Surface => ("画面内の操作", "Panel Actions"),
         }
     }
     pub(crate) fn note(self) -> (&'static str, &'static str) {
@@ -98,6 +101,10 @@ impl Category {
             Category::LeftPane => (
                 "左ペイン（Explorer・検索・Outlineなど）の操作です。",
                 "Actions of the left pane (Explorer, Search, Outline and so on).",
+            ),
+            Category::Surface => (
+                "対象の画面を表示しているときに使えます。",
+                "Available when the relevant panel is showing.",
             ),
             Category::QuickDraft => (
                 "Quick Draftの中で効く操作です。",
@@ -1813,6 +1820,44 @@ fn build() -> Vec<ActionDef> {
             scope: Scope::QuickDraft,
             command: None,
         });
+    }
+    {
+        use crate::panel_actions::Action as A;
+        v.extend([
+        ("outline.collapse-all", ("アウトラインをすべて畳む", "Collapse All Outline Headings"), A::OutlineCollapse),
+        ("outline.expand-all", ("アウトラインをすべて展開", "Expand All Outline Headings"), A::OutlineExpand),
+        ("tags.collapse-all", ("タグをすべて畳む", "Collapse All Tags"), A::TagsCollapse),
+        ("tags.expand-all", ("タグをすべて展開", "Expand All Tags"), A::TagsExpand),
+        ("bookmarks.add-current", ("現在のTABをブックマークに追加", "Bookmark Current Tab"), A::BookmarkAdd),
+        ("bookmarks.create-group", ("ブックマークのグループを作成…", "Create Bookmark Group…"), A::BookmarkGroup),
+        ("workspace.attach-folder", ("Workspaceにフォルダを追加…", "Add Folder to Workspace…"), A::WorkspaceAttach),
+        ("workspace.clone-repository", ("WorkspaceにリポジトリをClone…", "Clone Repository into Workspace…"), A::WorkspaceClone),
+        ("workspace.reset-view", ("Workspaceの表示をリセット…", "Reset Workspace View…"), A::WorkspaceReset),
+        ("workspace.leave", ("Workspaceを閉じる", "Close Workspace"), A::WorkspaceLeave),
+        ("git.fetch", ("Git Fetch", "Git Fetch"), A::GitFetch),
+        ("git.pull", ("Git Pull", "Git Pull"), A::GitPull),
+        ("git.push", ("Git Push／Publish", "Git Push or Publish"), A::GitPush),
+        ("git.sync", ("Git Sync", "Git Sync"), A::GitSync),
+        ("git.cancel", ("実行中のGit操作を中止", "Cancel Git Operation"), A::GitCancel),
+        ("git.commit-changes", ("入力したメッセージでCommit", "Commit with Entered Message"), A::GitCommit),
+        ("comparison.previous", ("前の差分", "Previous Difference"), A::DiffPrevious),
+        ("comparison.next", ("次の差分", "Next Difference"), A::DiffNext),
+        ("comparison.close", ("比較を終える", "End Comparison"), A::DiffClose),
+        ("comparison.keep-left", ("選んだ差分の左側を残す", "Keep Left Side of Selected Difference"), A::DiffKeepLeft),
+        ("comparison.take-right", ("選んだ差分の右側を取る", "Take Right Side of Selected Difference"), A::DiffTakeRight),
+        ("comparison.apply", ("選んだ差分を本文に反映", "Apply Chosen Differences"), A::DiffApply),
+        ("comparison.copy-left", ("比較の左側を全文コピー", "Copy Left Side of Comparison"), A::DiffCopyLeft),
+        ("comparison.copy-right", ("比較の右側を全文コピー", "Copy Right Side of Comparison"), A::DiffCopyRight),
+        ("backups.toggle-all", ("バックアップ履歴をすべて選択／解除", "Toggle All Backup History Checks"), A::BackupSelectAll),
+        ("backups.delete-checked", ("選択したバックアップを削除…", "Delete Checked Backups…"), A::BackupDelete),
+        ("print-preview.previous", ("印刷プレビューの前のページ", "Previous Print Preview Page"), A::PrintPrevious),
+        ("print-preview.next", ("印刷プレビューの次のページ", "Next Print Preview Page"), A::PrintNext),
+        ("print-preview.close", ("印刷プレビューを閉じる", "Close Print Preview"), A::PrintClose),
+        ("print-preview.print", ("プレビューを印刷…", "Print from Preview…"), A::PrintSubmit),
+        ("settings.export-all", ("すべての設定を書き出す…", "Export All Settings…"), A::SettingsExport),
+        ("settings.import-all", ("すべての設定を取り込む…", "Import All Settings…"), A::SettingsImport),
+        ("settings.reset-all", ("すべての設定を既定に戻す…", "Reset All Settings…"), A::SettingsReset),
+        ].map(|(id, title, action)| def(id, title, action.description(), "", Category::Surface, C::PanelAction(action))));
     }
     use crate::tree_actions::Action as A;
     use crate::TreeCommand as T;

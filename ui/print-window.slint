@@ -39,6 +39,7 @@ export component PrintView inherits Rectangle {
     in property <int> size;
     in property <bool> working;
     callback turned(int);
+    callback step(bool);
     /// 余白を1段（5mm）ずつ。**紙の行の長さはここで決まる**——行の長さは紙から
     /// 余白を引いたぶんで、そこへ字体と大きさで組ませる（書き手の指摘 2026-09-16：
     /// 「フォントとサイズを設定して、組版するのが正しいのではないですか」）。
@@ -63,6 +64,7 @@ export component PrintView inherits Rectangle {
     callback trim-written(bool, int, string);
     callback print-requested();
     callback dismissed();
+    callback shortcut(KeyEvent) -> EventResult;
 
     // 面の中を触った音が下の編集画面へ抜けないように。そして**ホイールで紙を繰る**
     // （書き手の求め 2026-09-16）——下へ回せば次の紙。紙の上でも余白の上でも効く。
@@ -75,9 +77,9 @@ export component PrintView inherits Rectangle {
                 return accept;
             }
             if (event.delta-y < 0 || event.delta-x < 0) {
-                root.turned(root.at + root.shown);
+                root.step(true);
             } else if (event.delta-y > 0 || event.delta-x > 0) {
-                root.turned(root.at - root.shown);
+                root.step(false);
             }
             return accept;
         }
@@ -86,13 +88,14 @@ export component PrintView inherits Rectangle {
     FocusScope {
         init => { self.focus(); }
         key-pressed(event) => {
+            if root.shortcut(event) == accept { return accept; }
             if event.text == Key.Escape { root.dismissed(); }
             // 紙を繰るのは矢印でもできる。**紙の向きに関わらず、左が前・右が次**
             // ——繰っているのは紙であって、本文ではない。
-            if event.text == Key.LeftArrow { root.turned(root.at - root.shown); }
-            if event.text == Key.RightArrow { root.turned(root.at + root.shown); }
-            if event.text == Key.PageUp { root.turned(root.at - root.shown); }
-            if event.text == Key.PageDown { root.turned(root.at + root.shown); }
+            if event.text == Key.LeftArrow { root.step(false); }
+            if event.text == Key.RightArrow { root.step(true); }
+            if event.text == Key.PageUp { root.step(false); }
+            if event.text == Key.PageDown { root.step(true); }
             if event.text == Key.Home { root.turned(0); }
             if event.text == Key.End { root.turned(root.pages - 1); }
             return accept;
@@ -128,7 +131,7 @@ export component PrintView inherits Rectangle {
                 TextButton {
                     title: "‹";
                     enabled: root.at > 0 && !root.working;
-                    clicked => { root.turned(root.at - root.shown); }
+                    clicked => { root.step(false); }
                 }
                 Text {
                     // 何枚目か。**1から数える**——紙を数えるのは人である。
@@ -145,7 +148,7 @@ export component PrintView inherits Rectangle {
                 TextButton {
                     title: "›";
                     enabled: root.at + root.shown < root.pages && !root.working;
-                    clicked => { root.turned(root.at + root.shown); }
+                    clicked => { root.step(true); }
                 }
                 TextButton {
                     title: @tr("Print…");
