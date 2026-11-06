@@ -13740,7 +13740,7 @@ pub mod cells {
             };
             // SAFETY: the factory outlives this struct and the name outlives the call.
             let format = unsafe {
-                self.dwrite.CreateTextFormat(
+                let format = self.dwrite.CreateTextFormat(
                     &family,
                     None,
                     weight,
@@ -13752,7 +13752,10 @@ pub mod cells {
                     DWRITE_FONT_STRETCH_NORMAL,
                     size,
                     w!("ja-JP"),
-                )?
+                )?;
+                // The terminal grid already decides where each row ends.
+                format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                format
             };
             self.cell_formats.insert(key, format.clone());
             Ok(format)
@@ -13954,9 +13957,6 @@ pub mod cells {
                         brush.SetColor(&colour(foreground));
                         let utf16 = run.text.encode_utf16().collect::<Vec<u16>>();
                         let format = if run.attrs.bold { &bold } else { &plain };
-                        // **A cell is not a line box.** The rectangle is the run's
-                        // own columns, so a glyph wider than its cell is clipped to
-                        // where the grid says it ends rather than pushing the row.
                         target.DrawText(
                             &utf16,
                             format,
@@ -14163,6 +14163,49 @@ mod terminal_tests {
         assert_eq!(
             in_run, alone[0],
             "the 40th character of a run drifted out of its column"
+        );
+    }
+
+    #[test]
+    fn colored_terminal_runs_stay_on_their_grid_row_at_120_percent() {
+        let look = TerminalLook {
+            // At 120% of the default size, a run can be just wider than
+            // its box in the grid because the coordinates are fractional.
+            font_size: 16.8,
+            ..TerminalLook::default()
+        };
+        let cell = terminal_cell_size(&look).expect("measure the cell");
+        let host = "user@dev:";
+        let path = "/mnt/d/Projects/Example/Folder";
+        let filename = "20_World";
+        let filename_column = 54;
+        let padding = " ".repeat(filename_column - host.len() - path.len());
+        let mut it = Terminal::new(80, 2);
+        it.feed(
+            format!(
+                "\x1b[32m{host}\x1b[1;38;2;16;32;64m{path}\x1b[0m{padding}\x1b[1;32m{filename}\x1b[0m"
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            it.screen.row_text(0),
+            format!("{host}{path}{padding}{filename}")
+        );
+        assert!(it.screen.row_text(1).is_empty());
+
+        let (pixels, width, _) = draw(&it, &look, cell);
+        let row_height = cell.line as u32;
+        let last_column = filename_column + filename.len() - 1;
+        let last_glyph_left = (last_column as f32 * cell.advance).floor() as u32;
+        assert!(
+            ink_columns(&pixels, width, 0..row_height)
+                .last()
+                .is_some_and(|&(_, right)| right >= last_glyph_left),
+            "the last character of the filename is visible on the first row"
+        );
+        assert!(
+            ink_columns(&pixels, width, row_height..2 * row_height).is_empty(),
+            "the empty terminal row has no ink from the first row"
         );
     }
 
