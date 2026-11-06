@@ -83,7 +83,6 @@ fn a_failed_recovery_migration_keeps_the_old_copy_until_retry() {
     let final_name = root.join("B.md");
     move_entry(window, live, &renamed, &final_name).unwrap();
     assert_eq!(saving::flush_work_copies(window, live), 0);
-    assert_eq!(saving::flush_work_copies(window, live), 0);
     let copies = app_data::read_all_in(&directory);
     assert_eq!(copies.len(), 1);
     assert_eq!(copies[0].origin.as_deref(), Some(final_name.as_path()));

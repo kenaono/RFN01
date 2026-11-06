@@ -65,13 +65,13 @@ fn a_preset_puts_back_only_its_own_page() {
     assert_eq!(names, ["執筆用", "黒"]);
 
     // Keys。
-    window.set_shortcut_bindings("0=Ctrl+Alt+O".into());
+    window.set_shortcut_bindings("file.open=Ctrl+Alt+O;v=5".into());
     settings_transfer::save_as(window, &r.live, PresetKind::Keys, "自分の");
     window.set_shortcut_bindings("".into());
     crate::shortcuts::publish(window);
     assert!(modified(window, 2));
     window.invoke_preset_chosen(2, "自分の".into());
-    assert_eq!(window.get_shortcut_bindings(), "0=Ctrl+Alt+O");
+    assert_eq!(window.get_shortcut_bindings(), "file.open=Ctrl+Alt+O;v=5");
     assert_eq!(current(window, 2), "自分の");
 
     // 「Save」で選んでいるプリセットを上書き。
@@ -120,7 +120,7 @@ fn an_export_brings_everything_back() {
 
     window.set_paper_random(1);
     window.set_left_size(15);
-    window.set_shortcut_bindings("0=Ctrl+Alt+O".into());
+    window.set_shortcut_bindings("file.open=Ctrl+Alt+O;v=5".into());
     save_settings(window, &r.live.cache);
     settings_transfer::save_as(window, &r.live, PresetKind::Editor, "執筆用");
     let written = settings_transfer::encode_export(&settings_transfer::export_now(window));
@@ -142,7 +142,7 @@ fn an_export_brings_everything_back() {
     assert_eq!(modes[0].name, "小説");
     assert_eq!(window.get_paper_random(), 1);
     assert_eq!(window.get_left_size(), 15);
-    assert_eq!(window.get_shortcut_bindings(), "0=Ctrl+Alt+O");
+    assert_eq!(window.get_shortcut_bindings(), "file.open=Ctrl+Alt+O;v=5");
     assert_eq!(window.get_editor_presets().row_count(), 1);
     assert_eq!(current(window, 0), "執筆用");
 
@@ -155,6 +155,33 @@ fn an_export_brings_everything_back() {
     // 設定ファイルにも書かれている。
     let saved = app_data::read_settings(&directory).unwrap();
     assert!(saved.contains(&("paper.random".into(), "1".into())));
+}
+
+#[test]
+fn a_failed_import_backup_leaves_settings_and_presets_untouched() {
+    let r = rig("本文。\n", (900, 500));
+    let window = &r.window;
+    settings_transfer::wire(window, &r.live);
+    window.set_left_size(15);
+    settings_transfer::save_as(window, &r.live, PresetKind::Editor, "元の設定");
+    save_settings(window, &r.live.cache);
+
+    let directory = app_data::app_directory().unwrap();
+    let backup = settings_transfer::backup_path(&directory);
+    std::fs::create_dir(&backup).unwrap();
+    let settings_before = app_data::read_settings(&directory).unwrap();
+    let snapshot = || settings_transfer::encode_export(&settings_transfer::export_now(window));
+    let before = snapshot();
+    let mut incoming = settings_transfer::export_now(window);
+    incoming.settings.retain(|(name, _)| name != "left.size");
+    incoming.settings.push(("left.size".into(), "18".into()));
+    incoming.keys = Some("file.save=Ctrl+Alt+S;v=5".into());
+    incoming.presets = Default::default();
+
+    assert!(settings_transfer::import(window, &r.live, incoming).is_err());
+    assert_eq!(snapshot(), before);
+    assert_eq!(app_data::read_settings(&directory).unwrap(), settings_before);
+    assert!(backup.is_dir());
 }
 
 /// 書き手の報告 2026-09-24（Terminal・Keysで変えてもSaveできない）の確かめ：設定の画面と同じ

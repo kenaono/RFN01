@@ -396,7 +396,13 @@ mod tests {
             wsl_distribution("wsl.exe --distribution Debian --cd ~"),
             Some(Some("Debian".to_owned()))
         );
-        assert_eq!(wsl_distribution("wsl.exe -- bash -d x"), Some(None));
+        for separator in ["--", "-e", "--exec"] {
+            assert_eq!(
+                wsl_distribution(&format!("wsl.exe {separator} bash -d x")),
+                Some(None),
+                "{separator} ends WSL options"
+            );
+        }
         assert_eq!(wsl_distribution("powershell.exe -NoLogo"), None);
         assert_eq!(wsl_distribution("cmd.exe"), None);
     }
@@ -421,12 +427,39 @@ mod tests {
     #[test]
     #[ignore = "asks the real WSL; run explicitly"]
     fn wsl_follows_links_onto_windows_drives() {
-        let made = std::process::Command::new("wsl.exe")
-            .args(["-e", "ln", "-sfn", "/mnt/c/Windows", "/tmp/rfn-link-test"])
-            .status()
+        use std::process::Command;
+
+        struct Fixture(String);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = Command::new("wsl.exe")
+                    .args(["-e", "rm", "-f", "--", &format!("{}/windows", self.0)])
+                    .status();
+                let _ = Command::new("wsl.exe")
+                    .args(["-e", "rmdir", "--", &self.0])
+                    .status();
+            }
+        }
+
+        let made = Command::new("wsl.exe")
+            .args(["-e", "mktemp", "-d", "/tmp/rfn-link-test.XXXXXXXXXX"])
+            .output()
             .unwrap();
-        assert!(made.success());
-        let answer = wsl_windows_path(None, "/tmp/rfn-link-test/System32", true, || {});
+        assert!(made.status.success());
+        let path = String::from_utf8(made.stdout).unwrap();
+        let path = path.trim();
+        assert!(path.starts_with("/tmp/rfn-link-test.") && !path.contains('\n'));
+        let fixture = Fixture(path.to_owned());
+        let link = format!("{}/windows", fixture.0);
+        assert!(
+            Command::new("wsl.exe")
+                .args(["-e", "ln", "-s", "--", "/mnt/c/Windows", &link])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let system = format!("{link}/System32");
+        let answer = wsl_windows_path(None, &system, true, || {});
         assert_eq!(
             answer.map(|p| p.to_string_lossy().to_ascii_lowercase()),
             Some("c:\\windows\\system32".to_owned())
@@ -437,11 +470,11 @@ mod tests {
             "the home is WSL's own"
         );
         // Asked again, it is remembered (and answered without waiting).
-        assert!(wsl_windows_path(None, "/tmp/rfn-link-test/System32", false, || {}).is_some());
+        assert!(wsl_windows_path(None, &system, false, || {}).is_some());
         // Not asked yet and not waited for: nothing now, the answer arrives.
         let (told, heard) = std::sync::mpsc::channel();
         assert_eq!(
-            wsl_windows_path(None, "/tmp/rfn-link-test", false, move || {
+            wsl_windows_path(None, &link, false, move || {
                 let _ = told.send(());
             }),
             None
@@ -449,7 +482,7 @@ mod tests {
         heard
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
-        assert!(wsl_windows_path(None, "/tmp/rfn-link-test", false, || {}).is_some());
+        assert!(wsl_windows_path(None, &link, false, || {}).is_some());
     }
 
     #[test]

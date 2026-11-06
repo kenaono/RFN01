@@ -939,16 +939,29 @@ mod tests {
     /// but a log that stopped — and the last line before a stop says what was
     /// happening, never what went wrong.
     ///
-    /// The hook is process-wide, so this puts back whatever was there before.
+    /// Run the process-wide panic hook in a child so concurrent tests keep their own hook.
     #[test]
     fn a_panic_is_written_to_this_run_s_log() {
+        const CHILD: &str = "RFNEDIT_TEST_PANIC_LOG_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "diag::tests::a_panic_is_written_to_this_run_s_log"])
+                .env(CHILD, "1")
+                .output()
+                .expect("start the isolated panic test");
+            assert!(
+                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
         let dir = Directory::new();
         let mut log = DiagLog::default();
         log.start_in(&dir.0, Config::default());
-        let Some(path) = log.path().map(Path::to_path_buf) else {
-            // No place to write beside the executable; nothing to hold.
-            return;
-        };
+        let path = log.path().expect("the temporary log is writable").to_owned();
         log.write("session", "kind=ordinary");
 
         let restore = std::panic::take_hook();

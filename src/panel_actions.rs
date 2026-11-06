@@ -308,7 +308,7 @@ mod tests {
     use crate::saving::Harness;
 
     #[test]
-    fn comparison_buttons_and_keys_share_availability_and_keep_focus() {
+    fn comparison_buttons_and_keys_share_availability_without_opening_a_menu() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
         let window = &h.window;
         let live = &h.live;
@@ -337,19 +337,36 @@ mod tests {
     }
 
     #[test]
-    fn changed_comparison_selection_cannot_apply_a_captured_action() {
+    fn apply_requires_the_original_comparison_selection_and_rows() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
         let window = &h.window;
         let live = &h.live;
         window.set_diff_active(true);
         window.set_diff_merge_enabled(true);
         window.set_diff_can_apply(true);
-        window.set_diff_selected_row(2);
-        let target = Target::for_surface(window, live);
+        window.set_diff_selected_row(0);
+        window.set_diff_rows(ModelRc::new(VecModel::from(vec![DiffRow::default(), DiffRow::default()])));
+        let received = Rc::new(Cell::new(0));
+        let hit = received.clone();
+        window.on_diff_apply_merge(move || hit.set(hit.get() + 1));
         let action = Command::PanelAction(Action::DiffApply);
-        assert!(Scene::read(window, live, &target).enabled(&action));
-        window.set_diff_selected_row(3);
-        window.on_diff_apply_merge(|| panic!("applied to a changed selection"));
-        run(window, live, &target, action, "");
+
+        let target = Target::for_surface(window, live);
+        run(window, live, &target, action.clone(), "");
+        assert_eq!(received.get(), 1, "unchanged target");
+
+        window.set_diff_selected_row(1);
+        run(window, live, &target, action.clone(), "");
+        assert_eq!(received.get(), 1, "different selected row");
+
+        window.set_diff_selected_row(0);
+        window.set_diff_rows(ModelRc::new(VecModel::from(vec![DiffRow::default(), DiffRow::default()])));
+        run(window, live, &target, action.clone(), "");
+        assert_eq!(received.get(), 1, "new comparison rows at the same index");
+
+        let current = Target::for_surface(window, live);
+        window.set_diff_active(false);
+        run(window, live, &current, action, "");
+        assert_eq!(received.get(), 1, "comparison closed after capturing the target");
     }
 }

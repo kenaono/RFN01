@@ -102,3 +102,33 @@ fn cancel_changes_nothing() {
     let b = fs::read_to_string(root.join("b.md")).unwrap();
     assert_eq!(b, "猫が鳴く\r\ncat\r\n");
 }
+
+#[test]
+fn confirmation_rechecks_contents_only_in_the_files_it_listed() {
+    let (harness, _, root) = folder("folder-replace-confirmed-files");
+    let (window, live) = (&harness.window, &harness.live);
+    let listed = root.join("b.md");
+    let unlisted = root.join("c.md");
+
+    assert_eq!(ask(window, live, "cat", "dog"), 1);
+    fs::write(&listed, "externally edited\r\ncat cat\r\n").unwrap();
+    fs::write(&unlisted, "now also matches: cat\n").unwrap();
+    answer_question(window, live, 0);
+
+    assert_eq!(
+        fs::read_to_string(&listed).unwrap(),
+        "externally edited\r\ndog dog\r\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&unlisted).unwrap(),
+        "now also matches: cat\n"
+    );
+    let store = saving::backup_store(window).unwrap();
+    let backups = store.list(&listed);
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        fs::read_to_string(&backups[0].path).unwrap(),
+        "externally edited\r\ncat cat\r\n"
+    );
+    assert!(store.list(&unlisted).is_empty());
+}

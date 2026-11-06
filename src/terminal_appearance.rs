@@ -42,19 +42,6 @@ pub(crate) fn look_of(style: &PanelStyle) -> cells::TerminalLook {
     }
 }
 
-/// RFN01-66: 古い設定ファイルのTerminalの値（地・字・書体・大きさ）を外観の既定へ移す。
-/// 外観の値（`terminal.appearance.N`）はファイルでこれより後ろにあり、あればそちらが勝つ。
-pub(crate) fn migrate_legacy(window: &AppWindow, edit: impl Fn(usize, &mut PanelStyle)) {
-    let defaults: Vec<_> = (0..3)
-        .map(|kind| {
-            let mut style = default_style(window, kind);
-            edit(kind, &mut style);
-            style
-        })
-        .collect();
-    window.set_panel_defaults(ModelRc::new(VecModel::from(defaults)));
-}
-
 pub(crate) fn random_style(window: &AppWindow, kind: usize) -> Option<PanelStyle> {
     let mut style = default_style(window, kind);
     if style.random == 0 {
