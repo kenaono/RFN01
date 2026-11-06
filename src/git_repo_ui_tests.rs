@@ -12,7 +12,10 @@ fn settle(window: &AppWindow, live: &Live) {
     for _ in 0..500 {
         let changes_done = git_ui::pump(window, live);
         collect(window, live);
-        let repo_done = REPO.with(|repo| repo.borrow().reading.is_none());
+        let repo_done = REPO.with(|repo| {
+            let repo = repo.borrow();
+            repo.reading.is_none() && repo.lookup.is_none()
+        });
         if changes_done && repo_done {
             return;
         }
@@ -239,7 +242,9 @@ fn deleting_an_unmerged_branch_asks_twice() {
     let (window, live) = (&harness.window, &harness.live);
     open(window, live);
     settle(window, live);
-    branch_menu(window, live, side_index(window, 1, "draft"), 4);
+    capture_branch_menu(window, live, side_index(window, 1, "draft"));
+    branch_menu(window, live, 4);
+    slint::platform::update_timers_and_animations();
     let Question::GitConfirm(pending) = take_question(live) else {
         panic!("expected the delete confirmation");
     };
@@ -394,26 +399,147 @@ fn a_file_shows_an_inline_diff_with_the_changed_characters() {
 }
 
 #[test]
-fn a_wip_file_shows_its_change_from_the_last_commit() {
+fn both_git_changes_surfaces_compare_the_selected_section() {
     let Some((root, harness)) = manuscript("repo-wip-diff") else {
         return;
     };
     let (window, live) = (&harness.window, &harness.live);
-    fs::write(root.join("原稿.md"), "二行目と三行目\n").unwrap();
+    let path = "空白 を含む原稿.md";
+    fs::write(root.join(path), "base\n").unwrap();
+    git::commit(&root, "base", true, false).unwrap();
+    fs::write(root.join(path), "staged\n").unwrap();
+    git::stage(&root, &[path.to_owned()]).unwrap();
+    fs::write(root.join(path), "working\n").unwrap();
+    git_ui::wire(window, live);
+    wire(window, live);
+    window.set_tree_open(true);
+    window.set_left_tab(8);
+    git_ui::publish(window, live);
+    settle(window, live);
+    let rows = window.get_git_rows();
+    let row_for = |kind| {
+        (0..rows.row_count())
+            .find(|&at| {
+                let row = rows.row_data(at).unwrap();
+                row.label == path && row.kind == kind
+            })
+            .unwrap() as i32
+    };
+    window.invoke_git_row_diff(row_for(3));
+    settle(window, live);
+    assert!(window.get_diff_active());
+    assert!(window.get_diff_left_path().contains("HEAD"));
+    assert!(window.get_diff_right_path().contains(path));
+    let compared = window.get_diff_rows().row_data(0).unwrap();
+    assert_eq!(
+        (compared.left.as_str(), compared.right.as_str()),
+        ("base ［改行］", "staged ［改行］")
+    );
+    crate::diff_view::dismiss(window);
+
     open(window, live);
     settle(window, live);
     select_row(window, 0);
     assert_eq!(window.get_git_repo_detail_mode(), 2);
-    let rows = window.get_git_rows();
-    let file = (0..rows.row_count())
-        .position(|at| rows.row_data(at).unwrap().label == "原稿.md")
-        .unwrap();
-    changes_clicked(window, file);
+    window.invoke_git_repo_changes_clicked(row_for(3));
+    settle(window, live);
     assert_eq!(window.get_git_repo_detail_mode(), 3);
     assert!(!window.get_git_repo_diff_switchable());
-    assert_eq!(diff_text(window)[1].2, ["と三行目"]);
+    assert!(window.get_git_repo_diff_caption().contains("HEAD"));
+    assert_eq!(diff_text(window)[1].1, "staged");
+    diff_back(window);
+
+    window.invoke_git_repo_changes_clicked(row_for(4));
+    settle(window, live);
+    assert!(!window.get_git_repo_diff_caption().contains("HEAD"));
+    let lines = diff_text(window);
+    assert_eq!((&*lines[0].1, &*lines[1].1), ("staged", "working"));
+    fs::write(root.join(path), "later\n").unwrap();
+    // The two-pane comparison uses the snapshot already displayed in the inline diff.
+    diff_open_full(window);
+    let compared = window.get_diff_rows().row_data(0).unwrap();
+    assert_eq!(
+        (compared.left.as_str(), compared.right.as_str()),
+        ("staged ［改行］", "working ［改行］")
+    );
+    crate::diff_view::dismiss(window);
     diff_back(window);
     assert_eq!(window.get_git_repo_detail_mode(), 2);
+}
+
+#[test]
+fn the_wip_block_button_stages_and_unstages_the_selected_hunk() {
+    let Some((root, harness)) = manuscript("repo-hunk-buttons") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    let path = "原稿.md";
+    let base = format!("first base\n{}last base\n", "context\n".repeat(16));
+    fs::write(root.join(path), &base).unwrap();
+    git::commit(&root, "base for blocks", true, false).unwrap();
+    let working = base
+        .replace("first base", "first working")
+        .replace("last base", "last working");
+    fs::write(root.join(path), &working).unwrap();
+    git_ui::wire(window, live);
+    wire(window, live);
+    crate::panel_actions::wire(window, live);
+    crate::command_palette::install(window, live);
+    open(window, live);
+    settle(window, live);
+    select_row(window, 0);
+
+    let show = |kind| {
+        let rows = window.get_git_rows();
+        let row = (0..rows.row_count())
+            .find(|&at| rows.row_data(at).unwrap().kind == kind)
+            .unwrap() as i32;
+        window.invoke_git_repo_changes_clicked(row);
+        settle(window, live);
+        assert!(window.get_git_repo_hunks_available());
+        window.invoke_surface_action("git.review-blocks".into());
+        slint::platform::update_timers_and_animations();
+        assert!(window.get_git_repo_hunks_active());
+    };
+    show(4);
+    assert_eq!(window.get_git_repo_hunks().row_count(), 2);
+    assert!(window.invoke_git_action_allowed("git.stage-block".into(), false, 0));
+    window.invoke_git_repo_select_hunk(1);
+    crate::command_palette::open(window, live, true);
+    let title = pick("ブロックをStage", "Stage Block");
+    let at = window.get_palette_rows().iter().position(|row| row.title.contains(title)).unwrap();
+    window.set_palette_selected(at as i32);
+    window.invoke_git_repo_select_hunk(0);
+    window.invoke_palette_accepted();
+    slint::platform::update_timers_and_animations();
+    assert!(!window.get_git_busy());
+    assert_eq!(git::change_blob(&root, "", path).unwrap(), base.as_bytes());
+    window.invoke_git_repo_select_hunk(1);
+    window.invoke_surface_action("git.stage-block".into());
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert_eq!(window.get_git_repo_detail_mode(), 2);
+    assert_eq!(
+        git::change_blob(&root, "", path).unwrap(),
+        base.replace("last base", "last working").into_bytes(),
+    );
+
+    show(3);
+    assert!(window.get_git_repo_hunks_staged());
+    assert_eq!(window.get_git_repo_hunks().row_count(), 1);
+    crate::command_palette::open(window, live, true);
+    let rows = window.get_palette_rows();
+    let title = pick("ブロックをUnstage", "Unstage Block");
+    let at = rows.iter().position(|row| row.title.contains(title)).unwrap();
+    window.set_palette_selected(at as i32);
+    window.invoke_palette_accepted();
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert_eq!(
+        git::change_blob(&root, "", path).unwrap(),
+        base.into_bytes()
+    );
+    assert_eq!(fs::read_to_string(root.join(path)).unwrap(), working);
 }
 
 #[test]
@@ -433,6 +559,202 @@ fn long_lines_are_folded_with_the_number_on_the_first_row() {
         })
         .collect();
     assert_eq!(joined, text);
+}
+
+#[test]
+fn history_search_opens_a_commit_outside_the_graph_page() {
+    let root = scratch_directory("repo-history-search");
+    let Some(()) = repository(&root) else { return };
+    git_ok(&root, &["config", "user.name", "Writer [QA]"]);
+    let path = "資料 [前].md";
+    let (harness, _) = Harness::new(|weak| open_under(&root, path, "旧版\n", weak));
+    git_ok(&root, &["add", "--", path]);
+    git_ok(
+        &root,
+        &["commit", "-qm", "古いコミット", "-m", "detail [needle]"],
+    );
+    let sha = git::head_sha(&root).unwrap();
+    git_ok(&root, &["config", "user.name", "Other"]);
+    for _ in 0..=PAGE {
+        git_ok(&root, &["commit", "-q", "--allow-empty", "-m", "later"]);
+    }
+    for (field, query) in [
+        (HistoryField::Author, "[qa]"),
+        (HistoryField::Path, path),
+        (HistoryField::Sha, &sha[..8].to_ascii_uppercase()),
+    ] {
+        let found = git::search_history(&root, field, query, PAGE).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|item| item.sha.as_str())
+                .collect::<Vec<_>>(),
+            [sha.as_str()]
+        );
+    }
+    let (window, live) = (&harness.window, &harness.live);
+    attach_workspace(live, &root, SaveMode::Recovery);
+    wire(window, live);
+    crate::panel_actions::wire(window, live);
+    open(window, live);
+    settle(window, live);
+    assert!(
+        !messages(window)
+            .iter()
+            .any(|message| message == "古いコミット")
+    );
+    window.invoke_surface_action("git.open-history-search".into());
+    slint::platform::update_timers_and_animations();
+    window.invoke_git_repo_search(0, "[needle]".into());
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert_eq!(window.get_git_repo_search_rows().row_count(), 1);
+    window.invoke_git_repo_search_selected(0);
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert_eq!(window.get_git_repo_detail_sha(), sha.as_str());
+    assert_eq!(
+        window
+            .get_git_repo_detail_files()
+            .row_data(0)
+            .unwrap()
+            .label,
+        path
+    );
+    show_diff(window, 0, false);
+    assert!(diff_text(window).iter().any(|(_, text, _)| text == "旧版"));
+}
+
+#[test]
+fn comparison_pins_branch_tips_and_reads_the_two_committed_versions() {
+    let Some((root, harness)) = manuscript("repo-two-points") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    crate::panel_actions::wire(window, live);
+    let old = "原稿 前.md";
+    let new = "原稿 後.md";
+    let shared = "same line\n".repeat(16);
+    fs::write(root.join(old), &shared).unwrap();
+    git::commit(&root, "common file", true, false).unwrap();
+    git_ok(&root, &["switch", "-q", "-c", "comparison-left"]);
+    fs::write(root.join(old), format!("{shared}left only\n")).unwrap();
+    git::commit(&root, "left only", true, false).unwrap();
+    let left = git::head_sha(&root).unwrap();
+
+    git_ok(&root, &["switch", "-q", "main"]);
+    git_ok(&root, &["mv", "--", old, new]);
+    fs::write(root.join(new), format!("{shared}right only\n")).unwrap();
+    git::commit(&root, "renamed on main", true, false).unwrap();
+    let right = git::head_sha(&root).unwrap();
+    fs::write(root.join(new), "uncommitted\n").unwrap();
+
+    open(window, live);
+    settle(window, live);
+    let opened_row = side_index(window, 1, "comparison-left");
+    capture_branch_menu(window, live, opened_row);
+    git_ok(&root, &["branch", "-f", "comparison-left", "main"]);
+    git_ok(&root, &["branch", "aaa-new-row"]);
+    refresh(window, live);
+    settle(window, live);
+    assert_ne!(opened_row, side_index(window, 1, "comparison-left"));
+    window.invoke_git_repo_branch_action("git.set-compare-base".into());
+    slint::platform::update_timers_and_animations();
+    capture_branch_menu(window, live, side_index(window, 1, "main"));
+    window.invoke_git_repo_branch_action("git.compare-with-base".into());
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert!(window.get_git_repo_range_left().ends_with(&left));
+    assert!(window.get_git_repo_range_right().ends_with(&right));
+    let rows = window.get_git_repo_detail_files();
+    assert_eq!(rows.row_count(), 1);
+    let row = rows.row_data(0).unwrap();
+    assert_eq!(row.letter, "R");
+    assert_eq!(row.tip, format!("{old} → {new}").as_str());
+    open_file_diff(window, live, 0);
+    settle(window, live);
+    let lines = diff_text(window);
+    assert!(
+        lines
+            .iter()
+            .any(|(kind, text, _)| *kind == 1 && text == "left only")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|(kind, text, _)| *kind == 2 && text == "right only")
+    );
+    diff_open_full(window);
+    assert!(window.get_diff_left_path().ends_with(old));
+    assert!(window.get_diff_right_path().ends_with(new));
+    assert_eq!(fs::read_to_string(root.join(new)).unwrap(), "uncommitted\n");
+}
+
+#[test]
+fn worktree_creation_and_opening_share_actions_and_isolate_unsaved_documents() {
+    let parent = scratch_directory("repo-worktree-actions");
+    let root = parent.join("source");
+    fs::create_dir_all(&root).unwrap();
+    if repository(&root).is_none() {
+        return;
+    }
+    let (harness, document) = Harness::new(|weak| open_under(&root, "note.md", "base\n", weak));
+    git::commit(&root, "base", true, false).unwrap();
+    let head = git::head_sha(&root).unwrap();
+    let (window, live) = (&harness.window, &harness.live);
+    attach_workspace(live, &root, SaveMode::Recovery);
+    window.set_workspace_active(true);
+    git_ui::wire(window, live);
+    wire(window, live);
+    crate::panel_actions::wire(window, live);
+    open(window, live);
+    settle(window, live);
+    let action = |id: &str| {
+        window.invoke_surface_action(id.into());
+        slint::platform::update_timers_and_animations();
+        settle(window, live);
+    };
+    action("git.worktrees");
+    window.set_git_worktree_parent(parent.to_string_lossy().as_ref().into());
+    window.set_git_worktree_folder("Linked notes".into());
+    window.set_git_worktree_branch("draft".into());
+    action("git.worktree-create");
+    assert_eq!(window.get_git_worktree_rows().row_count(), 2);
+    assert_eq!(git_ui::workspace_folders(live).len(), 1);
+
+    crate::saving::edit(&document, "unsaved in source\n");
+    window.set_git_message("draft message for source".into());
+    window.set_git_worktree_selected(1);
+    action("git.worktree-open");
+    assert_eq!(git_ui::workspace_folders(live).len(), 1);
+    let Question::GitOpenWorktree(request) = take_question(live) else {
+        panic!("expected the registration confirmation");
+    };
+    window.set_question_open(false);
+    crate::git_worktree_ui::open_worktree(window, live, request);
+    settle(window, live);
+    let linked = parent.join("Linked notes");
+    assert!(git_ui::active_root().is_some_and(|root| git_ui::same_path(&root, &linked)));
+    assert_eq!(git_ui::workspace_folders(live).len(), 2);
+    assert!(document.text.edited());
+    assert!(window.get_git_message().is_empty());
+
+    fs::write(linked.join("note.md"), "linked edit\n").unwrap();
+    git_ui::refresh_soon(window, live);
+    settle(window, live);
+    window.set_git_message("commit in linked worktree".into());
+    action("git.commit-changes");
+    assert!(live.pending.borrow().is_none());
+    assert_eq!(git::last_message(&linked).unwrap(), "commit in linked worktree");
+    assert_eq!(git::head_sha(&root).unwrap(), head);
+    assert!(document.text.edited());
+
+    action("git.worktrees");
+    window.set_git_worktree_selected(0);
+    action("git.worktree-open");
+    assert!(git_ui::active_root().is_some_and(|active| git_ui::same_path(&active, &root)));
+    assert_eq!(window.get_git_message(), "draft message for source");
+    assert!(live.pending.borrow().is_none());
 }
 
 /// PR 2b：Undo／Redo。ドラッグで Merge したものを戻し、やり直す。外で動かしたら使えない。

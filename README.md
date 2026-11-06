@@ -1386,23 +1386,32 @@ PCにインストールされている`git`を使います。Gitが無い（イ�
 左のアイコン列の **Git**（Backupsの上、ブランチの形）で、使用中のWorkspaceの登録フォルダのGitを操作できます（RFN01-67）。PCに入っている`git`を使い、手本はVisual StudioのGit Changesです。
 - **上から**：リポジトリ▾（登録フォルダが2つ以上のとき）、ブランチ▾（切り替え・New Branch…）、Fetch／Pull／Push／Sync、メッセージ欄と「Commit All」（Stageしたものがあれば「Commit Staged」）、Amend、その下に Staged Changes・Changes・Stashes。
 - **ファイル**：＋／−で Stage・Unstage（見出しの＋／−で全部）。ダブルクリックで開き、変更のあるファイルは前回のCommitと比較します。右クリックで Open／Stage・Unstage／Undo Changes…。
+- **差分を表示**の釦では、Staged ChangesはHEADとインデックス、Changesはインデックスとディスク上の作業ツリーを左右に比較します。同じファイルが両方に並んでいても、Commitに入る変更と手元に残る変更を分けて読めます。
 - **Commit の▾** に Stash All。しまった変更は Stashes の行に並び、行の右端の釦で Pop（取り出してStashを消す）、右クリックで Apply／Pop／Drop…。Apply・Pop は変更が無いときだけできます。
 - Gitの管理下にないフォルダでは「Create Git Repository」が出ます。
 - Pull・Sync・ブランチの切り替え・Stashの取り出しの前に、そのリポジトリの未保存の文書を保存するか破棄するかを訊きます。Commit の前は保存するかを訊きます。終わったあと、変わったファイルのTABを読み直します。
-- **衝突したら中止して元に戻し**、ダイアログで知らせます。衝突はTerminalで解いてください。
+- **Merge・Merge方式のPullが衝突したとき**は、Gitの途中状態を残します。Git ChangesまたはGit Repositoryの「Mergeの解消を開く」から再開できます。Terminalから始めたMergeも、アプリの起動後やGitの再読込時に認識します。
 - Push・Pullでサインインが要るときは、Git Credential Managerの窓が出ます。Fetch・Pull・Push・Sync は面の Cancel で止められます。
 - 面が出ているあいだは5秒ごとに読み直すので、Terminalで打った`git`も映ります。
 
 ## Git Repository
 
+Fileの「リポジトリ一覧…」、Git Changesのフォルダアイコン、コマンドパレットから、全Workspaceで管理しているGitリポジトリを一覧できます。名前・パス・ブランチ・Workspaceで検索し、現在のWorkspaceだけに絞れます。↑／↓で選択し、Enterで開きます。別のWorkspaceに所属するリポジトリを開く場合は、画面に表示されたWorkspaceに切り替わります。
+
 File の「Git Repository…」か、Git Changes の見出しの右端のアイコンで、全ブランチのグラフを開きます（RFN01-67、手本はGitKraken）。対象は Git Changes で選んでいるリポジトリです。比較の画面と同じく窓に重ねて開き、Close か Esc、または「戻る」（マウスの戻る釦・Alt+←・メニューの「戻る」）で元のペインとTABへ戻ります。
 - **上の帯**：今のブランチ▾、Undo／Redo、Pull／Push／Fetch／Branch（選んでいるCommitから新しいブランチ）／Stash／Pop。
 - **左の列**：LOCAL・REMOTE・STASHES。ブランチを押すとグラフでその先端を選び、ダブルクリックで Checkout。右クリックで Checkout／New Branch…／Merge into 〈今のブランチ〉／Push／Delete…。**ブランチを押したまま別のローカルブランチへ動かして離すと、確認してから Merge** します（落とし先が今のブランチでなければ、先にそこへ Checkout します）。
 - **真ん中のグラフ**：分岐と合流を線で描きます。**紫の幹は main** で、ほかのブランチ（今いるブランチも）は別の色で main から分かれます。今いるブランチは✓の札で分かります。取り込んでいない Commit に ↓、送っていない Commit に ↑。Commit していない変更があれば一番上に「// WIP」。最初は200件で、「Show more」で読み足します。
-- **右の列**：選んだ Commit の詳細と変更したファイル。**ファイルを押すと右の列が広がって差分が出ます**（消した行は赤、足した行は緑、行の中で変わった字は濃く塗ります。変わった所の前後3行だけを出します）。上の「Previous Commit／Working Copy」で比べる相手を替え、「Open in Comparison」で左右に並べる比較の画面を開きます（閉じるとここへ戻ります）。「‹ Files」で一覧へ戻ります。「// WIP」を選ぶと Git Changes が出て、そこでファイルを押すと前回の Commit との差分が出ます。
+- **右の列**：選んだ Commit の詳細と変更したファイル。**ファイルを押すと右の列が広がって差分が出ます**（消した行は赤、足した行は緑、行の中で変わった字は濃く塗ります。変わった所の前後3行だけを出します）。上の「Previous Commit／Working Copy」で比べる相手を替え、「Open in Comparison」で左右に並べる比較の画面を開きます（閉じるとここへ戻ります）。「‹ Files」で一覧へ戻ります。「// WIP」のファイルを押すと、Git Changesと同じ比較元の差分が出ます。「Open in Comparison」でもその差分の内容が引き継がれます。
 - **Undo／Redo**：アプリを起動してからの Git の操作（Commit・Amend・Checkout・Merge・Pull・Revert・Cherry-pick・Reset・ブランチの作成と削除・Stash All と Pop）を、リポジトリごとに戻せます。マウスを載せると何を戻すかが出ます。Push と Fetch は戻せません。Terminal などで外から HEAD を動かしたあとや、Push 済みの Commit を外すことになるときは使えません。Reset — Delete Changes を戻しても、消えた変更は戻りません。
 - **Commit の右クリック**：New Branch…、Revert（今のブランチの Commit）、Cherry-pick（ほかのブランチの Commit）、Reset — Keep Changes／Delete Changes…（今のブランチの Commit。Delete Changes と、Push 済みの Commit を外す Reset は確認します）。
-- 未保存の文書の確かめ、衝突したら中止して元に戻すこと、終わったあとの読み直しは Git Changes と同じです。Merge していないブランチを消すときは、もう一度確認します。
+- **変更ブロック**。WIPで追跡済みテキストの変更を開き、「Gitの変更ブロックを確認…」を押します。ChangesではブロックをStageし、Staged ChangesではUnstageします。見出しを選ぶと、コマンドパレットからもそのブロックに操作できます。保存済みの内容をGitが変換した差分で確認できます。操作後はファイル一覧に戻ります。
+- **履歴検索**。Git Repositoryの上部からメッセージ、作者、SHA、パスで検索します。グラフの表示件数に関係なく、ローカル・リモートブランチとHEADの履歴を探し、結果からコミットの詳細と差分を開けます。パスはリポジトリのルートから指定します。
+- **二点比較**。コミットの詳細かブランチの右クリックから「比較元に設定」を押し、次のコミットかブランチで「比較元との差分」を選びます。両端のコミットIDと変更ファイルを表示し、ファイルを選ぶとその二点の差分が開きます。
+- **コマンドパレット**。Git RepositoryでCtrl+Shift+Pを押すと、表示中の差分を比較画面で開く操作、履歴検索、選択中のコミットの二点比較など、その場面で使えるGitアクションを実行できます。
+- **Worktree一覧**。同じリポジトリのWorktreeを、パス・ブランチ・現在の作業先で見分けられます。親フォルダ、新しいフォルダ名、ブランチ名を指定すると、現在のコミットから作成できます。作成先は既存Worktreeの外に指定します。未登録のWorktreeを開くときは、現在のWorkspaceへの追加を確認します。切り替えるとGit ChangesとGit Repositoryの作業先が揃い、編集中の文書タブはそのまま残ります。
+- **Mergeの解消**。未解決ファイルを選んで共通祖先・現在側・取り込み側・作業中の結果を切り替えます。「解消結果を編集」で作業ファイルを文書タブに開き、保存してから解消画面でStageします。片側が削除したファイルは、残った版を編集・Stageするか、確認して削除を採用できます。未解決ファイルがなくなったら「Mergeを続行」でマージコミットを作ります。「Mergeを中止…」は、解消結果が失われることを確認してからGitに中止を依頼します。これらの操作は同じ画面でコマンドパレットからも実行できます。
+- 未保存の文書の確かめと、操作後の読み直しは Git Changes と同じです。Stash・Revert・Cherry-pickの衝突は自動で中止します。Mergeしていないブランチを消すときは、もう一度確認します。
 
 ## Git History
 

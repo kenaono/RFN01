@@ -20,6 +20,7 @@ use std::time::Duration;
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::git::{self, Cancel, Change, GitError, Kind, Stash, Status};
+use crate::git_change_diff::{self, Preview, Target as DiffTarget};
 use crate::git_history::{self, Entry, Kind as HistoryKind, Point};
 use crate::i18n::pick;
 use crate::open_document::OpenDocument;
@@ -49,6 +50,7 @@ struct Snapshot {
     /// `None`はGitの管理下にない。
     root: Option<PathBuf>,
     status: Status,
+    merge: Option<git::MergeState>,
     stashes: Vec<Stash>,
     branches: Vec<String>,
 }
@@ -68,6 +70,13 @@ struct Job {
     record: Option<Recording>,
     /// Undo（`false`）・Redo（`true`）そのもの。通ったら記録を反対の山へ移す。
     history: Option<bool>,
+}
+
+struct DiffRead {
+    root: PathBuf,
+    generation: u64,
+    inline: bool,
+    result: Receiver<Preview>,
 }
 
 /// 操作の前に控えておく、Undo の記録の材料。
@@ -107,10 +116,12 @@ struct Pane {
     closed: Vec<Section>,
     job: Option<Job>,
     reading: Option<(u64, Receiver<Result<Snapshot, GitError>>)>,
+    diff_reading: Option<DiffRead>,
     /// 読み直しの番号。操作を始めるたびに進め、古い読み直しの結果を捨てる。
     generation: u64,
     /// Amend をチェックする前のメッセージ（外したら戻す）。
     kept_message: Option<String>,
+    drafts: std::collections::HashMap<String, (SharedString, bool, Option<String>)>,
 }
 
 thread_local! {
@@ -138,6 +149,11 @@ pub(crate) enum Action {
     Switch(String),
     Pull,
     Sync,
+    ResolveMerge {
+        state: git::MergeState,
+        path: Option<String>,
+        resolution: git::Resolution,
+    },
     StashApply {
         name: String,
         pop: bool,
@@ -212,6 +228,7 @@ impl Action {
             Action::Reset { hard: false, .. }
             | Action::DeleteBranch { .. }
             | Action::PushBranch(_)
+            | Action::ResolveMerge { .. }
             | Action::History { files: false, .. } => Guard::None,
             Action::History { files: true, .. } => Guard::SaveOrDiscard,
             Action::Commit { .. } | Action::StashAll(_) => Guard::SaveOnly,
@@ -249,6 +266,18 @@ fn inside(path: &Path, folder: &Path) -> bool {
     path == folder || path.starts_with(&(folder + "\\"))
 }
 
+pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
+    key(left) == key(right)
+}
+
+/// A nested linked worktree has a .git file, and owns its own open documents.
+fn inside_worktree(path: &Path, root: &Path) -> bool {
+    inside(path, root)
+        && !path.ancestors().skip(1)
+            .take_while(|parent| !same_path(parent, root))
+            .any(|parent| parent.join(".git").exists())
+}
+
 /// 使用中の Workspace の登録フォルダ。
 pub(crate) fn workspace_folders(live: &Live) -> Vec<PathBuf> {
     let folder = live.folder.borrow();
@@ -270,6 +299,17 @@ pub(crate) fn workspace_folders(live: &Live) -> Vec<PathBuf> {
 
 pub(crate) fn active_root() -> Option<PathBuf> {
     PANE.with(|pane| root_of(&pane.borrow()))
+}
+
+pub(crate) fn chosen_folder() -> Option<PathBuf> {
+    PANE.with(|pane| pane.borrow().chosen.clone())
+}
+
+pub(crate) fn merge_snapshot() -> Option<(PathBuf, git::MergeState)> {
+    PANE.with(|pane| {
+        let pane = pane.borrow();
+        Some((root_of(&pane)?, pane.snapshot.as_ref()?.merge.clone()?))
+    })
 }
 
 fn root_of(pane: &Pane) -> Option<PathBuf> {
@@ -403,6 +443,7 @@ fn read(folder: PathBuf) -> Result<Snapshot, GitError> {
             folder,
             root: None,
             status: Status::default(),
+            merge: None,
             stashes: Vec::new(),
             branches: Vec::new(),
         });
@@ -410,6 +451,7 @@ fn read(folder: PathBuf) -> Result<Snapshot, GitError> {
     Ok(Snapshot {
         folder,
         status: git::status(&root)?,
+        merge: git::merge_state(&root)?,
         stashes: git::stashes(&root)?,
         branches: git::branches(&root)?,
         root: Some(root),
@@ -491,12 +533,47 @@ fn collect(window: &AppWindow, live: &Live) {
     if let Some((job, result)) = finished {
         finish(window, live, job, result);
     }
-    let idle = PANE.with(|pane| {
-        let pane = pane.borrow();
-        pane.job.is_none() && pane.reading.is_none()
-    });
-    if idle {
+    collect_diff(window);
+    if idle() {
         POLL.with(Timer::stop);
+    }
+}
+
+fn idle() -> bool {
+    PANE.with(|pane| {
+        let pane = pane.borrow();
+        pane.job.is_none() && pane.reading.is_none() && pane.diff_reading.is_none()
+    })
+}
+
+fn collect_diff(window: &AppWindow) {
+    let read = PANE.with(|pane| {
+        let mut pane = pane.borrow_mut();
+        let request = pane.diff_reading.as_ref()?;
+        match request.result.try_recv() {
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                pane.diff_reading = None;
+                None
+            }
+            Ok(preview) => {
+                let request = pane.diff_reading.take()?;
+                (request.generation == pane.generation
+                    && root_of(&pane).as_ref() == Some(&request.root))
+                .then_some((request, preview))
+            }
+        }
+    });
+    let Some((request, preview)) = read else {
+        return;
+    };
+    if window.get_diff_active() {
+        return;
+    }
+    if request.inline {
+        crate::git_repo_ui::show_wip_diff(window, &request.root, preview);
+    } else if !window.get_git_repo_active() && visible(window) {
+        preview.open(window);
     }
 }
 
@@ -507,7 +584,7 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
     let outcome = match &result {
         Ok(_) => "ok".to_owned(),
         Err(GitError::Cancelled) => "cancelled".to_owned(),
-        Err(GitError::Conflict) => "conflict".to_owned(),
+        Err(GitError::Conflict | GitError::MergeStopped) => "conflict".to_owned(),
         Err(_) => "failed".to_owned(),
     };
     live.cache
@@ -529,6 +606,7 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
             }
         }
         Err(GitError::Cancelled) => window.tell(GitError::Cancelled.to_string().into()),
+        Err(GitError::MergeStopped) => window.tell(GitError::MergeStopped.to_string().into()),
         // Merge されていないブランチは、もう一度訊いてから`-D`で消す。
         Err(GitError::NotMerged(name)) => request(
             window,
@@ -546,7 +624,7 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
 }
 
 /// 知らせるだけの問い。Gitの文は長いので、帯ではなくダイアログで見せる。
-fn notice(window: &AppWindow, live: &Live, text: String) {
+pub(crate) fn notice(window: &AppWindow, live: &Live, text: String) {
     if live.pending.borrow().is_some() {
         window.tell(text.into());
         return;
@@ -569,7 +647,7 @@ fn reload_documents(window: &AppWindow, live: &Live, job: &Job) {
     }
     let in_scope = |path: &Path| match &job.reload {
         Reload::None => false,
-        Reload::Repository => inside(path, &job.root),
+        Reload::Repository => inside_worktree(path, &job.root),
         Reload::Files(files) => files.iter().any(|file| key(file) == key(path)),
     };
     for document in crate::open_documents(live) {
@@ -673,6 +751,7 @@ fn render(window: &AppWindow) {
         window.set_git_rows(ModelRc::new(VecModel::from(rows)));
         pane.lines = lines;
     });
+    crate::git_merge_ui::publish(window);
 }
 
 fn build_rows(
@@ -831,13 +910,51 @@ fn quick(
         Vec::new(),
         After::Nothing,
         name,
-        move |root, _| work(root).map(|()| String::new()),
+        move |root, _| {
+            git::require_no_merge(root)?;
+            work(root).map(|()| String::new())
+        },
     );
+}
+
+pub(crate) fn apply_hunk(
+    window: &AppWindow,
+    live: &Live,
+    root: &Path,
+    patch: std::sync::Arc<crate::git_hunks::Patch>,
+    block: usize,
+) -> bool {
+    if window.get_git_busy()
+        || window.get_diff_active()
+        || live.pending.borrow().is_some()
+        || active_root().as_deref() != Some(root)
+    {
+        return false;
+    }
+    let name = if patch.staged {
+        "unstage-hunk"
+    } else {
+        "stage-hunk"
+    };
+    quick(window, live, name, move |root| patch.apply(root, block));
+    true
 }
 
 /// 確認・未保存の確かめを済ませてから、操作を走らせる。
 fn request(window: &AppWindow, live: &Live, pending: Pending) {
-    if live.pending.borrow().is_some() {
+    if live.pending.borrow().is_some() || window.get_git_busy() {
+        return;
+    }
+    if matches!(&pending.action, Action::ResolveMerge { .. }) {
+        if !edited_in_scope(live, &pending).is_empty() {
+            notice(window, live, pick(
+                "対象に未保存の文書があります。保存してからやり直してください。",
+                "Save the affected open documents before resolving the merge.",
+            ).to_owned());
+            return;
+        }
+    } else if merge_snapshot().is_some_and(|(root, _)| root == pending.root) {
+        notice(window, live, GitError::MergeStopped.to_string());
         return;
     }
     if !pending.confirmed
@@ -847,6 +964,12 @@ fn request(window: &AppWindow, live: &Live, pending: Pending) {
             Action::Commit { .. } => (pick("Amendする", "Amend"), -1),
             Action::StashDrop(_) => (pick("Dropする", "Drop"), 0),
             Action::Merge { .. } => (pick("Mergeする", "Merge"), -1),
+            Action::ResolveMerge { resolution: git::Resolution::Abort, .. } => {
+                (pick("Mergeを中止", "Abort Merge"), 0)
+            }
+            Action::ResolveMerge { resolution: git::Resolution::Delete(_), .. } => {
+                (pick("削除してStage", "Delete and Stage"), 0)
+            }
             Action::Reset { hard: true, .. } => {
                 (pick("Resetして変更を消す", "Reset and Delete Changes"), 0)
             }
@@ -926,6 +1049,17 @@ fn confirmation(pending: &Pending) -> Option<String> {
             "{name}を捨てますか？\n\n元に戻せません。",
             "Drop {name}?\n\nThis cannot be undone."
         )),
+        Action::ResolveMerge { resolution: git::Resolution::Abort, .. } => {
+            let root = pending.root.display();
+            Some(say!(
+                "{root} のMergeを中止しますか？\n\nGitがMerge前の状態への復元を試みます。衝突の解消のために保存・Stageした変更も失われます。",
+                "Abort the merge in {root}?\n\nGit will try to restore the pre-merge state. Saved and staged conflict resolutions will be discarded."
+            ))
+        }
+        Action::ResolveMerge { path: Some(path), resolution: git::Resolution::Delete(_), .. } => Some(say!(
+            "{path} の削除を採用しますか？\n\n現在の作業ファイルを削除し、削除をStageします。",
+            "Accept deletion of {path}?\n\nThis removes the current working file and stages the deletion."
+        )),
         Action::Merge {
             branch,
             into,
@@ -944,8 +1078,8 @@ fn confirmation(pending: &Pending) -> Option<String> {
                 ));
             }
             text.push_str(&say!(
-                "衝突したら中止して元に戻します。",
-                "If there are conflicts, it stops and undoes the merge."
+                "衝突した場合は、解消できるようMergeを一時停止します。",
+                "If there are conflicts, the merge pauses for resolution."
             ));
             Some(text)
         }
@@ -1000,6 +1134,7 @@ fn edited_in_scope(live: &Live, pending: &Pending) -> Vec<Rc<OpenDocument>> {
             .flat_map(|c| std::iter::once(&c.path).chain(c.from.as_ref()))
             .map(|p| pending.root.join(p))
             .collect(),
+        Action::ResolveMerge { path: Some(path), .. } => vec![pending.root.join(path)],
         _ => Vec::new(),
     };
     crate::open_documents(live)
@@ -1011,7 +1146,7 @@ fn edited_in_scope(live: &Live, pending: &Pending) -> Vec<Rc<OpenDocument>> {
                 return false;
             };
             if files.is_empty() {
-                inside(path, &pending.root)
+                inside_worktree(path, &pending.root)
             } else {
                 files.iter().any(|f| key(f) == key(path))
             }
@@ -1162,6 +1297,26 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
                 Ok(pick("Syncしました", "Synced").to_owned())
             },
         ),
+        Action::ResolveMerge { state, path, resolution } => {
+            let reload = if matches!(resolution, git::Resolution::Delete(_) | git::Resolution::Abort) {
+                Reload::Repository
+            } else {
+                Reload::None
+            };
+            start(
+                window, live, root, "", false, reload, discarded, After::Nothing,
+                "merge-resolution",
+                move |root, _| {
+                    git::resolve_merge(root, &state, path.as_deref(), resolution)?;
+                    Ok(match resolution {
+                        git::Resolution::Stage | git::Resolution::Delete(_) =>
+                            pick("解消結果をStageしました", "Staged the resolution"),
+                        git::Resolution::Continue => pick("Mergeを完了しました", "Merge completed"),
+                        git::Resolution::Abort => pick("Mergeを中止しました", "Merge aborted"),
+                    }.to_owned())
+                },
+            );
+        }
         Action::StashApply { name, pop } => {
             let told = if pop {
                 say!("{name}をPopしました", "Popped {name}")
@@ -1211,6 +1366,7 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
             After::ClearMessage,
             "commit",
             move |root, _| {
+                git::require_no_merge(root)?;
                 git::commit(root, &message, all, amend)?;
                 Ok(if amend {
                     pick("Amendしました", "Amended").to_owned()
@@ -1650,14 +1806,25 @@ fn status_now() -> Option<Status> {
 }
 
 fn repo_chosen(window: &AppWindow, live: &Live, index: usize) {
+    if let Some(folder) = PANE.with(|pane| pane.borrow().folders.get(index).cloned()) {
+        choose_folder(window, live, folder);
+    }
+}
+
+fn choose_folder(window: &AppWindow, live: &Live, folder: PathBuf) {
     let changed = PANE.with(|pane| {
         let mut pane = pane.borrow_mut();
-        let Some(folder) = pane.folders.get(index).cloned() else {
-            return false;
-        };
         if pane.chosen.as_ref().is_some_and(|c| key(c) == key(&folder)) {
             return false;
         }
+        if let Some(current) = pane.chosen.as_ref().map(|path| key(path)) {
+            let kept = pane.kept_message.take();
+            pane.drafts.insert(current, (window.get_git_message(), window.get_git_amend(), kept));
+        }
+        let (message, amend, kept) = pane.drafts.remove(&key(&folder)).unwrap_or_default();
+        window.set_git_message(message);
+        window.set_git_amend(amend);
+        pane.kept_message = kept;
         pane.chosen = Some(folder);
         pane.snapshot = None;
         pane.error = None;
@@ -1665,10 +1832,39 @@ fn repo_chosen(window: &AppWindow, live: &Live, index: usize) {
         true
     });
     if changed {
-        window.set_git_amend(false);
         render(window);
         refresh(window, live);
     }
+}
+
+pub(crate) fn select_registered_folder(window: &AppWindow, live: &Live, registered: &Path) {
+    let folders = workspace_folders(live);
+    let Some(folder) = folders.iter().find(|folder| same_path(folder, registered)).cloned() else {
+        return;
+    };
+    PANE.with(|pane| pane.borrow_mut().folders = folders);
+    choose_folder(window, live, folder);
+    crate::git_repo_ui::open(window, live);
+}
+
+pub(crate) fn create_worktree(
+    window: &AppWindow,
+    live: &Live,
+    root: PathBuf,
+    parent: PathBuf,
+    folder: String,
+    branch: String,
+    head: String,
+) {
+    start(
+        window, live, root,
+        pick("Worktreeを作成しています…", "Creating worktree…"),
+        false, Reload::None, Vec::new(), After::Nothing, "worktree-add",
+        move |root, _| {
+            git::add_worktree(root, &parent, &folder, &branch, &head)?;
+            Ok(pick("Worktreeを作成しました", "Created worktree").to_owned())
+        },
+    );
 }
 
 fn create_repository(window: &AppWindow, live: &Live) {
@@ -1819,17 +2015,54 @@ fn row(index: usize) -> Option<(Option<Section>, Option<(bool, Change)>, Option<
     })
 }
 
-/// Git Repository の WIP の右の列で行を押した（RFN01-67 PR 2b）：見出しなら開閉し、
-/// ファイルならその変更を返す（右の列に差分を出すのは呼ぶ側）。
-pub(crate) fn clicked_change(window: &AppWindow, index: usize) -> Option<Change> {
-    match row(index)? {
-        (Some(_), ..) => {
-            row_clicked(window, index);
-            None
+/// Resolve the file and its section before handing the read to a background thread.
+pub(crate) fn diff_clicked(window: &AppWindow, live: &Live, index: i32, inline: bool) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    match row(index) {
+        Some((Some(_), ..)) if inline => {
+            later(window, live, move |window, _| row_clicked(window, index));
         }
-        (None, Some((_, change)), _) => Some(change),
-        _ => None,
+        Some((None, Some((staged, change)), _)) if !window.get_git_busy() => {
+            let Some(root) = active_root() else {
+                return;
+            };
+            let (sender, result) = mpsc::channel();
+            PANE.with(|pane| {
+                let mut pane = pane.borrow_mut();
+                pane.diff_reading = Some(DiffRead {
+                    root: root.clone(),
+                    generation: pane.generation,
+                    inline,
+                    result,
+                });
+            });
+            let target = DiffTarget {
+                root,
+                staged,
+                change,
+            };
+            std::thread::spawn(move || {
+                let mut preview = git_change_diff::read(&target);
+                if inline && target.change.kind == Kind::Modified && preview.text.is_ok() {
+                    preview.patch = crate::git_hunks::Patch::read(
+                        &target.root,
+                        &target.change.path,
+                        target.staged,
+                    )
+                    .map(std::sync::Arc::new);
+                }
+                let _ = sender.send(preview);
+            });
+            poll(window, live);
+        }
+        _ => {}
     }
+}
+
+pub(crate) fn cancel_change_diff() {
+    PANE.with(|pane| pane.borrow_mut().diff_reading = None);
 }
 
 fn row_clicked(window: &AppWindow, index: usize) {
@@ -1894,6 +2127,10 @@ fn stage_paths(change: &Change) -> Vec<String> {
 }
 
 fn row_staged(window: &AppWindow, live: &Live, index: usize) {
+    if window.get_git_merge_active() {
+        window.tell(GitError::MergeStopped.to_string().into());
+        return;
+    }
     let unborn = status_now().is_some_and(|s| s.unborn);
     match row(index) {
         Some((Some(Section::Staged), ..)) => {
@@ -2031,6 +2268,13 @@ pub fn wire(window: &AppWindow, live: &Live) {
         index.max(0) as usize,
         action
     ));
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_git_row_diff(move |index| {
+        if let Some(window) = weak.upgrade() {
+            diff_clicked(&window, &held, index, false);
+        }
+    });
 
     let weak = window.as_weak();
     window.on_git_amend_toggled(move |wanted| {
@@ -2053,10 +2297,7 @@ pub(crate) fn cancel() {
 #[cfg(test)]
 pub(crate) fn pump(window: &AppWindow, live: &Live) -> bool {
     collect(window, live);
-    PANE.with(|pane| {
-        let pane = pane.borrow();
-        pane.job.is_none() && pane.reading.is_none()
-    })
+    idle()
 }
 
 #[cfg(test)]

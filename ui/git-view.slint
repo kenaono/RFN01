@@ -76,6 +76,10 @@ component Picker inherits Rectangle {
 }
 
 export component GitChangesView inherits Rectangle {
+    in property <bool> merging;
+    in property <string> resolve-title;
+    in property <bool> resolve-allowed;
+    callback resolve-merge();
     // 0 案内の文だけ、1 Gitの管理下にない（Create Git Repository）、2 リポジトリ。
     in property <int> mode;
     in property <string> note;
@@ -108,6 +112,9 @@ export component GitChangesView inherits Rectangle {
     // 見出しの右端の釦：Git Repository の画面を開く（RFN01-67 PR 2b。PR 2a ではブランチ▾の
     // 「Manage Branches」だったが、同じ面に入口を2つ置かないため見出しへ移した）。
     callback open-repository();
+    in property <string> repositories-title;
+    in property <bool> repositories-allowed;
+    callback open-repositories();
     callback fetch();
     callback pull();
     callback push();
@@ -122,6 +129,7 @@ export component GitChangesView inherits Rectangle {
     callback row-activated(int);
     // 行の＋／−：Stage・Unstage（見出しなら全部）。
     callback row-staged(int);
+    callback row-diff(int);
     // 右クリックの行：0 Open、1 Stage・Unstage、2 Undo Changes…（Stash は 0 Apply、1 Pop、2 Drop…）。
     callback row-menu(int, int);
 
@@ -145,6 +153,13 @@ export component GitChangesView inherits Rectangle {
                 letter-spacing: 0.9px;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
+            }
+            if !root.compact && root.repositories-title != "": IconButton {
+                size: 22px;
+                icon: Icons.folder;
+                tip: root.repositories-title;
+                enabled: root.repositories-allowed;
+                clicked => { root.open-repositories(); }
             }
             if !root.compact && root.mode == 2: IconButton {
                 size: 22px;
@@ -189,7 +204,24 @@ export component GitChangesView inherits Rectangle {
             vertical-stretch: 1;
         }
 
-        if root.mode == 2: VerticalLayout {
+        if root.mode == 2 && root.merging: VerticalLayout {
+            spacing: 8px;
+            Text {
+                text: @tr("Merge in progress");
+                color: Tok.ink-strong;
+                font-weight: 650;
+            }
+            TextButton {
+                title: root.resolve-title;
+                wide: true;
+                role: Role.primary;
+                enabled: root.resolve-allowed;
+                clicked => { root.resolve-merge(); }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+
+        if root.mode == 2 && !root.merging: VerticalLayout {
             spacing: 6px;
             vertical-stretch: 1;
 
@@ -406,7 +438,7 @@ export component GitChangesView inherits Rectangle {
                             }
                         }
 
-                        // ファイル：状態の字、名前、フォルダ、＋／−。
+                        // ファイル：状態の字、名前、フォルダ、差分、＋／−。
                         if row.kind == 3 || row.kind == 4: HorizontalLayout {
                             padding-left: 22px;
                             padding-right: 2px;
@@ -435,6 +467,14 @@ export component GitChangesView inherits Rectangle {
                                 overflow: elide;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
+                            }
+                            if !root.compact: IconButton {
+                                size: 22px;
+                                y: 2px;
+                                icon: Icons.split;
+                                tip: @tr("View Diff");
+                                enabled: !root.busy;
+                                clicked => { root.row-diff(index); }
                             }
                             IconButton {
                                 size: 22px;

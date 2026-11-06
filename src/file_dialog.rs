@@ -202,6 +202,10 @@ pub fn open_folder_at(owner: Owner, start: Option<&Path>) -> Option<PathBuf> {
     open_folder_from(owner, start, pick("検索するフォルダ", "Folder to Search"))
 }
 
+pub fn worktree_parent(owner: Owner, start: Option<&Path>) -> Option<PathBuf> {
+    open_folder_from(owner, start, pick("Worktreeの作成先の親フォルダ", "Choose the Worktree Parent Folder"))
+}
+
 fn open_folder_from(owner: Owner, start: Option<&Path>, title: &str) -> Option<PathBuf> {
     // SAFETY: as in `open_document`.
     unsafe {

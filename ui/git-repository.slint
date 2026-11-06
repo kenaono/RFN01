@@ -9,9 +9,9 @@
 //
 // 押したことはRust（`git_repo_ui.rs`）へ番号で渡し、ここは何をするかを決めない。
 
-import { ScrollView } from "std-widgets.slint";
+import { ComboBox, ScrollView } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
-import { Icon, Icons, IconButton, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
+import { Field, Icon, Icons, IconButton, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
 import { GitChangesView, GitRow } from "git-view.slint";
 
 export struct GitLine {
@@ -59,6 +59,127 @@ export struct GitDiffRow {
     old: string,
     new: string,
     parts: [GitDiffPart],
+}
+
+export struct GitHunkLine {
+    kind: int,
+    text: string,
+}
+
+export struct GitHunkRow {
+    title: string,
+    lines: [GitHunkLine],
+}
+
+export struct GitSearchRow {
+    sha: string,
+    subject: string,
+    author: string,
+    date: string,
+}
+
+component HistorySearchView inherits Rectangle {
+    in property <[GitSearchRow]> rows;
+    in property <bool> done;
+    in property <bool> more;
+    in property <string> note;
+    callback submit(int, string);
+    callback next-page();
+    callback selected(int);
+    callback dismissed();
+    callback shortcut(KeyEvent) -> EventResult;
+    public function focus-query() { query.take-focus(); }
+
+    background: Tok.paper;
+    changed visible => { if root.visible { query.take-focus(); } }
+    TouchArea { }
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        Text {
+            text: @tr("Search Repository History");
+            color: Tok.ink-strong;
+            font-size: 15px;
+            font-weight: 600;
+        }
+        Text {
+            text: @tr("Local and remote branches and HEAD · all loaded and older commits");
+            color: Tok.ink-muted;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            height: 32px;
+            spacing: 6px;
+            field := ComboBox {
+                width: 106px;
+                current-index: 0;
+                model: [@tr("Message"), @tr("Author"), "SHA", @tr("Path")];
+            }
+            query := Field {
+                horizontal-stretch: 1;
+                placeholder: field.current-index == 3 ? @tr("Path from repository root") : @tr("Search history");
+                accepted => { root.submit(field.current-index, self.text); }
+                escaped => { root.dismissed(); }
+                shortcut(event) => { return root.shortcut(event); }
+            }
+            VerticalLayout {
+                alignment: center;
+                TextButton {
+                    title: @tr("Search");
+                    enabled: query.text != "";
+                    clicked => { root.submit(field.current-index, query.text); }
+                }
+            }
+        }
+        if root.note != "" || root.done: Text {
+            text: root.note != "" ? root.note
+                : root.rows.length == 0 ? @tr("No matching commits")
+                : root.rows.length == 1 ? @tr("1 commit shown")
+                : @tr("{} commits shown", root.rows.length);
+            color: Tok.ink-muted;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                spacing: 2px;
+                for row[index] in root.rows: Rectangle {
+                    height: 46px;
+                    border-radius: 5px;
+                    background: hit.has-hover ? Tok.accent-faint : Tok.chrome;
+                    hit := TouchArea { clicked => { root.selected(index); } }
+                    VerticalLayout {
+                        padding: 5px;
+                        spacing: 2px;
+                        Text {
+                            text: row.subject;
+                            color: Tok.ink-strong;
+                            font-size: 13px;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: row.sha + "   " + row.author + "   " + row.date;
+                            color: Tok.ink-muted;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+                }
+                if root.more: HorizontalLayout {
+                    height: 34px;
+                    alignment: center;
+                    TextButton {
+                        title: @tr("Show more");
+                        enabled: root.note == "";
+                        clicked => { root.next-page(); }
+                    }
+                }
+            }
+        }
+    }
 }
 
 export struct GitBranchRow {
@@ -112,6 +233,22 @@ component ToolButton inherits Rectangle {
 }
 
 export component GitRepositoryView inherits Rectangle {
+    in property <bool> merging;
+    callback action(string);
+    pure callback allowed(string, bool) -> bool;
+    pure callback action-title(string) -> string;
+    in property <bool> search-open;
+    in property <bool> search-more;
+    in property <bool> search-done;
+    in property <[GitSearchRow]> search-rows;
+    in property <string> inspection-note;
+    in property <string> compare-base;
+    in property <string> range-left;
+    in property <string> range-right;
+    property <bool> range-active: root.range-left != "";
+    callback search(int, string);
+    callback next-search-page();
+    callback search-selected(int);
     in property <string> repo-name;
     in property <string> branch;
     in property <[string]> branches;
@@ -134,12 +271,17 @@ export component GitRepositoryView inherits Rectangle {
     in property <int> detail-mode;
     in property <string> diff-name;
     in property <string> diff-caption;
+    in property <string> diff-note;
     in property <int> diff-removed;
     in property <int> diff-added;
     in property <bool> diff-working;
-    // WIP のファイルの差分では Previous／Working Copy を選ばせない（今のファイルと前回の Commit だけ）。
+    // WIP の差分は行の区分が比較元を決める。
     in property <bool> diff-switchable;
     in property <[GitDiffRow]> diff-rows;
+    in property <bool> hunks-available;
+    in property <bool> hunks-active;
+    in property <bool> hunks-staged;
+    in property <[GitHunkRow]> hunks;
     // Undo／Redo（PR 2b）。
     in property <bool> can-undo;
     in property <string> undo-tip;
@@ -185,7 +327,9 @@ export component GitRepositoryView inherits Rectangle {
     callback show-more();
     callback branch-clicked(int);
     callback branch-activated(int);
-    callback branch-menu(int, int);
+    callback capture-branch-menu(int);
+    callback branch-menu(int);
+    callback branch-action(string);
     callback branch-dropped(int, int);
     callback file-clicked(int);
     callback file-menu(int, int);
@@ -193,7 +337,10 @@ export component GitRepositoryView inherits Rectangle {
     callback redo();
     callback diff-back();
     callback diff-working-chosen(bool);
-    callback diff-open-full();
+    callback select-hunk(int);
+    in property <int> hunk-selected: -1;
+    property <string> block-action: root.hunks-staged ? "git.unstage-block" : "git.stage-block";
+    property <string> search-action: root.search-open ? "git.close-history-search" : "git.open-history-search";
     // 右の列の幅（差分の段を Rust が折る）。
     callback diff-width-changed(float);
     // WIP の右の列から（Git Changes と同じ操作）。
@@ -240,7 +387,7 @@ export component GitRepositoryView inherits Rectangle {
         }
     }
     changed focus-generation => {
-        keys.focus();
+        if root.search-open { history.focus-query(); } else { keys.focus(); }
     }
 
     keys := FocusScope {
@@ -285,6 +432,12 @@ export component GitRepositoryView inherits Rectangle {
                 padding-right: 12px;
                 spacing: 4px;
                 alignment: start;
+                if root.merging: TextButton {
+                    title: root.action-title("git.merge-resolution");
+                    role: Role.primary;
+                    enabled: root.allowed("git.merge-resolution", false);
+                    clicked => { root.action("git.merge-resolution"); }
+                }
                 HorizontalLayout {
                     spacing: 6px;
                     padding-right: 6px;
@@ -449,6 +602,30 @@ export component GitRepositoryView inherits Rectangle {
                 padding-right: 12px;
                 alignment: end;
                 spacing: 8px;
+                if root.compare-base != "": Text {
+                    width: 132px;
+                    text: @tr("Base {}", root.compare-base);
+                    color: Tok.ink-muted;
+                    font-size: 11px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TextButton {
+                        title: root.action-title(root.search-action);
+                        enabled: root.allowed(root.search-action, false);
+                        clicked => { root.action(root.search-action); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TextButton {
+                        title: root.action-title("git.worktrees");
+                        enabled: root.allowed("git.worktrees", false);
+                        clicked => { root.action("git.worktrees"); }
+                    }
+                }
                 Text {
                     text: "Esc";
                     color: Tok.ink-faint;
@@ -517,7 +694,7 @@ export component GitRepositoryView inherits Rectangle {
                                         root.drop-index = -1;
                                     }
                                     if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && (row.kind == 1 || row.kind == 2 || row.kind == 4) {
-                                        root.menu-row = index;
+                                        root.capture-branch-menu(index);
                                         root.menu-kind = row.kind == 1 ? 1 : row.kind == 2 ? 2 : 4;
                                         root.menu-current = row.current;
                                         root.menu-x = 16px;
@@ -619,7 +796,8 @@ export component GitRepositoryView inherits Rectangle {
             }
 
             // 真ん中：グラフ。
-            VerticalLayout {
+            graph := VerticalLayout {
+                min-width: 0px;
                 horizontal-stretch: 1;
                 Rectangle {
                     height: 28px;
@@ -648,6 +826,7 @@ export component GitRepositoryView inherits Rectangle {
                             color: Tok.ink-faint;
                             font-size: 10px;
                             letter-spacing: 0.9px;
+                            overflow: elide;
                             vertical-alignment: center;
                         }
                         Text {
@@ -689,7 +868,17 @@ export component GitRepositoryView inherits Rectangle {
                     font-size: 12px;
                     vertical-alignment: center;
                 }
+                if root.inspection-note != "" && !root.search-open: Text {
+                    height: 38px;
+                    text: root.inspection-note;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
                 list := ScrollView {
+                    // The software renderer draws graph paths in a separate pass.
+                    visible: !root.search-open;
                     vertical-stretch: 1;
                     VerticalLayout {
                         alignment: start;
@@ -900,34 +1089,60 @@ export component GitRepositoryView inherits Rectangle {
                         padding: 16px;
                         spacing: 8px;
                         alignment: start;
-                        Text {
+                        if root.range-active: Text {
+                            text: @tr("Base {}", root.range-left);
+                            color: Tok.ink-strong;
+                            font-size: 12px;
+                            wrap: char-wrap;
+                        }
+                        if root.range-active: Text {
+                            text: @tr("Target {}", root.range-right);
+                            color: Tok.ink-strong;
+                            font-size: 12px;
+                            wrap: char-wrap;
+                        }
+                        if !root.range-active: Text {
                             text: "commit " + root.detail-sha;
                             color: Tok.ink-faint;
                             font-size: 11px;
                             font-family: "Consolas";
                         }
-                        Text {
+                        if !root.range-active: Text {
                             text: root.detail-message;
                             color: Tok.ink-strong;
                             font-size: 14px;
                             wrap: word-wrap;
                         }
-                        Text {
+                        if !root.range-active: Text {
                             text: root.detail-author;
                             color: Tok.ink-muted;
                             font-size: 12px;
                             overflow: elide;
                         }
-                        Text {
+                        if !root.range-active: Text {
                             text: root.detail-date;
                             color: Tok.ink-muted;
                             font-size: 12px;
                         }
-                        Text {
+                        if !root.range-active: Text {
                             text: root.detail-parents;
                             color: Tok.ink-muted;
                             font-size: 12px;
                             font-family: "Consolas";
+                        }
+                        if !root.range-active: HorizontalLayout {
+                            height: 32px;
+                            spacing: 6px;
+                            TextButton {
+                                title: root.action-title("git.set-compare-base");
+                                enabled: root.allowed("git.set-compare-base", false);
+                                clicked => { root.action("git.set-compare-base"); }
+                            }
+                            TextButton {
+                                title: root.action-title("git.compare-with-base");
+                                enabled: root.allowed("git.compare-with-base", false);
+                                clicked => { root.action("git.compare-with-base"); }
+                            }
                         }
                         Rectangle {
                             height: 1px;
@@ -951,7 +1166,7 @@ export component GitRepositoryView inherits Rectangle {
                                     if event.button == PointerEventButton.back && event.kind == PointerEventKind.down {
                                         root.close();
                                     }
-                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                                    if !root.range-active && event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                                         root.menu-row = index;
                                         root.menu-kind = 5;
                                         root.menu-x = root.width - 340px + 24px;
@@ -1019,7 +1234,7 @@ export component GitRepositoryView inherits Rectangle {
                                         }
                                     }
                                     Text {
-                                        text: @tr("Files");
+                                        text: root.hunks-active ? @tr("Diff") : @tr("Files");
                                         color: Tok.accent;
                                         font-size: 12px;
                                         vertical-alignment: center;
@@ -1086,24 +1301,25 @@ export component GitRepositoryView inherits Rectangle {
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
-                            Text {
+                            if root.diff-note == "" && !root.hunks-active: Text {
                                 text: "−" + root.diff-removed;
                                 color: Tok.alert;
                                 font-size: 12px;
                                 vertical-alignment: center;
                             }
-                            Text {
+                            if root.diff-note == "" && !root.hunks-active: Text {
                                 text: "+" + root.diff-added;
                                 color: #2e7d32;
                                 font-size: 12px;
                                 vertical-alignment: center;
                             }
-                            VerticalLayout {
+                            if root.diff-note == "" && !root.hunks-active: VerticalLayout {
                                 alignment: center;
                                 TextButton {
-                                    title: @tr("Open in Comparison");
+                                    title: root.action-title("git.open-comparison");
+                                    enabled: root.allowed("git.open-comparison", false);
                                     clicked => {
-                                        root.diff-open-full();
+                                        root.action("git.open-comparison");
                                     }
                                 }
                             }
@@ -1114,13 +1330,104 @@ export component GitRepositoryView inherits Rectangle {
                             background: Tok.rule;
                         }
                     }
-                    Rectangle {
+                    if root.hunks-available && !root.hunks-active: HorizontalLayout {
+                        height: 38px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: end;
+                        VerticalLayout {
+                            alignment: center;
+                            TextButton {
+                                title: root.action-title("git.review-blocks");
+                                enabled: root.allowed("git.review-blocks", false);
+                                clicked => { root.action("git.review-blocks"); }
+                            }
+                        }
+                    }
+                    if root.hunks-active: VerticalLayout {
+                        vertical-stretch: 1;
+                        spacing: 2px;
+                        Text {
+                            height: 30px;
+                            text: @tr("Git patch from saved versions. Unsaved edits are excluded.");
+                            color: Tok.ink-muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                alignment: start;
+                                padding: 8px;
+                                spacing: 10px;
+                                for hunk[index] in root.hunks: VerticalLayout {
+                                    spacing: 1px;
+                                    HorizontalLayout {
+                                        height: 34px;
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        spacing: 6px;
+                                        Rectangle {
+                                            background: index == root.hunk-selected ? Tok.accent-soft : transparent;
+                                            horizontal-stretch: 1;
+                                            border-radius: 3px;
+                                            Text {
+                                                x: 6px;
+                                                width: parent.width - 12px;
+                                                text: hunk.title;
+                                                font-family: "Consolas";
+                                                font-size: 12px;
+                                                color: Tok.ink-muted;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                            TouchArea {
+                                                clicked => { root.select-hunk(index); keys.focus(); }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            TextButton {
+                                                title: root.action-title(root.block-action);
+                                                enabled: root.allowed(root.block-action, false);
+                                                clicked => { root.select-hunk(index); root.action(root.block-action); }
+                                            }
+                                        }
+                                    }
+                                    for line in hunk.lines: Rectangle {
+                                        background: line.kind == 1 ? Tok.diff-removed : line.kind == 2 ? Tok.diff-added : Tok.paper;
+                                        HorizontalLayout {
+                                            padding: 4px;
+                                            spacing: 4px;
+                                            Text {
+                                                width: 14px;
+                                                text: line.kind == 1 ? "−" : line.kind == 2 ? "+" : "";
+                                                color: Tok.ink-muted;
+                                                horizontal-alignment: center;
+                                            }
+                                            Text {
+                                                text: line.kind == 3 ? @tr("No newline at end of file") : line.text;
+                                                color: line.kind == 3 ? Tok.ink-muted : Tok.doc-ink;
+                                                font-size: 13px;
+                                                wrap: char-wrap;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !root.hunks-active: Rectangle {
                         vertical-stretch: 1;
                         background: Tok.paper;
                         if root.diff-rows.length == 0: Text {
-                            text: @tr("No differences");
+                            text: root.diff-note == "" ? @tr("No differences") : root.diff-note;
                             color: Tok.ink-faint;
                             font-size: 12px;
+                            wrap: word-wrap;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -1196,6 +1503,10 @@ export component GitRepositoryView inherits Rectangle {
                     }
                 }
                 if root.detail-mode == 2: GitChangesView {
+                    merging: root.merging;
+                    resolve-title: root.action-title("git.merge-resolution");
+                    resolve-allowed: root.allowed("git.merge-resolution", false);
+                    resolve-merge => { root.action("git.merge-resolution"); }
                     mode: root.changes-mode;
                     note: root.changes-note;
                     // リポジトリとブランチはこの画面の上の帯が持つので、ここでは選ばせない。
@@ -1233,6 +1544,23 @@ export component GitRepositoryView inherits Rectangle {
                 }
             }
         }
+    }
+
+    history := HistorySearchView {
+        x: graph.absolute-position.x - root.absolute-position.x;
+        y: graph.absolute-position.y - root.absolute-position.y;
+        width: graph.width;
+        height: graph.height;
+        visible: root.search-open;
+        rows: root.search-rows;
+        done: root.search-done;
+        more: root.search-more;
+        note: root.inspection-note;
+        submit(field, query) => { root.search(field, query); }
+        next-page => { root.next-search-page(); }
+        selected(index) => { root.search-selected(index); }
+        dismissed => { root.action("git.close-history-search"); }
+        shortcut(event) => { return root.shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject; }
     }
 
     branch-menu := PopupWindow {
@@ -1390,6 +1718,22 @@ export component GitRepositoryView inherits Rectangle {
                         root.side-chosen(4);
                     }
                 }
+                if root.menu-kind == 1 || root.menu-kind == 2: MenuRow {
+                    title: root.action-title("git.set-compare-base");
+                    enabled: root.allowed("git.set-compare-base", true);
+                    activated => {
+                        root.branch-action("git.set-compare-base");
+                        side-menu.close();
+                    }
+                }
+                if root.menu-kind == 1 || root.menu-kind == 2: MenuRow {
+                    title: root.action-title("git.compare-with-base");
+                    enabled: root.allowed("git.compare-with-base", true);
+                    activated => {
+                        root.branch-action("git.compare-with-base");
+                        side-menu.close();
+                    }
+                }
             }
         }
     }
@@ -1398,7 +1742,7 @@ export component GitRepositoryView inherits Rectangle {
         if root.menu-kind == 5 {
             root.file-menu(root.menu-row, action);
         } else {
-            root.branch-menu(root.menu-row, action);
+            root.branch-menu(action);
         }
     }
 }

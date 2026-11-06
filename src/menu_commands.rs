@@ -1059,7 +1059,7 @@ pub(crate) struct Target {
 impl Target {
     fn capture(window: &AppWindow, live: &Live) -> Self {
         let field = window.global::<MenuInput>().get_target();
-        Self::with_field(window, live, field)
+        Self::with_field(window, live, field).with_panel_context(window, live)
     }
     /// 設定から割り当てたキーで走らせるときの対象（RFN01-18）。
     ///
@@ -1136,6 +1136,12 @@ impl Target {
         self
     }
 
+    pub(crate) fn set_git_branch_target(&mut self, branch: &crate::git::Ref) {
+        if let Some(context) = &mut self.panel_context {
+            context.set_git_branch_target(branch);
+        }
+    }
+
     fn valid(&self, window: &AppWindow, live: &Live) -> bool {
         self.id.is_shown(window)
             && Rc::ptr_eq(&self.document, &live.states.document(self.id))
@@ -1198,7 +1204,9 @@ pub fn install(window: &AppWindow, live: &Live) {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        if window.get_question_open() || window.get_print_active() || window.get_diff_active() {
+        if window.get_question_open() || window.get_print_active() || window.get_diff_active()
+            || window.get_git_catalog_open()
+        {
             return;
         }
         if window.get_title_menu_open() {
@@ -1619,7 +1627,7 @@ impl<'a> Scene<'a> {
             (self.text, self.editable, self.main, self.path, self.field);
         let panel = t.id.is_panel();
         match command {
-            Command::PanelAction(action) => crate::panel_actions::enabled(window, *action, text, self.screen.settings),
+            Command::PanelAction(action) => crate::panel_actions::enabled(window, self.t.panel_context.as_ref(), *action, text, self.screen.settings),
             Command::Tree(action) => {
                 t.tree.as_ref().is_some_and(|tree| tree.enabled(window, self.live, *action))
                     && (*action != crate::tree_actions::Action::RevealDocument
@@ -1869,6 +1877,9 @@ fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<
             }
             root.push(Item::child("最近のフォルダ", "Recent Folders", recent));
             act!(Command::Workspaces);
+            act!(Command::PanelAction(crate::panel_actions::Action::Repositories(
+                crate::git_catalog_ui::Action::Show
+            )));
             // RFN01-67: 全ブランチのグラフ（Git Changes で選んでいるリポジトリ）。
             act!(Command::GitRepository);
             root.push(Item::Sep);
@@ -2588,7 +2599,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
     let p = t.id.index();
     let parent = t.parent.index();
     match command {
-        Command::PanelAction(action) => crate::panel_actions::execute(window, live, action),
+        Command::PanelAction(action) => crate::panel_actions::execute(window, live, t.panel_context.as_ref(), action),
         Command::Tree(action) => {
             if let Some(tree) = &t.tree {
                 crate::tree_actions::execute(window, live, tree, t.id, action);

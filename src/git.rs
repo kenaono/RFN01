@@ -9,7 +9,7 @@
 //! - **出力は英語で読む**（`LC_ALL=C`）。衝突や`safe.directory`の断りを文で見分けるため。
 //!   ファイル名は`-z`と`core.quotepath=false`で生のUTF-8のまま受け取る。
 //! - **衝突したら中止して元に戻す**（書き手の判断 2026-10-03）。衝突を解く画面は持たない。
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -26,6 +26,8 @@ pub enum GitError {
     Cancelled,
     /// 衝突したので中止し、元に戻した。
     Conflict,
+    /// Merge／Pull が衝突した。Gitに作業ツリーと索引を残している。
+    MergeStopped,
     /// Gitが断った。中身はGitの文（資格情報を伏せたもの）か、こちらの文。
     Failed(String),
     /// ブランチがどこにも Merge されていないので、`-d`では消せない（`-D`なら消せる）。
@@ -47,6 +49,10 @@ impl std::fmt::Display for GitError {
             GitError::Conflict => f.write_str(crate::i18n::pick(
                 "衝突したため中止し、元に戻しました。衝突はTerminalで解いてください",
                 "There were conflicts, so it was stopped and undone. Resolve them in a Terminal",
+            )),
+            GitError::MergeStopped => f.write_str(crate::i18n::pick(
+                "Mergeを一時停止しました。衝突を解消してから続行できます。",
+                "Merge paused. Resolve the conflicts before continuing.",
             )),
             GitError::Failed(said) => f.write_str(said),
             GitError::NotMerged(name) => f.write_str(&crate::say!(
@@ -122,8 +128,20 @@ fn program() -> String {
 }
 
 fn run(folder: &Path, arguments: &[&str], cancel: Option<&Cancel>) -> Result<Output, GitError> {
-    let mut child = command(folder)
-        .args(arguments)
+    let mut git = command(folder);
+    git.args(arguments);
+    run_command(git, None, cancel)
+}
+
+fn run_command(
+    mut git: Command,
+    input: Option<&[u8]>,
+    cancel: Option<&Cancel>,
+) -> Result<Output, GitError> {
+    if input.is_some() {
+        git.stdin(Stdio::piped());
+    }
+    let mut child = git
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -153,6 +171,13 @@ fn run(folder: &Path, arguments: &[&str], cancel: Option<&Cancel>) -> Result<Out
             .take()
             .map(|s| Box::new(s) as Box<dyn Read + Send>),
     );
+    let input_result = input.map(|bytes| {
+        child
+            .stdin
+            .take()
+            .expect("piped Git stdin")
+            .write_all(bytes)
+    });
     let status = loop {
         if cancel.is_some_and(Cancel::cancelled) {
             let _ = child.kill();
@@ -167,6 +192,11 @@ fn run(folder: &Path, arguments: &[&str], cancel: Option<&Cancel>) -> Result<Out
     };
     let stdout = stdout.join().unwrap_or_default();
     let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+    if status.success()
+        && let Some(Err(error)) = input_result
+    {
+        return Err(GitError::Failed(error.to_string()));
+    }
     Ok(Output {
         ok: status.success(),
         stdout,
@@ -243,6 +273,24 @@ pub fn repository_root(folder: &Path) -> Result<Option<PathBuf>, GitError> {
         return Err(GitError::Untrusted);
     }
     Ok(None)
+}
+
+/// The catalog distinguishes a normal folder from an unreadable registration.
+pub(crate) fn registered_repository(folder: &Path) -> Result<Option<PathBuf>, GitError> {
+    std::fs::read_dir(folder).map_err(|error| GitError::Failed(error.to_string()))?;
+    let output = run(folder, &["rev-parse", "--show-toplevel"], None)?;
+    if output.ok {
+        let root = PathBuf::from(output.text().trim_end_matches(['\r', '\n']));
+        return root.canonicalize().map(|root| Some(crate::backup::plain(&root)))
+            .map_err(|error| GitError::Failed(error.to_string()));
+    }
+    if output.stderr.starts_with("fatal: not a git repository") {
+        return Ok(None);
+    }
+    if output.stderr.contains("safe.directory") {
+        return Err(GitError::Untrusted);
+    }
+    Err(output.failure())
 }
 
 /// 管理下にないフォルダで`git init`。
@@ -630,8 +678,14 @@ pub fn fetch(root: &Path, cancel: &Cancel) -> Result<(), GitError> {
     checked(root, &["fetch", "-q"], Some(cancel)).map(drop)
 }
 
-/// Pull（取り込みはMerge）。**衝突したら`merge --abort`で元に戻す**。
+mod merge_resolution;
+pub(crate) use merge_resolution::*;
+mod worktrees;
+pub(crate) use worktrees::*;
+
+/// Pull（取り込みはMerge）。衝突時は解消のためにGitの状態を残す。
 pub fn pull(root: &Path, cancel: &Cancel) -> Result<(), GitError> {
+    require_no_merge(root)?;
     let output = run(
         root,
         &["pull", "-q", "--no-rebase", "--no-edit"],
@@ -640,12 +694,7 @@ pub fn pull(root: &Path, cancel: &Cancel) -> Result<(), GitError> {
     if output.ok {
         return Ok(());
     }
-    let merging = run(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"], None)?;
-    if merging.ok {
-        checked(root, &["merge", "--abort"], None)?;
-        return Err(GitError::Conflict);
-    }
-    Err(output.failure())
+    Err(merge_failure(root, output))
 }
 
 /// Push。上流が無ければPublish（`-u`で`origin`へ。無ければ最初のリモートへ）。
@@ -699,6 +748,12 @@ pub struct LogEntry {
     pub subject: String,
 }
 
+const LOG_FORMAT: &str = "--format=%H%x1f%P%x1f%an%x1f%ad%x1f%s%x1e";
+
+fn full_sha(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// ローカルとリモートのブランチの Commit を、新しい順（親より子が先）に`count`件。
 /// Stash の Commit は入れない。まだCommitが無ければ空。
 pub fn log(root: &Path, count: usize) -> Result<Vec<LogEntry>, GitError> {
@@ -712,7 +767,7 @@ pub fn log(root: &Path, count: usize) -> Result<Vec<LogEntry>, GitError> {
             "--remotes",
             "HEAD",
             "--date=format:%Y-%m-%d %H:%M",
-            "--format=%H%x1f%P%x1f%an%x1f%ad%x1f%s%x1e",
+            LOG_FORMAT,
             &limit,
             "--",
         ],
@@ -725,13 +780,15 @@ pub fn log(root: &Path, count: usize) -> Result<Vec<LogEntry>, GitError> {
         }
         return Ok(Vec::new());
     }
-    Ok(output
-        .text()
-        .split('\x1e')
+    Ok(parse_log(&output.text()))
+}
+
+fn parse_log(text: &str) -> Vec<LogEntry> {
+    text.split('\x1e')
         .filter_map(|record| {
             let mut fields = record.trim_start_matches('\n').split('\x1f');
             let sha = fields.next()?.to_owned();
-            if sha.is_empty() {
+            if !full_sha(&sha) {
                 return None;
             }
             let parents = fields
@@ -747,7 +804,88 @@ pub fn log(root: &Path, count: usize) -> Result<Vec<LogEntry>, GitError> {
                 subject: fields.next()?.to_owned(),
             })
         })
-        .collect())
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HistoryField {
+    Message,
+    Author,
+    Sha,
+    Path,
+}
+
+/// Search the history reachable from local/remote branches and HEAD, independently of the graph page.
+pub(crate) fn search_history(
+    root: &Path,
+    field: HistoryField,
+    query: &str,
+    count: usize,
+) -> Result<Vec<LogEntry>, GitError> {
+    let limit = format!("-n{count}");
+    let mut args = vec![
+        "--literal-pathspecs",
+        "log",
+        "--topo-order",
+        "--date=format:%Y-%m-%d %H:%M",
+        LOG_FORMAT,
+        "--fixed-strings",
+        "--regexp-ignore-case",
+        &limit,
+    ];
+    let filter;
+    match field {
+        HistoryField::Sha => {
+            if !(4..=64).contains(&query.len()) || !query.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(GitError::Failed(crate::say!(
+                    "SHAを4文字以上の16進数で入力してください。",
+                    "Enter at least four hexadecimal digits of the SHA."
+                )));
+            }
+            let prefix = query.to_ascii_lowercase();
+            let revision = format!("{prefix}^{{commit}}");
+            let output = run(
+                root,
+                &["rev-parse", "-q", "--verify", "--end-of-options", &revision],
+                None,
+            )?;
+            if !output.ok {
+                return if output.stderr.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Err(output.failure())
+                };
+            }
+            filter = output.text().trim().to_owned();
+            if !full_sha(&filter) || !filter.starts_with(&prefix) {
+                return Ok(Vec::new());
+            }
+            args.push(&filter);
+        }
+        _ => {
+            args.extend(["--branches", "--remotes"]);
+            if head_sha(root).is_some() {
+                args.push("HEAD");
+            }
+            match field {
+                HistoryField::Message => {
+                    filter = format!("--grep={query}");
+                    args.push(&filter);
+                }
+                HistoryField::Author => {
+                    filter = format!("--author={query}");
+                    args.push(&filter);
+                }
+                HistoryField::Path => args.push("--full-history"),
+                HistoryField::Sha => unreachable!(),
+            }
+        }
+    }
+    args.push("--");
+    if matches!(field, HistoryField::Path) {
+        args.push(query);
+    }
+    checked(root, &args, None).map(|text| parse_log(&text))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -971,6 +1109,40 @@ fn parse_name_status(bytes: &[u8]) -> Vec<Change> {
     files
 }
 
+/// Two fixed commit IDs, in left-to-right order. No merge-base or working tree is involved.
+pub(crate) fn compare_commits(
+    root: &Path,
+    left: &str,
+    right: &str,
+) -> Result<Vec<Change>, GitError> {
+    if !full_sha(left) || !full_sha(right) {
+        return Err(GitError::Failed(crate::say!(
+            "比較には確定した二つのコミットIDが必要です。",
+            "The comparison needs two fixed commit IDs."
+        )));
+    }
+    let output = run(
+        root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--find-renames",
+            "--name-status",
+            "-z",
+            left,
+            right,
+            "--",
+        ],
+        None,
+    )?;
+    if output.ok {
+        Ok(parse_name_status(&output.stdout))
+    } else {
+        Err(output.failure())
+    }
+}
+
 /// ファイルの履歴の1つ（RFN01-67 PR 3、Git History）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileVersion {
@@ -1028,12 +1200,94 @@ pub fn file_log(file: &Path, limit: usize) -> Result<Vec<FileVersion>, GitError>
 
 /// `sha`の版の`path`の中身。その版に無ければ`None`。
 pub fn blob_at(root: &Path, sha: &str, path: &str) -> Result<Option<Vec<u8>>, GitError> {
-    let object = format!("{sha}:{path}");
-    let output = run(root, &["cat-file", "blob", &object], None)?;
+    let output = blob_output(root, sha, path)?;
     Ok(output.ok.then_some(output.stdout))
 }
 
-/// 途中で止まった操作（Merge・Revert・Cherry-pick）が残っていれば`--abort`で戻し、衝突と答える。
+/// A change row says this blob exists. Report a failed read instead of showing an empty side.
+pub(crate) fn change_blob(root: &Path, revision: &str, path: &str) -> Result<Vec<u8>, GitError> {
+    let output = blob_output(root, revision, path)?;
+    if output.ok {
+        Ok(output.stdout)
+    } else {
+        Err(output.failure())
+    }
+}
+
+fn blob_output(root: &Path, revision: &str, path: &str) -> Result<Output, GitError> {
+    let object = format!("{revision}:{path}");
+    run(root, &["cat-file", "blob", &object], None)
+}
+
+pub(crate) fn index_path(root: &Path) -> Result<PathBuf, GitError> {
+    let path = checked(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        None,
+    )?;
+    Ok(PathBuf::from(path.trim_end_matches(['\r', '\n'])))
+}
+
+pub(crate) fn hunk_patch(root: &Path, path: &str, staged: bool) -> Result<Vec<u8>, GitError> {
+    let mut git = command(root);
+    git.args([
+        "--literal-pathspecs",
+        "-c",
+        "core.quotepath=true",
+        "diff",
+        "--patch",
+        "--full-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--no-relative",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--unified=3",
+        "--inter-hunk-context=0",
+        "--diff-algorithm=myers",
+        "--no-indent-heuristic",
+    ]);
+    if staged {
+        git.args(["--cached", "HEAD"]);
+    }
+    git.args(["--", path]);
+    let output = run_command(git, None, None)?;
+    if output.ok {
+        Ok(output.stdout)
+    } else {
+        Err(output.failure())
+    }
+}
+
+pub(crate) fn apply_hunk(
+    root: &Path,
+    index: &Path,
+    patch: &[u8],
+    reverse: bool,
+) -> Result<(), GitError> {
+    let mut git = command(root);
+    git.env("GIT_INDEX_FILE", index).args([
+        "-c",
+        "apply.ignoreWhitespace=no",
+        "apply",
+        "--cached",
+        "--whitespace=nowarn",
+    ]);
+    if reverse {
+        git.arg("--reverse");
+    }
+    git.arg("-");
+    let output = run_command(git, Some(patch), None)?;
+    if output.ok {
+        Ok(())
+    } else {
+        Err(output.failure())
+    }
+}
+
+/// 途中で止まったRevert・Cherry-pickが残っていれば`--abort`で戻し、衝突と答える。
 fn abort_if_stopped(root: &Path, failed: Output, head: &str, command: &str) -> GitError {
     if run(root, &["rev-parse", "-q", "--verify", head], None).is_ok_and(|o| o.ok) {
         return match checked(root, &[command, "--abort"], None) {
@@ -1044,13 +1298,14 @@ fn abort_if_stopped(root: &Path, failed: Output, head: &str, command: &str) -> G
     failed.failure()
 }
 
-/// `branch`を今のブランチへ Merge する。衝突したら`merge --abort`。
+/// `branch`を今のブランチへ Merge する。衝突時は解消のためにGitの状態を残す。
 pub fn merge(root: &Path, branch: &str) -> Result<(), GitError> {
+    require_no_merge(root)?;
     let output = run(root, &["merge", "-q", "--no-edit", branch, "--"], None)?;
     if output.ok {
         return Ok(());
     }
-    Err(abort_if_stopped(root, output, "MERGE_HEAD", "merge"))
+    Err(merge_failure(root, output))
 }
 
 /// Revert。Merge の Commit は1つ目の親に対して打ち消す。衝突したら`revert --abort`。

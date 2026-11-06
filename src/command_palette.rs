@@ -252,7 +252,13 @@ pub fn close(window: &AppWindow) {
     window.set_palette_text("".into());
     window.set_palette_rows(ModelRc::from(Rc::new(VecModel::<PaletteRow>::default())));
     PALETTE.with(|held| held.borrow_mut().take());
-    window.set_focus_generation(window.get_focus_generation() + 1);
+    if window.get_git_catalog_open() {
+        crate::git_catalog_ui::regain_focus(window);
+    } else if window.get_git_repo_active() {
+        crate::git_repo_ui::regain_focus(window);
+    } else {
+        window.set_focus_generation(window.get_focus_generation() + 1);
+    }
 }
 
 fn setting_score(query: &str, titles: &(String, String)) -> i64 {
@@ -287,6 +293,18 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
     let rows = PALETTE.with(|held| {
         let mut held = held.borrow_mut();
         let palette = held.as_mut()?;
+        if window.get_git_repo_active() || window.get_git_catalog_open() {
+            let operations = palette.operations.get_or_insert_with(|| {
+                operations_now(window, live, palette.pane, &palette.tree)
+            });
+            let query = text.strip_prefix('>').unwrap_or(text).trim();
+            let (mut rows, shown) = finish_ranked(ranked_operations(operations, query, true));
+            for row in &mut rows {
+                row.assign = SharedString::new();
+            }
+            palette.shown = shown;
+            return Some(rows);
+        }
         if let Some(list) = palette.only {
             if list == List::Templates {
                 let templates = palette
@@ -845,9 +863,18 @@ fn operations_now(
         .enumerate()
         .filter_map(|(at, action)| {
             let command = action.command.clone()?;
-            let enabled = if matches!(command, menu_commands::Command::Tree(_) | menu_commands::Command::PanelAction(_)) {
-                (!matches!(command, menu_commands::Command::PanelAction(_)) || !crate::panel_actions::overlay_active(window))
+            let enabled = if let menu_commands::Command::PanelAction(action) = command {
+                (!crate::panel_actions::overlay_active(window)
+                    || if window.get_git_catalog_open() {
+                        action.available_in_catalog()
+                    } else {
+                        action.available_in_git_overlay()
+                    })
                     && tree_scene.enabled(&command)
+            } else if window.get_git_repo_active() || window.get_git_catalog_open() {
+                false
+            } else if matches!(command, menu_commands::Command::Tree(_)) {
+                tree_scene.enabled(&command)
             } else {
                 menu_commands::allowed_for(window, live, pane, &command) == menu_commands::Allowed::Yes
             };
@@ -861,6 +888,9 @@ fn operations_now(
                 })
         })
         .collect();
+    if window.get_git_repo_active() || window.get_git_catalog_open() {
+        return found;
+    }
     found.extend(
         data_operations(window, live, None)
             .into_iter()
