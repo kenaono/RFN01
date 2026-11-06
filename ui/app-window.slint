@@ -318,8 +318,7 @@ export component AppWindow inherits Window {
     /// to hand out.
     callback editor-area-resized();
 
-    // The left pane (要件 6.2). Explorer only for now; 検索 and 履歴 are the
-    // other two things it will show.
+    // The rows currently published to the left pane (要件 6.2).
     in property <[LeftRow]> left-rows;
     in property <string> work-folder;
     // Workspace設計.md phase 3: more than one active root is shown, each as
@@ -336,20 +335,15 @@ export component AppWindow inherits Window {
     // the same, so a session cannot put the panel where the pointer could not
     // bring it back from.
     in-out property <float> tree-width: 260;
-    // Which of Explorer, 検索 and 履歴 is showing: 0, 1, 2 (要件 6.2). **Rust
-    // holds it**, because the rows it puts in `left-rows` have to agree with
-    // it, and a click means something different in each.
+    // The active left-pane view. Rust uses LeftTab to publish the matching
+    // rows and interpret clicks.
     in-out property <int> left-tab: 0;
     // The tabs themselves, so their number and their order live in one place;
     // `LeftTab::from_index` in Rust reads the same order.
     callback left-tab-chosen(int);
-    /// Which row the file commands act on, or -1 for none. **Rust decides it**
-    /// — it holds the selection by path, and works out where that sits every
-    /// time the rows change (要件 5.2).
-    /// Which row the file commands act on (要件 5.2). **Rust owns it** — it is
-    /// worked out from the selected path every time the rows are drawn — but a
-    /// right click moves it here first, because the row a menu is opening from
-    /// has to look chosen before Rust has drawn anything.
+    /// The selected file row, or -1. Rust resolves it from the selected path
+    /// when publishing rows. A right click highlights its row before opening
+    /// the context menu (要件 5.2).
     in-out property <int> tree-selected: -1;
     in property <[string]> tree-root-labels;
     in property <[int]> tree-pane-root-indices;

@@ -1787,6 +1787,34 @@ impl CalloutType {
 }
 
 impl InsertEdit {
+    /// 矩形の各表示行に適用できる挿入（RFN01-41）。
+    pub fn supports_rectangle(self) -> bool {
+        matches!(
+            self,
+            Self::MarkdownLink
+                | Self::WikiLink
+                | Self::WikiLinkAlias
+                | Self::Ruby
+                | Self::SideNote
+                | Self::RubyWithSideNote
+                | Self::EmphasisDots
+                | Self::SesameDotsNote
+                | Self::RoundDotsNote
+                | Self::WhiteRoundDotsNote
+                | Self::DoubleRoundDotsNote
+                | Self::CrossDotsNote
+                | Self::LineNote
+                | Self::DoubleLineNote
+                | Self::WaveLineNote
+                | Self::ChainLineNote
+                | Self::DashLineNote
+                | Self::Upright
+                | Self::Warichu
+                | Self::SmallText
+                | Self::LargeText
+        )
+    }
+
     /// **選んだ字を指す注記か。**同じ語を本文と注記の2か所へ書く形は、選んだ字が
     /// 無ければ指す先が無い——だからメニューでも押せない（書き手の合意
     /// 2026-09-21）。空のひな形を置ける形（`《《》》`と範囲の注記）はここに居ない。
@@ -1966,6 +1994,45 @@ pub fn insert_edit(
     // 範囲の頭から数えるので、`apply_span_edit`がそのまま使える。
     let caret = start + after;
     Some((start..end, text, (caret, caret)))
+}
+
+/// 表示行ごとの選択に同じひな形を適用し、一つの置き換えにまとめる（RFN01-41）。
+/// 範囲は原文のバイト位置で文書順。折り返しも一行ずつ扱い、空の範囲は飛ばす。
+/// キャレットは操作端に最も近い対象行で、通常の挿入と同じ位置に置く。
+pub fn rectangle_insert_edit(
+    source: &str,
+    runs: &[(usize, usize)],
+    what: InsertEdit,
+    focus: usize,
+) -> Option<(Range<usize>, String, (usize, usize))> {
+    if !what.supports_rectangle() {
+        return None;
+    }
+
+    let mut span = None;
+    let mut replacement = String::new();
+    let mut nearest = None;
+    for &(run_start, run_end) in runs {
+        if source.get(run_start..run_end)?.is_empty() {
+            continue;
+        }
+        let span = span.get_or_insert(run_start..run_start);
+        replacement.push_str(source.get(span.end..run_start)?);
+
+        let (region, text, (caret, _)) = insert_edit(source, run_start, run_end, what)?;
+        if region != (run_start..run_end) {
+            return None;
+        }
+        let distance = focus.abs_diff(focus.clamp(run_start, run_end));
+        if nearest.is_none_or(|(best, _)| distance < best) {
+            let caret = span.start + replacement.len() + (caret - run_start);
+            nearest = Some((distance, caret));
+        }
+        replacement.push_str(&text);
+        span.end = run_end;
+    }
+    let (_, caret) = nearest?;
+    Some((span?, replacement, (caret, caret)))
 }
 
 /// 書き手の求め 2026-09-22: 脚注を足す——`at`に`[^n]`、文書の末尾に`[^n]: `。
@@ -7285,6 +7352,64 @@ mod tests {
         assert!(insert_edit(source, 1, 3, InsertEdit::WikiLink).is_none());
         assert!(insert_edit(source, 0, source.len() + 1, InsertEdit::WikiLink).is_none());
         assert!(insert_edit(source, 0, source.len(), InsertEdit::WikiLink).is_some());
+    }
+
+    #[test]
+    fn rectangle_insertion_keeps_gaps_and_uses_the_nearest_rows_caret() {
+        let source = "前甲、😀後\n短\n終乙!\n";
+        let first = "前".len();
+        let wrapped = "前甲、".len();
+        let short = "前甲、😀後\n短".len();
+        let last = "前甲、😀後\n短\n終".len();
+        let end = last + "乙".len();
+        let runs = [
+            (first, first + "甲".len()),
+            (wrapped, wrapped + "😀".len()),
+            (short, short),
+            (last, end),
+        ];
+
+        let (region, text, chosen) =
+            rectangle_insert_edit(source, &runs, InsertEdit::MarkdownLink, end).unwrap();
+        assert_eq!(region, first..end);
+        assert_eq!(text, "[甲]()、[😀]()後\n短\n終[乙]()");
+        let caret = first + "[甲]()、[😀]()後\n短\n終[乙](".len();
+        assert_eq!(chosen, (caret, caret));
+
+        let (_, _, chosen) =
+            rectangle_insert_edit(source, &runs, InsertEdit::MarkdownLink, first).unwrap();
+        let caret = first + "[甲](".len();
+        assert_eq!(chosen, (caret, caret));
+    }
+
+    #[test]
+    fn rectangle_insertion_refuses_invalid_ranges_and_unsupported_commands() {
+        let source = "東京😀";
+        for runs in [
+            &[(0, 0), (3, 3)][..],
+            &[(0, 3), (3, source.len() + 1)],
+            &[(0, 3), (3, 7)],
+            &[(0, 6), (3, 6)],
+            &[(6, 3)],
+        ] {
+            assert!(
+                rectangle_insert_edit(source, runs, InsertEdit::Upright, 0).is_none(),
+                "{runs:?}"
+            );
+        }
+        for what in INSERT_EDITS
+            .into_iter()
+            .filter(|what| !what.supports_rectangle())
+        {
+            assert!(rectangle_insert_edit(source, &[(0, 3)], what, 0).is_none());
+        }
+        assert_eq!(
+            INSERT_EDITS
+                .into_iter()
+                .filter(|what| what.supports_rectangle())
+                .count(),
+            21
+        );
     }
 
     /// RFN01-38: **選んだ字を指す注記は、字が無ければ入れない**（書き手の合意
