@@ -326,12 +326,11 @@ mod tests {
         assert!(!Scene::read(window, live, &target).enabled(&command));
         window.set_diff_active(true);
         window.set_diff_can_next(true);
-        window.set_shortcut_bindings("comparison.next=F8;v=5".into());
+        window.set_shortcut_bindings("comparison.next=Ctrl+Alt+9;v=5".into());
 
         window.invoke_surface_action("comparison.next".into());
         slint::platform::update_timers_and_animations();
-        let key: SharedString = slint::platform::Key::F8.into();
-        assert!(window.invoke_panel_shortcut(key, false, false, false));
+        assert!(window.invoke_panel_shortcut("9".into(), true, true, false));
         slint::platform::update_timers_and_animations();
         assert_eq!(hit.get(), 2);
         assert_eq!(window.get_menu_generation(), 0);
