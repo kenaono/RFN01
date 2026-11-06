@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use slint::{Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
-use crate::git::{self, Change, GitError, LogEntry, Ref, Stash, Status};
+use crate::git::{self, Change, GitError, HistoryField, LogEntry, Ref, Stash, Status};
 use crate::git_change_diff::Preview;
 use crate::git_graph;
 use crate::git_history::Point;
@@ -28,7 +28,7 @@ use crate::i18n::pick;
 use crate::inline_diff;
 use crate::{
     AppWindow, GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitHunkLine, GitHunkRow,
-    GitLine, GitRef, GitRow, Live, MAX_DOCUMENT_CHARACTERS, Opening, StatusBar, say,
+    GitLine, GitRef, GitRow, GitSearchRow, Live, MAX_DOCUMENT_CHARACTERS, Opening, StatusBar, say,
 };
 
 /// 1度に読む Commit の数（「Show more」で同じだけ足す）。
@@ -97,6 +97,7 @@ enum Side {
 enum DiffShown {
     Commit(CommitDiff),
     Wip(Preview),
+    Range(Preview),
 }
 
 struct CommitDiff {
@@ -105,6 +106,52 @@ struct CommitDiff {
     change: Change,
     /// Working Copy（今のファイル）と比べるか。
     working: bool,
+}
+
+#[derive(Clone)]
+struct ComparePoint {
+    sha: String,
+    branch: Option<String>,
+}
+
+impl ComparePoint {
+    fn label(&self, full: bool) -> String {
+        let sha = if full {
+            self.sha.clone()
+        } else {
+            self.sha.chars().take(7).collect()
+        };
+        match &self.branch {
+            Some(name) => format!("{name} · {sha}"),
+            None => sha,
+        }
+    }
+}
+
+struct RangeComparison {
+    left: ComparePoint,
+    right: ComparePoint,
+    files: Vec<Change>,
+}
+
+#[derive(Clone)]
+struct SearchQuery {
+    field: HistoryField,
+    text: String,
+    limit: usize,
+}
+
+struct SearchResults {
+    query: SearchQuery,
+    entries: Vec<LogEntry>,
+    more: bool,
+}
+
+enum Lookup {
+    Search(SearchResults),
+    Commit(git::Detail),
+    Range(RangeComparison),
+    File(Preview),
 }
 
 #[derive(Default)]
@@ -120,6 +167,11 @@ struct Repo {
     detail: Option<git::Detail>,
     diff: Option<DiffShown>,
     block_mode: bool,
+    search: Option<SearchResults>,
+    lookup: Option<Receiver<Result<Lookup, GitError>>>,
+    off_graph: bool,
+    base: Option<ComparePoint>,
+    range: Option<RangeComparison>,
     side: Vec<Side>,
     /// グラフの行の Commit（`None`は `// WIP`）。
     rows: Vec<Option<String>>,
@@ -158,7 +210,16 @@ pub fn open(window: &AppWindow, live: &Live) {
         repo.detail = None;
         repo.diff = None;
         repo.block_mode = false;
+        repo.lookup = None;
+        repo.off_graph = false;
+        repo.base = None;
+        repo.range = None;
+        repo.search = None;
     });
+    window.set_git_repo_search_open(false);
+    window.set_git_repo_inspection_note("".into());
+    window.set_git_repo_compare_base("".into());
+    publish_search(window, None);
     let name = root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -179,6 +240,7 @@ pub fn close(window: &AppWindow) {
         return;
     }
     git_ui::cancel_change_diff();
+    REPO.with(|repo| repo.borrow_mut().lookup = None);
     window.set_git_repo_active(false);
     crate::restore_editor_focus(window);
 }
@@ -212,6 +274,10 @@ pub fn refresh(window: &AppWindow, live: &Live) {
     std::thread::spawn(move || {
         let _ = sender.send(read(&root, count));
     });
+    poll(window, live);
+}
+
+fn poll(window: &AppWindow, live: &Live) {
     POLL.with(|timer| {
         if timer.running() {
             return;
@@ -260,6 +326,17 @@ fn trunk_of(refs: &[Ref], remote_default: Option<&str>) -> Option<String> {
 }
 
 fn collect(window: &AppWindow, live: &Live) {
+    collect_graph(window, live);
+    collect_lookup(window);
+    if REPO.with(|repo| {
+        let repo = repo.borrow();
+        repo.reading.is_none() && repo.lookup.is_none()
+    }) {
+        POLL.with(Timer::stop);
+    }
+}
+
+fn collect_graph(window: &AppWindow, live: &Live) {
     let result = REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
         let receiver = repo.reading.as_ref()?;
@@ -278,7 +355,6 @@ fn collect(window: &AppWindow, live: &Live) {
     let Some(result) = result else {
         return;
     };
-    POLL.with(Timer::stop);
     let mut changed = true;
     let again = REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
@@ -289,7 +365,9 @@ fn collect(window: &AppWindow, live: &Live) {
             Ok(data) => {
                 // 選んでいた Commit が無くなっていれば（Reset など）、選びを外す。
                 let keep = match &repo.selected {
-                    Some(Selected::Commit(sha)) => data.entries.iter().any(|e| &e.sha == sha),
+                    Some(Selected::Commit(sha)) => {
+                        repo.off_graph || data.entries.iter().any(|e| &e.sha == sha)
+                    }
                     Some(Selected::Wip) => data.has_changes(),
                     None => true,
                 };
@@ -314,6 +392,176 @@ fn collect(window: &AppWindow, live: &Live) {
     }
     if again {
         refresh(window, live);
+    }
+}
+
+fn start_lookup(
+    window: &AppWindow,
+    live: &Live,
+    note: &str,
+    read: impl FnOnce(&Path) -> Result<Lookup, GitError> + Send + 'static,
+) {
+    let Some(root) = root().filter(|_| window.get_git_repo_active()) else {
+        return;
+    };
+    let (sender, receiver) = mpsc::channel();
+    REPO.with(|repo| repo.borrow_mut().lookup = Some(receiver));
+    window.set_git_repo_inspection_note(note.into());
+    std::thread::spawn(move || {
+        let _ = sender.send(read(&root));
+    });
+    poll(window, live);
+}
+
+fn collect_lookup(window: &AppWindow) {
+    let result = REPO.with(|repo| {
+        let mut repo = repo.borrow_mut();
+        let result = match repo.lookup.as_ref()?.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err(GitError::Failed("Git stopped".into())),
+        };
+        repo.lookup = None;
+        Some(result)
+    });
+    let Some(result) = result.filter(|_| window.get_git_repo_active()) else {
+        return;
+    };
+    window.set_git_repo_inspection_note("".into());
+    match result {
+        Ok(Lookup::Search(search)) => REPO.with(|repo| {
+            publish_search(window, Some(&search));
+            repo.borrow_mut().search = Some(search);
+        }),
+        Ok(Lookup::Commit(detail)) => {
+            select_detail(
+                window,
+                Selected::Commit(detail.sha.clone()),
+                Some(detail),
+                -1,
+                true,
+            );
+        }
+        Ok(Lookup::Range(range)) => {
+            git_ui::cancel_change_diff();
+            REPO.with(|repo| {
+                let mut repo = repo.borrow_mut();
+                repo.selected = None;
+                repo.detail = None;
+                repo.diff = None;
+                repo.block_mode = false;
+                repo.range = Some(range);
+                window.set_git_repo_selected(-1);
+                publish_detail(window, &repo);
+            });
+        }
+        Ok(Lookup::File(preview)) => set_diff(window, DiffShown::Range(preview)),
+        Err(error) => window.set_git_repo_inspection_note(error.to_string().into()),
+    }
+}
+
+fn publish_search(window: &AppWindow, search: Option<&SearchResults>) {
+    let rows = search.map_or_else(Vec::new, |search| {
+        search
+            .entries
+            .iter()
+            .map(|entry| GitSearchRow {
+                sha: entry.sha.chars().take(7).collect::<String>().into(),
+                subject: entry.subject.clone().into(),
+                author: entry.author.clone().into(),
+                date: entry.date.clone().into(),
+            })
+            .collect()
+    });
+    window.set_git_repo_search_more(search.is_some_and(|search| search.more));
+    window.set_git_repo_search_done(search.is_some());
+    window.set_git_repo_search_rows(ModelRc::new(VecModel::from(rows)));
+}
+
+fn toggle_search(window: &AppWindow) {
+    let open = !window.get_git_repo_search_open();
+    if !open {
+        REPO.with(|repo| repo.borrow_mut().lookup = None);
+        window.set_git_repo_inspection_note("".into());
+        regain_focus(window);
+    }
+    window.set_git_repo_search_open(open);
+}
+
+fn search(window: &AppWindow, live: &Live, field: i32, text: &str) {
+    let text = text.trim();
+    if !window.get_git_repo_search_open() || text.is_empty() {
+        return;
+    }
+    let field = match field {
+        0 => HistoryField::Message,
+        1 => HistoryField::Author,
+        2 => HistoryField::Sha,
+        3 => HistoryField::Path,
+        _ => return,
+    };
+    REPO.with(|repo| repo.borrow_mut().search = None);
+    publish_search(window, None);
+    search_page(
+        window,
+        live,
+        SearchQuery {
+            field,
+            text: text.to_owned(),
+            limit: PAGE,
+        },
+    );
+}
+
+fn search_page(window: &AppWindow, live: &Live, query: SearchQuery) {
+    start_lookup(
+        window,
+        live,
+        pick("履歴を検索しています…", "Searching history…"),
+        move |root| {
+            let mut entries = git::search_history(root, query.field, &query.text, query.limit + 1)?;
+            let more = entries.len() > query.limit;
+            entries.truncate(query.limit);
+            Ok(Lookup::Search(SearchResults {
+                query,
+                entries,
+                more,
+            }))
+        },
+    );
+}
+
+fn search_more(window: &AppWindow, live: &Live) {
+    let query = REPO.with(|repo| {
+        let repo = repo.borrow();
+        let search = repo.search.as_ref()?;
+        (search.more && repo.lookup.is_none()).then(|| search.query.clone())
+    });
+    if let Some(mut query) = query.filter(|_| window.get_git_repo_search_open()) {
+        query.limit += PAGE;
+        search_page(window, live, query);
+    }
+}
+
+fn select_result(window: &AppWindow, live: &Live, index: i32) {
+    let sha = REPO.with(|repo| {
+        let repo = repo.borrow();
+        Some(
+            repo.search
+                .as_ref()?
+                .entries
+                .get(usize::try_from(index).ok()?)?
+                .sha
+                .clone(),
+        )
+    });
+    if let Some(sha) = sha.filter(|_| window.get_git_repo_search_open()) {
+        start_lookup(
+            window,
+            live,
+            pick("Commitを読み込んでいます…", "Reading commit…"),
+            move |root| git::detail(root, &sha).map(Lookup::Commit),
+        );
     }
 }
 
@@ -589,6 +837,15 @@ fn publish_detail(window: &AppWindow, repo: &Repo) {
         }
         return;
     }
+    if let Some(range) = &repo.range {
+        window.set_git_repo_range_left(range.left.label(true).into());
+        window.set_git_repo_range_right(range.right.label(true).into());
+        window.set_git_repo_detail_files(file_rows(&range.files));
+        window.set_git_repo_detail_mode(1);
+        return;
+    }
+    window.set_git_repo_range_left("".into());
+    window.set_git_repo_range_right("".into());
     match (&repo.selected, &repo.detail) {
         (Some(Selected::Wip), _) => window.set_git_repo_detail_mode(2),
         (Some(Selected::Commit(_)), Some(detail)) => {
@@ -613,32 +870,32 @@ fn publish_detail(window: &AppWindow, repo: &Repo) {
                 format!("{}: {}", pick("親", "Parent"), parents.join(", "))
             };
             window.set_git_repo_detail_parents(parents.into());
-            let files: Vec<GitRow> = detail
-                .files
-                .iter()
-                .map(|change| {
-                    let (folder, name) = match change.path.rsplit_once('/') {
-                        Some((folder, name)) => (folder.to_owned(), name.to_owned()),
-                        None => (String::new(), change.path.clone()),
-                    };
-                    let tip = match &change.from {
-                        Some(from) => format!("{from} → {}", change.path),
-                        None => change.path.clone(),
-                    };
-                    GitRow {
-                        kind: 4,
-                        label: name.into(),
-                        folder: folder.into(),
-                        letter: change.kind.letter().into(),
-                        tip: tip.into(),
-                        open: false,
-                    }
-                })
-                .collect();
-            window.set_git_repo_detail_files(ModelRc::new(VecModel::from(files)));
+            window.set_git_repo_detail_files(file_rows(&detail.files));
         }
         _ => window.set_git_repo_detail_mode(0),
     }
+}
+
+fn file_rows(files: &[Change]) -> ModelRc<GitRow> {
+    let rows: Vec<_> = files
+        .iter()
+        .map(|change| {
+            let (folder, name) = change.path.rsplit_once('/').unwrap_or(("", &change.path));
+            let tip = match &change.from {
+                Some(from) => format!("{from} → {}", change.path),
+                None => change.path.clone(),
+            };
+            GitRow {
+                kind: 4,
+                label: name.into(),
+                folder: folder.into(),
+                letter: change.kind.letter().into(),
+                tip: tip.into(),
+                open: false,
+            }
+        })
+        .collect();
+    ModelRc::new(VecModel::from(rows))
 }
 
 /// グラフの行を選ぶ。Commit なら詳細を読む。
@@ -661,15 +918,72 @@ fn select_row(window: &AppWindow, index: usize) {
             }
         },
     };
+    select_detail(window, selected, detail, index as i32, false);
+}
+
+fn select_detail(
+    window: &AppWindow,
+    selected: Selected,
+    detail: Option<git::Detail>,
+    index: i32,
+    off_graph: bool,
+) {
+    git_ui::cancel_change_diff();
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
         repo.selected = Some(selected);
         repo.detail = detail;
         repo.diff = None;
         repo.block_mode = false;
+        repo.lookup = None;
+        repo.range = None;
+        repo.off_graph = off_graph;
     });
-    window.set_git_repo_selected(index as i32);
+    window.set_git_repo_inspection_note("".into());
+    window.set_git_repo_selected(index);
     REPO.with(|repo| publish_detail(window, &repo.borrow()));
+}
+
+fn choose_commit(window: &AppWindow, live: &Live, as_base: bool) {
+    let point = REPO.with(|repo| {
+        let repo = repo.borrow();
+        Some(ComparePoint {
+            sha: repo.detail.as_ref()?.sha.clone(),
+            branch: None,
+        })
+    });
+    if let Some(point) = point {
+        choose_point(window, live, point, as_base);
+    }
+}
+
+fn choose_point(window: &AppWindow, live: &Live, point: ComparePoint, as_base: bool) {
+    if as_base {
+        window.set_git_repo_compare_base(point.label(false).into());
+        window.set_git_repo_inspection_note("".into());
+        REPO.with(|repo| {
+            let mut repo = repo.borrow_mut();
+            repo.base = Some(point);
+            repo.lookup = None;
+        });
+        return;
+    }
+    let left = REPO.with(|repo| repo.borrow().base.clone());
+    if let Some(left) = left {
+        start_lookup(
+            window,
+            live,
+            pick("二点の差分を読み込んでいます…", "Reading the comparison…"),
+            move |root| {
+                let files = git::compare_commits(root, &left.sha, &point.sha)?;
+                Ok(Lookup::Range(RangeComparison {
+                    left,
+                    right: point,
+                    files,
+                }))
+            },
+        );
+    }
 }
 
 fn entry_of(sha: &str) -> Option<LogEntry> {
@@ -824,6 +1138,18 @@ fn branch_menu(window: &AppWindow, live: &Live, index: usize, action: i32) {
             name: r.name,
             force: false,
         },
+        (Some(Picked::Local(r) | Picked::Remote(r)), 5 | 6) => {
+            choose_point(
+                window,
+                live,
+                ComparePoint {
+                    sha: r.sha,
+                    branch: Some(r.name),
+                },
+                action == 5,
+            );
+            return;
+        }
         (Some(Picked::Stash(s)), 0 | 1) => Action::StashApply {
             name: s.name,
             pop: action == 1,
@@ -1009,7 +1335,7 @@ fn publish_diff(window: &AppWindow, root: &Path, diff: &DiffShown) {
                 Err(error) => publish_diff_rows(window, name, "", Err(&error.to_string())),
             }
         }
-        DiffShown::Wip(preview) => {
+        DiffShown::Wip(preview) | DiffShown::Range(preview) => {
             window.set_git_repo_diff_working(false);
             let text = preview
                 .text
@@ -1061,6 +1387,35 @@ fn show_diff(window: &AppWindow, index: usize, working: bool) {
     });
     if let Some(source) = source {
         set_diff(window, DiffShown::Commit(source));
+    }
+}
+
+fn open_file_diff(window: &AppWindow, live: &Live, index: usize) {
+    let range_file = REPO.with(|repo| {
+        let repo = repo.borrow();
+        let range = repo.range.as_ref()?;
+        Some((
+            range.left.sha.clone(),
+            range.right.sha.clone(),
+            range.files.get(index)?.clone(),
+        ))
+    });
+    if let Some((left, right, change)) = range_file {
+        start_lookup(
+            window,
+            live,
+            pick(
+                "ファイルの差分を読み込んでいます…",
+                "Reading the file diff…",
+            ),
+            move |root| {
+                Ok(Lookup::File(crate::git_change_diff::read_commits(
+                    root, &left, &right, &change,
+                )))
+            },
+        );
+    } else {
+        show_diff(window, index, false);
     }
 }
 
@@ -1149,7 +1504,7 @@ fn diff_open_full(window: &AppWindow) {
             return;
         };
         match diff {
-            DiffShown::Wip(preview) => preview.open(window),
+            DiffShown::Wip(preview) | DiffShown::Range(preview) => preview.open(window),
             DiffShown::Commit(commit) => match commit_diff_texts(root, commit) {
                 Ok((left, right, caption)) => {
                     let name = &commit.change.path;
@@ -1298,10 +1653,24 @@ pub fn wire(window: &AppWindow, live: &Live) {
         from.max(0) as usize,
         to.max(0) as usize
     ));
-    on!(on_git_repo_file_clicked, |w, _l, index| show_diff(
+    on!(on_git_repo_file_clicked, |w, l, index| open_file_diff(
         w,
+        l,
         index.max(0) as usize,
-        false
+    ));
+    on!(on_git_repo_toggle_search, |w, _l| toggle_search(w));
+    on!(on_git_repo_search, |w, l, field, query| search(
+        w,
+        l,
+        field,
+        query.as_str()
+    ));
+    on!(on_git_repo_next_search_page, |w, l| search_more(w, l));
+    on!(on_git_repo_search_selected, |w, l, index| select_result(
+        w, l, index
+    ));
+    on!(on_git_repo_choose_commit, |w, l, as_base| choose_commit(
+        w, l, as_base
     ));
     on!(on_git_repo_undo, |w, l| history(w, l, false));
     on!(on_git_repo_redo, |w, l| history(w, l, true));

@@ -21,7 +21,7 @@ export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
 import { BackupHistoryList, BackupPaneRow, BackupRow, BackupsView } from "backup-view.slint";
 import { GitChangesView, GitRow } from "git-view.slint";
-import { GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitHunkLine, GitHunkRow, GitLine, GitRef, GitRepositoryView } from "git-repository.slint";
+import { GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitHunkLine, GitHunkRow, GitLine, GitRef, GitRepositoryView, GitSearchRow } from "git-repository.slint";
 import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
 import { UnusedFolderRow, WorkspaceFolderRow, WorkspaceManager, WorkspaceRow } from "workspace-manager.slint";
@@ -1259,6 +1259,14 @@ export component AppWindow inherits Window {
     in property <string> git-repo-detail-date;
     in property <string> git-repo-detail-parents;
     in property <[GitRow]> git-repo-detail-files;
+    in property <bool> git-repo-search-open;
+    in property <bool> git-repo-search-more;
+    in property <bool> git-repo-search-done;
+    in property <[GitSearchRow]> git-repo-search-rows;
+    in property <string> git-repo-inspection-note;
+    in property <string> git-repo-compare-base;
+    in property <string> git-repo-range-left;
+    in property <string> git-repo-range-right;
     in property <int> git-repo-scroll-row;
     in property <int> git-repo-scroll-generation;
     in property <int> git-repo-focus-generation;
@@ -1270,6 +1278,11 @@ export component AppWindow inherits Window {
     callback git-repo-commit-selected(int);
     callback git-repo-commit-menu(int, int);
     callback git-repo-show-more();
+    callback git-repo-toggle-search();
+    callback git-repo-search(int, string);
+    callback git-repo-next-search-page();
+    callback git-repo-search-selected(int);
+    callback git-repo-choose-commit(bool);
     callback git-repo-branch-clicked(int);
     callback git-repo-branch-activated(int);
     callback git-repo-branch-menu(int, int);
@@ -6995,6 +7008,14 @@ export component AppWindow inherits Window {
             detail-date: root.git-repo-detail-date;
             detail-parents: root.git-repo-detail-parents;
             detail-files: root.git-repo-detail-files;
+            search-open: root.git-repo-search-open;
+            search-more: root.git-repo-search-more;
+            search-done: root.git-repo-search-done;
+            search-rows: root.git-repo-search-rows;
+            inspection-note: root.git-repo-inspection-note;
+            compare-base: root.git-repo-compare-base;
+            range-left: root.git-repo-range-left;
+            range-right: root.git-repo-range-right;
             scroll-row: root.git-repo-scroll-row;
             scroll-generation: root.git-repo-scroll-generation;
             focus-generation: root.git-repo-focus-generation;
@@ -7044,6 +7065,11 @@ export component AppWindow inherits Window {
             cancel => { root.surface-action("git.cancel"); }
             commit-selected(index) => { root.git-repo-commit-selected(index); }
             commit-menu(index, action) => { root.git-repo-commit-menu(index, action); }
+            toggle-search => { root.git-repo-toggle-search(); }
+            search(field, query) => { root.git-repo-search(field, query); }
+            next-search-page => { root.git-repo-next-search-page(); }
+            search-selected(index) => { root.git-repo-search-selected(index); }
+            choose-commit(as-base) => { root.git-repo-choose-commit(as-base); }
             show-more => { root.git-repo-show-more(); }
             branch-clicked(index) => { root.git-repo-branch-clicked(index); }
             branch-activated(index) => { root.git-repo-branch-activated(index); }

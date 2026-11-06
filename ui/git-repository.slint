@@ -9,9 +9,9 @@
 //
 // 押したことはRust（`git_repo_ui.rs`）へ番号で渡し、ここは何をするかを決めない。
 
-import { ScrollView } from "std-widgets.slint";
+import { ComboBox, ScrollView } from "std-widgets.slint";
 import { Tok } from "tokens.slint";
-import { Icon, Icons, IconButton, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
+import { Field, Icon, Icons, IconButton, MenuFrame, MenuRow, Role, TextButton } from "controls.slint";
 import { GitChangesView, GitRow } from "git-view.slint";
 
 export struct GitLine {
@@ -71,6 +71,114 @@ export struct GitHunkRow {
     lines: [GitHunkLine],
 }
 
+export struct GitSearchRow {
+    sha: string,
+    subject: string,
+    author: string,
+    date: string,
+}
+
+component HistorySearchView inherits Rectangle {
+    in property <[GitSearchRow]> rows;
+    in property <bool> done;
+    in property <bool> more;
+    in property <string> note;
+    callback submit(int, string);
+    callback next-page();
+    callback selected(int);
+    callback dismissed();
+
+    background: Tok.paper;
+    changed visible => { if root.visible { query.take-focus(); } }
+    TouchArea { }
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        Text {
+            text: @tr("Search Repository History");
+            color: Tok.ink-strong;
+            font-size: 15px;
+            font-weight: 600;
+        }
+        Text {
+            text: @tr("Local and remote branches and HEAD · all loaded and older commits");
+            color: Tok.ink-muted;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            height: 32px;
+            spacing: 6px;
+            field := ComboBox {
+                width: 106px;
+                current-index: 0;
+                model: [@tr("Message"), @tr("Author"), "SHA", @tr("Path")];
+            }
+            query := Field {
+                horizontal-stretch: 1;
+                placeholder: field.current-index == 3 ? @tr("Path from repository root") : @tr("Search history");
+                accepted => { root.submit(field.current-index, self.text); }
+                escaped => { root.dismissed(); }
+            }
+            VerticalLayout {
+                alignment: center;
+                TextButton {
+                    title: @tr("Search");
+                    enabled: query.text != "";
+                    clicked => { root.submit(field.current-index, query.text); }
+                }
+            }
+        }
+        if root.note != "" || root.done: Text {
+            text: root.note != "" ? root.note
+                : root.rows.length == 0 ? @tr("No matching commits")
+                : root.rows.length == 1 ? @tr("1 commit shown")
+                : @tr("{} commits shown", root.rows.length);
+            color: Tok.ink-muted;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                spacing: 2px;
+                for row[index] in root.rows: Rectangle {
+                    height: 46px;
+                    border-radius: 5px;
+                    background: hit.has-hover ? Tok.accent-faint : Tok.chrome;
+                    hit := TouchArea { clicked => { root.selected(index); } }
+                    VerticalLayout {
+                        padding: 5px;
+                        spacing: 2px;
+                        Text {
+                            text: row.subject;
+                            color: Tok.ink-strong;
+                            font-size: 13px;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: row.sha + "   " + row.author + "   " + row.date;
+                            color: Tok.ink-muted;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+                }
+                if root.more: HorizontalLayout {
+                    height: 34px;
+                    alignment: center;
+                    TextButton {
+                        title: @tr("Show more");
+                        enabled: root.note == "";
+                        clicked => { root.next-page(); }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export struct GitBranchRow {
     // 0 見出し、1 ローカル、2 リモート、3 リモートの名前、4 Stash、5 案内の文。
     kind: int,
@@ -122,6 +230,20 @@ component ToolButton inherits Rectangle {
 }
 
 export component GitRepositoryView inherits Rectangle {
+    in property <bool> search-open;
+    in property <bool> search-more;
+    in property <bool> search-done;
+    in property <[GitSearchRow]> search-rows;
+    in property <string> inspection-note;
+    in property <string> compare-base;
+    in property <string> range-left;
+    in property <string> range-right;
+    property <bool> range-active: root.range-left != "";
+    callback toggle-search();
+    callback search(int, string);
+    callback next-search-page();
+    callback search-selected(int);
+    callback choose-commit(bool);
     in property <string> repo-name;
     in property <string> branch;
     in property <[string]> branches;
@@ -466,6 +588,21 @@ export component GitRepositoryView inherits Rectangle {
                 padding-right: 12px;
                 alignment: end;
                 spacing: 8px;
+                if root.compare-base != "": Text {
+                    width: 132px;
+                    text: @tr("Base {}", root.compare-base);
+                    color: Tok.ink-muted;
+                    font-size: 11px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TextButton {
+                        title: root.search-open ? @tr("Commit Graph") : @tr("History Search");
+                        clicked => { root.toggle-search(); }
+                    }
+                }
                 Text {
                     text: "Esc";
                     color: Tok.ink-faint;
@@ -636,7 +773,7 @@ export component GitRepositoryView inherits Rectangle {
             }
 
             // 真ん中：グラフ。
-            VerticalLayout {
+            graph := VerticalLayout {
                 min-width: 0px;
                 horizontal-stretch: 1;
                 Rectangle {
@@ -708,7 +845,17 @@ export component GitRepositoryView inherits Rectangle {
                     font-size: 12px;
                     vertical-alignment: center;
                 }
+                if root.inspection-note != "" && !root.search-open: Text {
+                    height: 38px;
+                    text: root.inspection-note;
+                    color: Tok.ink-muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
                 list := ScrollView {
+                    // The software renderer draws graph paths in a separate pass.
+                    visible: !root.search-open;
                     vertical-stretch: 1;
                     VerticalLayout {
                         alignment: start;
@@ -919,34 +1066,59 @@ export component GitRepositoryView inherits Rectangle {
                         padding: 16px;
                         spacing: 8px;
                         alignment: start;
-                        Text {
+                        if root.range-active: Text {
+                            text: @tr("Base {}", root.range-left);
+                            color: Tok.ink-strong;
+                            font-size: 12px;
+                            wrap: char-wrap;
+                        }
+                        if root.range-active: Text {
+                            text: @tr("Target {}", root.range-right);
+                            color: Tok.ink-strong;
+                            font-size: 12px;
+                            wrap: char-wrap;
+                        }
+                        if !root.range-active: Text {
                             text: "commit " + root.detail-sha;
                             color: Tok.ink-faint;
                             font-size: 11px;
                             font-family: "Consolas";
                         }
-                        Text {
+                        if !root.range-active: Text {
                             text: root.detail-message;
                             color: Tok.ink-strong;
                             font-size: 14px;
                             wrap: word-wrap;
                         }
-                        Text {
+                        if !root.range-active: Text {
                             text: root.detail-author;
                             color: Tok.ink-muted;
                             font-size: 12px;
                             overflow: elide;
                         }
-                        Text {
+                        if !root.range-active: Text {
                             text: root.detail-date;
                             color: Tok.ink-muted;
                             font-size: 12px;
                         }
-                        Text {
+                        if !root.range-active: Text {
                             text: root.detail-parents;
                             color: Tok.ink-muted;
                             font-size: 12px;
                             font-family: "Consolas";
+                        }
+                        if !root.range-active: HorizontalLayout {
+                            height: 32px;
+                            spacing: 6px;
+                            TextButton {
+                                title: @tr("Set as Base");
+                                clicked => { root.choose-commit(true); }
+                            }
+                            TextButton {
+                                title: @tr("Compare with Base");
+                                enabled: root.compare-base != "";
+                                clicked => { root.choose-commit(false); }
+                            }
                         }
                         Rectangle {
                             height: 1px;
@@ -970,7 +1142,7 @@ export component GitRepositoryView inherits Rectangle {
                                     if event.button == PointerEventButton.back && event.kind == PointerEventKind.down {
                                         root.close();
                                     }
-                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                                    if !root.range-active && event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                                         root.menu-row = index;
                                         root.menu-kind = 5;
                                         root.menu-x = root.width - 340px + 24px;
@@ -1336,6 +1508,22 @@ export component GitRepositoryView inherits Rectangle {
         }
     }
 
+    HistorySearchView {
+        x: graph.absolute-position.x - root.absolute-position.x;
+        y: graph.absolute-position.y - root.absolute-position.y;
+        width: graph.width;
+        height: graph.height;
+        visible: root.search-open;
+        rows: root.search-rows;
+        done: root.search-done;
+        more: root.search-more;
+        note: root.inspection-note;
+        submit(field, query) => { root.search(field, query); }
+        next-page => { root.next-search-page(); }
+        selected(index) => { root.search-selected(index); }
+        dismissed => { root.toggle-search(); }
+    }
+
     branch-menu := PopupWindow {
         x: 160px;
         y: 46px;
@@ -1489,6 +1677,21 @@ export component GitRepositoryView inherits Rectangle {
                     activated => {
                         side-menu.close();
                         root.side-chosen(4);
+                    }
+                }
+                if root.menu-kind == 1 || root.menu-kind == 2: MenuRow {
+                    title: @tr("Set as Base");
+                    activated => {
+                        root.side-chosen(5);
+                        side-menu.close();
+                    }
+                }
+                if root.menu-kind == 1 || root.menu-kind == 2: MenuRow {
+                    title: @tr("Compare with Base");
+                    enabled: root.compare-base != "";
+                    activated => {
+                        root.side-chosen(6);
+                        side-menu.close();
                     }
                 }
             }

@@ -723,6 +723,12 @@ pub struct LogEntry {
     pub subject: String,
 }
 
+const LOG_FORMAT: &str = "--format=%H%x1f%P%x1f%an%x1f%ad%x1f%s%x1e";
+
+fn full_sha(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// ローカルとリモートのブランチの Commit を、新しい順（親より子が先）に`count`件。
 /// Stash の Commit は入れない。まだCommitが無ければ空。
 pub fn log(root: &Path, count: usize) -> Result<Vec<LogEntry>, GitError> {
@@ -736,7 +742,7 @@ pub fn log(root: &Path, count: usize) -> Result<Vec<LogEntry>, GitError> {
             "--remotes",
             "HEAD",
             "--date=format:%Y-%m-%d %H:%M",
-            "--format=%H%x1f%P%x1f%an%x1f%ad%x1f%s%x1e",
+            LOG_FORMAT,
             &limit,
             "--",
         ],
@@ -749,13 +755,15 @@ pub fn log(root: &Path, count: usize) -> Result<Vec<LogEntry>, GitError> {
         }
         return Ok(Vec::new());
     }
-    Ok(output
-        .text()
-        .split('\x1e')
+    Ok(parse_log(&output.text()))
+}
+
+fn parse_log(text: &str) -> Vec<LogEntry> {
+    text.split('\x1e')
         .filter_map(|record| {
             let mut fields = record.trim_start_matches('\n').split('\x1f');
             let sha = fields.next()?.to_owned();
-            if sha.is_empty() {
+            if !full_sha(&sha) {
                 return None;
             }
             let parents = fields
@@ -771,7 +779,88 @@ pub fn log(root: &Path, count: usize) -> Result<Vec<LogEntry>, GitError> {
                 subject: fields.next()?.to_owned(),
             })
         })
-        .collect())
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HistoryField {
+    Message,
+    Author,
+    Sha,
+    Path,
+}
+
+/// Search the history reachable from local/remote branches and HEAD, independently of the graph page.
+pub(crate) fn search_history(
+    root: &Path,
+    field: HistoryField,
+    query: &str,
+    count: usize,
+) -> Result<Vec<LogEntry>, GitError> {
+    let limit = format!("-n{count}");
+    let mut args = vec![
+        "--literal-pathspecs",
+        "log",
+        "--topo-order",
+        "--date=format:%Y-%m-%d %H:%M",
+        LOG_FORMAT,
+        "--fixed-strings",
+        "--regexp-ignore-case",
+        &limit,
+    ];
+    let filter;
+    match field {
+        HistoryField::Sha => {
+            if !(4..=64).contains(&query.len()) || !query.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(GitError::Failed(crate::say!(
+                    "SHAを4文字以上の16進数で入力してください。",
+                    "Enter at least four hexadecimal digits of the SHA."
+                )));
+            }
+            let prefix = query.to_ascii_lowercase();
+            let revision = format!("{prefix}^{{commit}}");
+            let output = run(
+                root,
+                &["rev-parse", "-q", "--verify", "--end-of-options", &revision],
+                None,
+            )?;
+            if !output.ok {
+                return if output.stderr.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Err(output.failure())
+                };
+            }
+            filter = output.text().trim().to_owned();
+            if !full_sha(&filter) || !filter.starts_with(&prefix) {
+                return Ok(Vec::new());
+            }
+            args.push(&filter);
+        }
+        _ => {
+            args.extend(["--branches", "--remotes"]);
+            if head_sha(root).is_some() {
+                args.push("HEAD");
+            }
+            match field {
+                HistoryField::Message => {
+                    filter = format!("--grep={query}");
+                    args.push(&filter);
+                }
+                HistoryField::Author => {
+                    filter = format!("--author={query}");
+                    args.push(&filter);
+                }
+                HistoryField::Path => args.push("--full-history"),
+                HistoryField::Sha => unreachable!(),
+            }
+        }
+    }
+    args.push("--");
+    if matches!(field, HistoryField::Path) {
+        args.push(query);
+    }
+    checked(root, &args, None).map(|text| parse_log(&text))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -993,6 +1082,40 @@ fn parse_name_status(bytes: &[u8]) -> Vec<Change> {
         }
     }
     files
+}
+
+/// Two fixed commit IDs, in left-to-right order. No merge-base or working tree is involved.
+pub(crate) fn compare_commits(
+    root: &Path,
+    left: &str,
+    right: &str,
+) -> Result<Vec<Change>, GitError> {
+    if !full_sha(left) || !full_sha(right) {
+        return Err(GitError::Failed(crate::say!(
+            "比較には確定した二つのコミットIDが必要です。",
+            "The comparison needs two fixed commit IDs."
+        )));
+    }
+    let output = run(
+        root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--find-renames",
+            "--name-status",
+            "-z",
+            left,
+            right,
+            "--",
+        ],
+        None,
+    )?;
+    if output.ok {
+        Ok(parse_name_status(&output.stdout))
+    } else {
+        Err(output.failure())
+    }
 }
 
 /// ファイルの履歴の1つ（RFN01-67 PR 3、Git History）。

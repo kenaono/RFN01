@@ -1554,6 +1554,54 @@ msgstr "ブロックをUnstage"
 msgid "No newline at end of file"
 msgstr "ファイル末尾に改行なし"
 
+msgid "Search Repository History"
+msgstr "リポジトリの履歴検索"
+
+msgid "Local and remote branches and HEAD · all loaded and older commits"
+msgstr "ローカル・リモートブランチとHEADの履歴を、表示範囲に関係なく検索"
+
+msgid "Message"
+msgstr "メッセージ"
+
+msgid "Author"
+msgstr "作者"
+
+msgid "Path"
+msgstr "パス"
+
+msgid "Path from repository root"
+msgstr "リポジトリのルートからのパス"
+
+msgid "Search history"
+msgstr "履歴を検索"
+
+msgid "No matching commits"
+msgstr "一致するコミットはありません"
+
+msgid "1 commit shown"
+msgstr "1 件を表示"
+
+msgid "{} commits shown"
+msgstr "{} 件を表示"
+
+msgid "Base {}"
+msgstr "比較元 {}"
+
+msgid "Target {}"
+msgstr "比較先 {}"
+
+msgid "History Search"
+msgstr "履歴検索"
+
+msgid "Commit Graph"
+msgstr "コミットグラフ"
+
+msgid "Set as Base"
+msgstr "比較元に設定"
+
+msgid "Compare with Base"
+msgstr "比較元との差分"
+
 msgid "Previous Commit"
 msgstr "親Commit"
 

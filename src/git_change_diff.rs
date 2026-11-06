@@ -72,8 +72,40 @@ pub(crate) fn read(target: &Target) -> Preview {
             working_text(&root.join(path)).map(Some)
         }
     };
-    let left = left().map_err(|error| format!("{left_source} · {old_path} · {error}"));
-    let right = right().map_err(|error| format!("{right_source} · {path} · {error}"));
+    preview(change, left_source, right_source, left(), right())
+}
+
+pub(crate) fn read_commits(root: &Path, left: &str, right: &str, change: &Change) -> Preview {
+    let before = if change.kind == Kind::Added {
+        Ok(None)
+    } else {
+        blob(root, left, change.from.as_deref().unwrap_or(&change.path))
+    };
+    let after = if change.kind == Kind::Deleted {
+        Ok(None)
+    } else {
+        blob(root, right, &change.path)
+    };
+    preview(
+        change,
+        &left.chars().take(7).collect::<String>(),
+        &right.chars().take(7).collect::<String>(),
+        before,
+        after,
+    )
+}
+
+fn preview(
+    change: &Change,
+    left_source: &str,
+    right_source: &str,
+    left: Result<Option<String>, String>,
+    right: Result<Option<String>, String>,
+) -> Preview {
+    let path = &change.path;
+    let old_path = change.from.as_deref().unwrap_or(path);
+    let left = left.map_err(|error| format!("{left_source} · {old_path} · {error}"));
+    let right = right.map_err(|error| format!("{right_source} · {path} · {error}"));
     let left_name = side_name(left_source, &left);
     let right_name = side_name(right_source, &right);
     Preview {

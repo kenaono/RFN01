@@ -1398,6 +1398,8 @@ File の「Git Repository…」か、Git Changes の見出しの右端のアイ�
 - **Undo／Redo**：アプリを起動してからの Git の操作（Commit・Amend・Checkout・Merge・Pull・Revert・Cherry-pick・Reset・ブランチの作成と削除・Stash All と Pop）を、リポジトリごとに戻せます。マウスを載せると何を戻すかが出ます。Push と Fetch は戻せません。Terminal などで外から HEAD を動かしたあとや、Push 済みの Commit を外すことになるときは使えません。Reset — Delete Changes を戻しても、消えた変更は戻りません。
 - **Commit の右クリック**：New Branch…、Revert（今のブランチの Commit）、Cherry-pick（ほかのブランチの Commit）、Reset — Keep Changes／Delete Changes…（今のブランチの Commit。Delete Changes と、Push 済みの Commit を外す Reset は確認します）。
 - **変更ブロック**。WIPで追跡済みテキストの変更を開き、「Gitの変更ブロックを確認…」を押します。Changesでは選んだブロックをStageし、Staged ChangesではUnstageします。保存済みの内容をGitが変換した差分で確認できます。操作後はファイル一覧に戻ります。
+- **履歴検索**。Git Repositoryの上部からメッセージ、作者、SHA、パスで検索します。グラフの表示件数に関係なく、ローカル・リモートブランチとHEADの履歴を探し、結果からコミットの詳細と差分を開けます。パスはリポジトリのルートから指定します。
+- **二点比較**。コミットの詳細かブランチの右クリックから「比較元に設定」を押し、次のコミットかブランチで「比較元との差分」を選びます。両端のコミットIDと変更ファイルを表示し、ファイルを選ぶとその二点の差分が開きます。
 - 未保存の文書の確かめ、衝突したら中止して元に戻すこと、終わったあとの読み直しは Git Changes と同じです。Merge していないブランチを消すときは、もう一度確認します。
 
 ## Git History

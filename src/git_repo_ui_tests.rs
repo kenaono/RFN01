@@ -12,7 +12,10 @@ fn settle(window: &AppWindow, live: &Live) {
     for _ in 0..500 {
         let changes_done = git_ui::pump(window, live);
         collect(window, live);
-        let repo_done = REPO.with(|repo| repo.borrow().reading.is_none());
+        let repo_done = REPO.with(|repo| {
+            let repo = repo.borrow();
+            repo.reading.is_none() && repo.lookup.is_none()
+        });
         if changes_done && repo_done {
             return;
         }
@@ -535,6 +538,126 @@ fn long_lines_are_folded_with_the_number_on_the_first_row() {
         })
         .collect();
     assert_eq!(joined, text);
+}
+
+#[test]
+fn history_search_opens_a_commit_outside_the_graph_page() {
+    let root = scratch_directory("repo-history-search");
+    let Some(()) = repository(&root) else { return };
+    git_ok(&root, &["config", "user.name", "Writer [QA]"]);
+    let path = "資料 [前].md";
+    let (harness, _) = Harness::new(|weak| open_under(&root, path, "旧版\n", weak));
+    git_ok(&root, &["add", "--", path]);
+    git_ok(
+        &root,
+        &["commit", "-qm", "古いコミット", "-m", "detail [needle]"],
+    );
+    let sha = git::head_sha(&root).unwrap();
+    git_ok(&root, &["config", "user.name", "Other"]);
+    for _ in 0..=PAGE {
+        git_ok(&root, &["commit", "-q", "--allow-empty", "-m", "later"]);
+    }
+    for (field, query) in [
+        (HistoryField::Author, "[qa]"),
+        (HistoryField::Path, path),
+        (HistoryField::Sha, &sha[..8].to_ascii_uppercase()),
+    ] {
+        let found = git::search_history(&root, field, query, PAGE).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|item| item.sha.as_str())
+                .collect::<Vec<_>>(),
+            [sha.as_str()]
+        );
+    }
+    let (window, live) = (&harness.window, &harness.live);
+    attach_workspace(live, &root, SaveMode::Recovery);
+    wire(window, live);
+    open(window, live);
+    settle(window, live);
+    assert!(
+        !messages(window)
+            .iter()
+            .any(|message| message == "古いコミット")
+    );
+    window.invoke_git_repo_toggle_search();
+    slint::platform::update_timers_and_animations();
+    window.invoke_git_repo_search(0, "[needle]".into());
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert_eq!(window.get_git_repo_search_rows().row_count(), 1);
+    window.invoke_git_repo_search_selected(0);
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert_eq!(window.get_git_repo_detail_sha(), sha.as_str());
+    assert_eq!(
+        window
+            .get_git_repo_detail_files()
+            .row_data(0)
+            .unwrap()
+            .label,
+        path
+    );
+    show_diff(window, 0, false);
+    assert!(diff_text(window).iter().any(|(_, text, _)| text == "旧版"));
+}
+
+#[test]
+fn comparison_pins_branch_tips_and_reads_the_two_committed_versions() {
+    let Some((root, harness)) = manuscript("repo-two-points") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    let old = "原稿 前.md";
+    let new = "原稿 後.md";
+    let shared = "same line\n".repeat(16);
+    fs::write(root.join(old), &shared).unwrap();
+    git::commit(&root, "common file", true, false).unwrap();
+    git_ok(&root, &["switch", "-q", "-c", "comparison-left"]);
+    fs::write(root.join(old), format!("{shared}left only\n")).unwrap();
+    git::commit(&root, "left only", true, false).unwrap();
+    let left = git::head_sha(&root).unwrap();
+
+    git_ok(&root, &["switch", "-q", "main"]);
+    git_ok(&root, &["mv", "--", old, new]);
+    fs::write(root.join(new), format!("{shared}right only\n")).unwrap();
+    git::commit(&root, "renamed on main", true, false).unwrap();
+    let right = git::head_sha(&root).unwrap();
+    fs::write(root.join(new), "uncommitted\n").unwrap();
+
+    open(window, live);
+    settle(window, live);
+    branch_menu(window, live, side_index(window, 1, "comparison-left"), 5);
+    git_ok(&root, &["branch", "-f", "comparison-left", "main"]);
+    refresh(window, live);
+    settle(window, live);
+    branch_menu(window, live, side_index(window, 1, "main"), 6);
+    settle(window, live);
+    assert!(window.get_git_repo_range_left().ends_with(&left));
+    assert!(window.get_git_repo_range_right().ends_with(&right));
+    let rows = window.get_git_repo_detail_files();
+    assert_eq!(rows.row_count(), 1);
+    let row = rows.row_data(0).unwrap();
+    assert_eq!(row.letter, "R");
+    assert_eq!(row.tip, format!("{old} → {new}").as_str());
+    open_file_diff(window, live, 0);
+    settle(window, live);
+    let lines = diff_text(window);
+    assert!(
+        lines
+            .iter()
+            .any(|(kind, text, _)| *kind == 1 && text == "left only")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|(kind, text, _)| *kind == 2 && text == "right only")
+    );
+    diff_open_full(window);
+    assert!(window.get_diff_left_path().ends_with(old));
+    assert!(window.get_diff_right_path().ends_with(new));
+    assert_eq!(fs::read_to_string(root.join(new)).unwrap(), "uncommitted\n");
 }
 
 /// PR 2b：Undo／Redo。ドラッグで Merge したものを戻し、やり直す。外で動かしたら使えない。
