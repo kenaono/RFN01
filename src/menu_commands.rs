@@ -438,20 +438,45 @@ const INSERT_MENU: &[InsertEntry] = &[
     InsertEntry::Row((InsertShape::Template, ("テンプレート…", "Template…"))),
 ];
 
+#[derive(Clone, Copy)]
+struct InsertSelection {
+    rectangular: bool,
+    picked: bool,
+}
+
+impl InsertSelection {
+    fn read(live: &Live, id: PaneId) -> Self {
+        let rectangular = live.states.of(id).borrow().rectangular;
+        let runs = selected_runs(&live.cache, id);
+        let picked = if rectangular {
+            runs.iter().any(|(start, end)| start < end)
+        } else {
+            !runs.is_empty()
+        };
+        Self {
+            rectangular,
+            picked,
+        }
+    }
+}
+
 /// その形が押せるか、いま効いているか（RFN01-47）。
 ///
-/// **タイトルバーの挿入メニューと右クリックメニューが、同じ規則で読む。**
-/// `editable`には矩形選択の断りまで含めて渡す。
+/// **挿入メニューと書式ボタンは、同じ規則で読む。** 矩形選択では、選んだ字があり
+/// 表示行ごとに適用できる形だけを有効にする（RFN01-41）。
 fn context_insert_state(
     shape: InsertShape,
     editable: bool,
-    picked: bool,
+    selection: InsertSelection,
     notes: &document::LineNoteState,
     places: Places,
 ) -> (bool, bool) {
+    let editable = editable
+        && (!selection.rectangular
+            || matches!(shape, InsertShape::Edit(what) if selection.picked && what.supports_rectangle()));
     match shape {
         InsertShape::Edit(what) => {
-            let allowed = !what.needs_a_picked_word() || picked;
+            let allowed = !what.needs_a_picked_word() || selection.picked;
             (editable && allowed, false)
         }
         InsertShape::Line(document::LineNoteEdit::Heading(level)) => {
@@ -484,12 +509,12 @@ fn context_insert_state(
 /// 右クリックメニューへ出す挿入の行（RFN01-47）。返すのは1段目と、組の中身。
 fn context_insert_rows(
     editable: bool,
-    picked: bool,
+    selection: InsertSelection,
     notes: document::LineNoteState,
     places: Places,
 ) -> (Vec<crate::InsertRow>, Vec<crate::InsertRow>) {
     let entry = |shape: InsertShape, title: (&str, &str), group: i32| {
-        let (enabled, checked) = context_insert_state(shape, editable, picked, &notes, places);
+        let (enabled, checked) = context_insert_state(shape, editable, selection, &notes, places);
         crate::InsertRow {
             title: pick(title.0, title.1).into(),
             flyout: false,
@@ -584,13 +609,12 @@ pub fn publish_context_insert(window: &AppWindow, live: &Live, id: PaneId) {
         .is_some_and(|tab| tab.empty);
     let text = !screen.settings && !screen.terminal && !empty;
     let editable = text && !screen.viewer && !document.read_only();
-    let picked = !selected_runs(&live.cache, id).is_empty();
-    let rectangular = live.states.of(id).borrow().rectangular;
+    let selection = InsertSelection::read(live, id);
     let (notes, places) = insert_inputs(window, live, id, &document);
-    let (top, children) = context_insert_rows(editable && !rectangular, picked, notes, places);
+    let (top, children) = context_insert_rows(editable, selection, notes, places);
     window.set_insert_rows(slint::ModelRc::new(slint::VecModel::from(top)));
     window.set_insert_children(slint::ModelRc::new(slint::VecModel::from(children)));
-    let table = if editable && !rectangular {
+    let table = if editable && !selection.rectangular {
         table_rows(window, live, id, &document)
     } else {
         Vec::new()
@@ -743,8 +767,7 @@ pub fn publish_format(window: &AppWindow, live: &Live, cache: &RefCell<FormatCac
     let t = Target::for_shortcut(window, live);
     window.set_format_vertical(t.id.vertical(window));
     let (_, editable) = text_state(window, live, &t);
-    let picked = !selected_runs(&live.cache, t.id).is_empty();
-    let rectangular = live.states.of(t.id).borrow().rectangular;
+    let selection = InsertSelection::read(live, t.id);
     let inputs = {
         let source = t.document.text.borrow();
         let range = chosen_source_range(&live.states.of(t.id).borrow(), source.len());
@@ -763,13 +786,7 @@ pub fn publish_format(window: &AppWindow, live: &Live, cache: &RefCell<FormatCac
         }
         cache.inputs
     };
-    let rows = format_rows(
-        editable,
-        rectangular,
-        picked,
-        inputs,
-        bullet_marks_of(window),
-    );
+    let rows = format_rows(editable, selection, inputs, bullet_marks_of(window));
     let mut cache = cache.borrow_mut();
     if cache.shown.as_ref() == Some(&rows) {
         return;
@@ -782,12 +799,11 @@ pub fn publish_format(window: &AppWindow, live: &Live, cache: &RefCell<FormatCac
 /// ボタンと組の中身。1段目は挿入メニューの表の順、そのあとに箇条書きの束。
 fn format_rows(
     editable: bool,
-    rectangular: bool,
-    picked: bool,
+    selection: InsertSelection,
     (notes, places): (document::LineNoteState, Places),
     marks: document::BulletMarks,
 ) -> (Vec<crate::FormatButton>, Vec<crate::InsertRow>) {
-    let (top, mut children) = context_insert_rows(editable && !rectangular, picked, notes, places);
+    let (top, mut children) = context_insert_rows(editable, selection, notes, places);
     let mut buttons: Vec<crate::FormatButton> = INSERT_MENU
         .iter()
         .zip(top)
@@ -1525,7 +1541,7 @@ pub(crate) struct Scene<'a> {
     selected: OnceCell<bool>,
     backups: OnceCell<bool>,
     git_history: OnceCell<bool>,
-    inserts: OnceCell<(document::LineNoteState, Places)>,
+    inserts: OnceCell<(InsertSelection, document::LineNoteState, Places)>,
 }
 impl<'a> Scene<'a> {
     pub(crate) fn read(window: &'a AppWindow, live: &'a Live, t: &'a Target) -> Self {
@@ -1599,22 +1615,15 @@ impl<'a> Scene<'a> {
         terminal_panels::current(self.live, self.t.parent)
             .is_some_and(|panel| panel.borrow().capture.is_some())
     }
-    fn inserts(&self) -> &(document::LineNoteState, Places) {
-        self.inserts
-            .get_or_init(|| insert_inputs(self.window, self.live, self.t.id, &self.t.document))
-    }
     /// 挿入のひな形が押せるか（1つめ）、いまの行がその形か（2つめ）。
     fn insert_state(&self, shape: InsertShape) -> (bool, bool) {
-        // RFN01-38: **矩形選択のときは押せない**——矩形へまとめて入れるのは別の課題（RFN01-41）。
-        let rectangular = self.live.states.of(self.t.id).borrow().rectangular;
-        let (notes, places) = self.inserts();
-        context_insert_state(
-            shape,
-            self.editable && !rectangular,
-            self.selected(),
-            notes,
-            *places,
-        )
+        let (selection, notes, places) = self.inserts.get_or_init(|| {
+            let selection = InsertSelection::read(self.live, self.t.id);
+            let (notes, places) =
+                insert_inputs(self.window, self.live, self.t.id, &self.t.document);
+            (selection, notes, places)
+        });
+        context_insert_state(shape, self.editable, *selection, notes, *places)
     }
 
     /// その操作が、いまの場面で実行できるか。
@@ -2870,6 +2879,13 @@ mod tests {
     use super::*;
     use crate::terminal_ui_tests::Harness;
 
+    fn ordinary_selection(picked: bool) -> InsertSelection {
+        InsertSelection {
+            rectangular: false,
+            picked,
+        }
+    }
+
     /// 末端の項目を、**押せるか・印が付いているかと番号つきで**並べる（RFN01-38）。
     fn leaves(menu: HMENU) -> Vec<(u32, bool, bool)> {
         let count = unsafe { GetMenuItemCount(Some(menu)) };
@@ -3003,7 +3019,7 @@ mod tests {
     ) -> windows::core::Result<()> {
         let mut items = Vec::new();
         insert_rows_by(&mut items, |shape| {
-            context_insert_state(shape, enabled, picked, &notes, places)
+            context_insert_state(shape, enabled, ordinary_selection(picked), &notes, places)
         });
         let (built, built_commands) = native(window, items, field)?;
         // 組んだ段を、渡された段の下へそのまま移す。
@@ -3150,7 +3166,8 @@ mod tests {
             .unwrap();
             let native = titled_leaves(menu.handle);
 
-            let (top, children) = context_insert_rows(true, picked, notes, places(false));
+            let (top, children) =
+                context_insert_rows(true, ordinary_selection(picked), notes, places(false));
             let mut ours: Vec<(&str, bool, bool)> = Vec::new();
             let (mut at_top, mut at_child) = (0, 0);
             for what in INSERT_MENU {
@@ -3236,8 +3253,7 @@ mod tests {
         );
     }
 
-    /// 本文へ何も書けないとき（Viewer・ReadOnly・矩形選択のとき）は、**同じ行が
-    /// どれも無効になる**。
+    /// 本文へ何も書けないとき（Viewer・ReadOnly）は、どの挿入項目も無効になる。
     #[test]
     fn no_insert_row_is_pickable_when_the_body_cannot_be_written() {
         let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
@@ -3260,6 +3276,23 @@ mod tests {
                 .all(|(_, pickable, _)| !*pickable),
             "書けないときは押せない"
         );
+    }
+
+    #[test]
+    fn rectangular_inserts_require_selected_characters_and_a_supported_shape() {
+        let (h, document) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        *document.text.borrow_mut() = "ab\ncd".into();
+        let id = PaneId::FIRST;
+        h.live.states.of(id).borrow_mut().rectangular = true;
+        let target = Target::of(&h.window, &h.live, id, 0);
+        let ruby = Command::Insert(InsertShape::Edit(document::InsertEdit::Ruby));
+        let footnote = Command::Insert(InsertShape::Edit(document::InsertEdit::Footnote));
+        for (runs, enabled) in [(vec![(0, 0), (3, 3)], false), (vec![(0, 1), (3, 3)], true)] {
+            h.live.cache.borrow_mut().pane(id).view.selection_source = runs;
+            let scene = Scene::read(&h.window, &h.live, &target);
+            assert_eq!(scene.enabled(&ruby), enabled);
+            assert!(!scene.enabled(&footnote));
+        }
     }
 
     #[test]
@@ -3517,8 +3550,7 @@ mod tests {
         }
         let (buttons, _) = format_rows(
             true,
-            false,
-            true,
+            ordinary_selection(true),
             (bare_notes(), places(true)),
             document::BulletMarks::all(),
         );
@@ -3548,8 +3580,7 @@ mod tests {
     fn a_format_button_runs_the_menu_command() {
         let (buttons, children) = format_rows(
             true,
-            false,
-            true,
+            ordinary_selection(true),
             (bare_notes(), places(true)),
             document::BulletMarks::all(),
         );
@@ -3613,8 +3644,7 @@ mod tests {
     fn no_format_button_is_pickable_when_the_body_cannot_be_written() {
         let (buttons, children) = format_rows(
             false,
-            false,
-            true,
+            ordinary_selection(true),
             (bare_notes(), places(true)),
             document::BulletMarks::all(),
         );

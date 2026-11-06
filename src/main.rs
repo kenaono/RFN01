@@ -2956,12 +2956,19 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     // RFN01-47: **本文の右クリックメニューの挿入の行。**開いた時点で組み直し、
-    // 選ばれた行は形に戻して、タイトルバーの挿入メニューと同じ道へ渡す（`insert_in_pane`）。
+    // 選ばれた行は形に戻し、開いたときの対象で共通の実行入口へ渡す。
+    let context_insert_target = Rc::new(RefCell::new(None));
     let weak = window.as_weak();
     let insert_live = live.clone();
+    let opened_target = context_insert_target.clone();
     window.on_pane_menu_opened(move |pane| {
         if let Some(window) = weak.upgrade() {
-            menu_commands::publish_context_insert(&window, &insert_live, PaneId::from_index(pane));
+            let id = PaneId::from_index(pane);
+            *opened_target.borrow_mut() = Some((
+                pane,
+                menu_commands::Target::for_pane(&window, &insert_live, id),
+            ));
+            menu_commands::publish_context_insert(&window, &insert_live, id);
         }
     });
     // 書式のボタン（2026-09-23）。**押された番号はメニューと同じ操作へ戻す。**
@@ -2975,10 +2982,19 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = window.as_weak();
     let chosen_live = live.clone();
     window.on_pane_insert_chosen(move |pane, number| {
+        let opened = context_insert_target.borrow_mut().take();
         if let Some(window) = weak.upgrade()
             && let Some(shape) = menu_commands::InsertShape::from_number(number)
+            && let Some((opened_pane, target)) = opened
+            && pane == opened_pane
         {
-            insert_in_pane(&window, &chosen_live, PaneId::from_index(pane), shape);
+            menu_commands::run(
+                &window,
+                &chosen_live,
+                &target,
+                menu_commands::Command::Insert(shape),
+                "",
+            );
         }
     });
     // RFN01-49: 表のマス目で選んだ（右クリック・キャレットの所）、書式ボタンのマス目で選んだ、
@@ -23196,10 +23212,8 @@ fn insert_pane_text(
     }
     // 要件 7.1: **typing over a rectangle takes the rectangle out first**, and
     // what is typed then goes in at its near corner. The selection the writer
-    // can see is what goes, which the linear span below would not be. A
-    // rectangular *insert* — the same characters put on every line — is a
-    // second and larger feature, and no requirement asks for it; doing it here
-    // would hide it behind an ordinary keystroke.
+    // can see is what goes, which the linear span below would not be. The
+    // RFN01-41 insertion commands use each selected run in `insert_in_pane`.
     let rectangle = {
         let state = states.of(id);
 
@@ -23387,6 +23401,10 @@ fn edit_list(window: &AppWindow, live: &Live, id: PaneId, what: document::ListEd
 /// 押された行を言い返すための言い方で、境目（`on_pane_insert_chosen`）で形に戻す。
 fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, shape: menu_commands::InsertShape) {
     use menu_commands::InsertShape;
+    let rectangular = live.states.of(id).borrow().rectangular;
+    if rectangular && !matches!(shape, InsertShape::Edit(what) if what.supports_rectangle()) {
+        return;
+    }
     // RFN01-49: **表は大きさを選んでから置く。**タイトルバーの挿入とキーからは、
     // キャレットの所にマス目を開く（右クリックと書式ボタンは、その場の面に開く）。
     if shape == InsertShape::Table {
@@ -23444,6 +23462,12 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, shape: menu_comma
     let state = live.states.of(id);
     let (from, to) = chosen_source_range(&state.borrow(), source.len());
     let edit = match shape {
+        InsertShape::Edit(what) if rectangular => document::rectangle_insert_edit(
+            &source,
+            &selected_runs(&live.cache, id),
+            what,
+            state.borrow().caret_source_byte.unwrap_or(from),
+        ),
         InsertShape::Edit(what) => document::insert_edit(&source, from, to, what),
         InsertShape::Line(what) => {
             document::line_note_edit(&source, from, to, what, reading_of(window))

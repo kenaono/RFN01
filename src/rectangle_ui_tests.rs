@@ -159,3 +159,54 @@ fn alt_drag_selects_a_rectangle() {
         );
     }
 }
+
+#[test]
+fn rectangle_insert_and_undo_use_the_displayed_selection() {
+    let source = "前東京後\n\n先京都末";
+    let r = rig(source, (1000, 600));
+    let state = r.live.states.of(r.id);
+    let edited = "前《《東京》》後\n\n先《《京都》》末";
+
+    for (vertical, preview) in [(false, false), (false, true), (true, false), (true, true)] {
+        set_pane_direction(&r.window, &r.live.cache, r.id, vertical);
+        r.id.update_screen(&r.window, |screen| screen.preview = preview);
+        {
+            let mut state = state.borrow_mut();
+            state.rectangular = true;
+            state.selection_anchor_source_byte = Some("前".len());
+            state.caret_source_byte = Some("前東京後\n\n先京都".len());
+        }
+        refresh_pane_from_state(&r.window, &r.live.cache, &r.document, r.id, &state, source);
+        let runs = selected_runs(&r.live.cache, r.id);
+        assert_eq!(
+            selected_text(source, &runs),
+            "東京\n\n京都",
+            "vertical={vertical} preview={preview}: {runs:?}"
+        );
+
+        let target = menu_commands::Target::for_pane(&r.window, &r.live, r.id);
+        let command = menu_commands::Command::Insert(menu_commands::InsertShape::Edit(
+            document::InsertEdit::EmphasisDots,
+        ));
+        menu_commands::run(&r.window, &r.live, &target, command, "");
+        assert_eq!(r.source(), edited);
+        assert!(!state.borrow().rectangular);
+
+        let undo_redo = |redo| {
+            undo_in_pane(
+                &r.window,
+                r.id,
+                &r.document,
+                &r.live.states,
+                &r.live.cache,
+                redo,
+            );
+        };
+        undo_redo(false);
+        assert_eq!(r.source(), source);
+        undo_redo(true);
+        assert_eq!(r.source(), edited);
+        undo_redo(false);
+        assert_eq!(r.source(), source);
+    }
+}
