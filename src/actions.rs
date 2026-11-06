@@ -114,6 +114,8 @@ pub(crate) enum Scope {
     Main,
     /// Quick Draftの窓の中。
     QuickDraft,
+    /// Explorer・Workspaceのファイルツリーにフォーカスがあるとき。
+    Tree,
 }
 
 /// アクションの1行。
@@ -1812,6 +1814,30 @@ fn build() -> Vec<ActionDef> {
             command: None,
         });
     }
+    use crate::tree_actions::Action as A;
+    use crate::TreeCommand as T;
+    v.extend([
+        ("tree.new-file", ("木に新規ファイル…", "New File in Tree…"), ("選択した場所に新しいファイルを作ります。", "Creates a file in the selected location."), "", A::Entry(T::NewFile)),
+        ("tree.new-folder", ("木に新規フォルダ…", "New Folder in Tree…"), ("選択した場所に新しいフォルダを作ります。", "Creates a folder in the selected location."), "", A::Entry(T::NewFolder)),
+        ("tree.rename", ("木の項目の名前を変更…", "Rename Tree Item…"), ("選択した項目の名前を変更します。", "Renames the selected file or folder."), "F2", A::Entry(T::Rename)),
+        ("tree.duplicate", ("木の項目を複製", "Duplicate Tree Item"), ("選択した項目を複製します。", "Duplicates the selected file or folder."), "", A::Entry(T::Duplicate)),
+        ("tree.delete", ("木の項目を削除…", "Delete Tree Item…"), ("選択した項目の削除を確認します。", "Asks before deleting the selected item."), "Delete", A::Entry(T::Delete)),
+        ("tree.reveal", ("木の項目をExplorerで表示", "Reveal Tree Item in Explorer"), ("選択した項目をWindowsのExplorerで表示します。", "Shows the selected item in Windows Explorer."), "", A::Entry(T::Reveal)),
+        ("tree.search-in", ("このフォルダを検索", "Search in Selected Folder"), ("選択した項目の場所を検索します。", "Searches the folder named by the selected item."), "", A::Entry(T::SearchIn)),
+        ("tree.terminal-in", ("このフォルダでTerminal", "Terminal in Selected Folder"), ("選択した項目の場所でTerminalを開きます。", "Opens a terminal in the selected folder."), "", A::Entry(T::TerminalIn)),
+        ("tree.reveal-document", ("現在の文書を木で表示", "Show Current Document in Tree"), ("編集中のファイルを木の中に表示します。", "Shows the current document in the tree."), "", A::RevealDocument),
+        ("tree.collapse-all", ("木をすべて畳む", "Collapse All Tree Folders"), ("ファイルツリーのフォルダを畳みます。", "Collapses the folders in the file tree."), "", A::CollapseAll),
+        ("tree.refresh", ("木を更新", "Refresh File Tree"), ("ファイルツリーを読み直します。", "Refreshes the file tree."), "", A::Refresh),
+        ("tree.search", ("木の検索を切り替え", "Toggle File Tree Search"), ("ファイルツリーの検索欄を開閉します。", "Opens or closes search in the file tree."), "", A::Search),
+        ("tree.previous", ("木の前の行を選択", "Select Previous Tree Row"), ("木の前の行を選びます。", "Selects the previous row in the file tree."), "Up", A::Previous),
+        ("tree.next", ("木の次の行を選択", "Select Next Tree Row"), ("木の次の行を選びます。", "Selects the next row in the file tree."), "Down", A::Next),
+        ("tree.open", ("木の項目を開く", "Open Tree Item"), ("ファイルを開くか、フォルダを展開・折り畳みます。", "Opens the file or toggles the folder."), "Enter", A::Activate),
+        ("tree.left", ("木を折り畳む・親へ", "Collapse Tree Folder or Select Parent"), ("選択したフォルダを畳むか、親を選びます。", "Collapses the selected folder or selects its parent."), "Left", A::Left),
+        ("tree.right", ("木を展開・子へ", "Expand Tree Folder or Select Child"), ("選択したフォルダを開くか、子を選びます。", "Expands the selected folder or selects its first child."), "Right", A::Right),
+    ].map(|(id, title, description, key, action)| ActionDef {
+        scope: Scope::Tree,
+        ..def(id, title, description, key, LeftPane, C::Tree(action))
+    }));
     v
 }
 

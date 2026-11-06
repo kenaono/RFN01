@@ -86,6 +86,87 @@ impl slint::platform::Platform for Offscreen {
 }
 
 #[test]
+fn file_tree_keeps_focus_through_file_open_and_confirmation() {
+    use crate::saving::{Harness, scratch_directory};
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+
+    let root = scratch_directory("tree-key-focus");
+    let notes = root.join("notes");
+    std::fs::create_dir(&notes).unwrap();
+    let first = notes.join("one.md");
+    let second = notes.join("two.md");
+    std::fs::write(&first, "First document").unwrap();
+    std::fs::write(&second, "Second document").unwrap();
+    let (harness, untitled) = Harness::new(|window| OpenDocument::untitled(1, window));
+    let window = &harness.window;
+    let live = &harness.live;
+    live.folder.borrow_mut().root = Some(root);
+    window.set_tree_open(true);
+    publish_left(window, live);
+    wiring::wire_left_panel(window, live);
+    shortcuts::wire(window, live);
+    let weak = window.as_weak();
+    let answered = live.clone();
+    window.on_question_answered(move |choice| {
+        let weak = weak.clone();
+        let live = answered.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(window) = weak.upgrade() {
+                answer_question(&window, &live, choice);
+            }
+        });
+    });
+    window.show().unwrap();
+    let settle = || {
+        slint::platform::update_timers_and_animations();
+        harness.surface.draw_if_needed(|renderer| {
+            let mut pixels = vec![slint::Rgb8Pixel::default(); 1000 * 740];
+            renderer.render(&mut pixels, 1000);
+        });
+    };
+    settle();
+    let click = |x, y| {
+        let position = slint::LogicalPosition::new(x, y);
+        let button = PointerEventButton::Left;
+        window.window().dispatch_event(WindowEvent::PointerPressed { position, button });
+        window.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+        settle();
+    };
+    let press = |key: Key| {
+        window.window().dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        window.window().dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        settle();
+    };
+
+    click(100.0, 57.0);
+    press(Key::Tab);
+    press(Key::DownArrow);
+    press(Key::RightArrow);
+    press(Key::DownArrow);
+    assert_eq!(live.folder.borrow().selected.as_ref(), Some(&first));
+    press(Key::Return);
+    assert_eq!(live.active(window).file.borrow().path(), Some(first.as_path()));
+    assert!(untitled.text.borrow().is_empty());
+    assert!(window.get_tree_focused());
+
+    click(100.0, 131.0);
+    assert_eq!(live.folder.borrow().selected.as_ref(), Some(&second));
+    assert_eq!(live.active(window).file.borrow().path(), Some(second.as_path()));
+    assert!(window.get_tree_focused());
+    press(Key::F2);
+    assert!(matches!(&*live.pending.borrow(), Some(Question::RenameEntry(path)) if *path == second));
+    press(Key::Escape);
+    assert!(window.get_tree_focused());
+    press(Key::Delete);
+    assert!(matches!(&*live.pending.borrow(), Some(Question::DeleteEntry(path)) if *path == second));
+    press(Key::Escape);
+    assert!(window.get_tree_focused());
+    press(Key::Escape);
+    assert!(!window.get_tree_focused());
+    assert!(second.is_file());
+}
+
+#[test]
 #[ignore = "Explorer menu placement and refresh guard"]
 fn explorer_menu_blocks_refresh_until_dismissed() {
     use slint::platform::{PointerEventButton, WindowEvent};
@@ -141,7 +222,11 @@ fn explorer_menu_blocks_refresh_until_dismissed() {
     assert!(window.get_tree_refresh_blocked());
     let command = Rc::new(Cell::new(-1));
     let received = command.clone();
-    window.on_tree_command(move |value| received.set(value));
+    window.set_tree_context_items(ModelRc::new(VecModel::from(vec![
+        TreeMenuItem { title: "New File…".into(), enabled: true, ..Default::default() };
+        8
+    ])));
+    window.on_tree_context_command(move |value| received.set(value));
     click(100.0, 114.0, PointerEventButton::Left);
     draw();
     assert_eq!(
@@ -698,7 +783,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     assert!(!live.tree_paths.borrow().contains(&added));
     assert!(live.tree_paths.borrow().contains(&moved));
     assert!(live.folder.borrow().selected.is_none());
-    explorer_command(&window, &live, 1);
+    explorer_command(&window, &live, PaneId::from_index(0), 1);
     assert!(live.folder.borrow().expanded.is_empty());
     assert!(!live.tree_paths.borrow().contains(&moved));
     reveal_in_tree(&window, &live, &moved);
@@ -708,7 +793,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let selected_before = live.folder.borrow().selected.clone();
     reveal_in_tree(&window, &live, &directory.join("outside.md"));
     assert_eq!(live.folder.borrow().selected, selected_before);
-    explorer_command(&window, &live, 2);
+    explorer_command(&window, &live, PaneId::from_index(0), 2);
     assert_eq!(live.folder.borrow().selected, selected_before);
     assert_eq!(window.get_focused_pane(), focused);
     begin_tree_entry(&window, &live, child.clone(), true);

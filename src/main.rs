@@ -132,6 +132,7 @@ mod terminal_ui_tests;
 mod terminal_workflow;
 mod text_blocks;
 mod timestamp;
+mod tree_actions;
 mod tree_watch;
 #[cfg(test)]
 mod typography_ui_tests;
@@ -8486,13 +8487,13 @@ fn reveal_in_tree(window: &AppWindow, live: &Live, path: &Path) {
     window.set_tree_reveal_generation(window.get_tree_reveal_generation().wrapping_add(1));
 }
 
-fn explorer_command(window: &AppWindow, live: &Live, command: i32) {
+fn explorer_command(window: &AppWindow, live: &Live, pane: PaneId, command: i32) {
     if live.folder.borrow().creating.is_some() {
         return;
     }
     match command {
         0 => {
-            let path = live.active(window).file.borrow().path().map(Path::to_owned);
+            let path = live.states.document(pane).file.borrow().path().map(Path::to_owned);
             if let Some(path) = path {
                 reveal_in_tree(window, live, &path);
             } else {
@@ -11938,7 +11939,7 @@ fn paths_from_arguments(args: impl IntoIterator<Item = std::ffi::OsString>) -> V
 /// the window knows which button was pressed and nothing else about it, and
 /// every one of these lands in the same place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TreeCommand {
+pub(crate) enum TreeCommand {
     NewFile,
     NewFolder,
     Rename,
@@ -14151,6 +14152,13 @@ fn ask_question(
     // Described before it is handed over: a question carries a path now, so
     // storing it moves it.
     let described = question.diagnostic_name();
+    window.set_question_return_to_tree(
+        window.get_tree_focused()
+            && matches!(
+                &question,
+                Question::RenameEntry(_) | Question::DeleteEntry(_) | Question::DeleteEdited(..)
+            ),
+    );
     window.set_question_enter_sends(matches!(&question, Question::TerminalInput(_)));
     window.set_question_is_clone(matches!(&question, Question::CloneWorkspaceUrl));
     window.set_question_is_bookmark(matches!(&question, Question::AddBookmark { .. }));
@@ -14224,7 +14232,11 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     }
     window.set_question_open(false);
     // The question took the keyboard away from the pane to ask (6.14).
-    restore_editor_focus(window);
+    if window.get_question_return_to_tree() {
+        tree_actions::restore_focus(window);
+    } else {
+        restore_editor_focus(window);
+    }
     live.cache.borrow_mut().log_diag(
         "answer",
         &format!("{} choice={choice}", question.diagnostic_name()),

@@ -12,6 +12,7 @@ use windows::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Command {
+    Tree(crate::tree_actions::Action),
     NewFile,
     /// RFN01-88: 新規文書をテンプレートから（名前で）。
     NewFromTemplate(String),
@@ -1051,6 +1052,7 @@ pub(crate) struct Target {
     shells: Vec<TerminalShell>,
     spot: TerminalSpot,
     field: i32,
+    tree: Option<crate::tree_actions::Target>,
 }
 impl Target {
     fn capture(window: &AppWindow, live: &Live) -> Self {
@@ -1106,8 +1108,18 @@ impl Target {
             shells: configured_shells(window),
             spot,
             field,
+            tree: None,
         }
     }
+    fn with_tree(mut self, tree: crate::tree_actions::Target) -> Self {
+        self.tree = Some(tree);
+        self
+    }
+
+    pub(crate) fn for_tree(window: &AppWindow, live: &Live) -> Self {
+        Self::with_field(window, live, 0).with_tree(crate::tree_actions::Target::capture(window, live))
+    }
+
     fn valid(&self, window: &AppWindow, live: &Live) -> bool {
         self.id.is_shown(window)
             && Rc::ptr_eq(&self.document, &live.states.document(self.id))
@@ -1590,6 +1602,11 @@ impl<'a> Scene<'a> {
             (self.text, self.editable, self.main, self.path, self.field);
         let panel = t.id.is_panel();
         match command {
+            Command::Tree(action) => {
+                t.tree.as_ref().is_some_and(|tree| tree.enabled(window, self.live, *action))
+                    && (*action != crate::tree_actions::Action::RevealDocument
+                        || t.document.file.borrow().path().is_some())
+            }
             Command::NewFile
             | Command::NewFromTemplate(_)
             | Command::NewTerminal(_)
@@ -2431,7 +2448,12 @@ pub(crate) fn allowed_for(
 /// を確かめてから実行する——灰色にした・並べなかったことに頼らない（開いてから押すまでに場面が
 /// 変わることがある）。断ったときは`name`で知らせる（その時の状態だけの操作は黙る）。
 pub(crate) fn run(window: &AppWindow, live: &Live, t: &Target, command: Command, name: &str) {
-    if !t.valid(window, live) {
+    let valid = match &command {
+        Command::Tree(action) => t.tree.as_ref().is_some_and(|tree| tree.valid(window, live))
+            && (*action != crate::tree_actions::Action::RevealDocument || t.valid(window, live)),
+        _ => t.valid(window, live),
+    };
+    if !valid {
         window.tell(
             pick(
                 "操作対象が変わりました。選び直してください",
@@ -2495,6 +2517,13 @@ fn quiet(command: &Command) -> bool {
             | Command::Zoom(_)
             | Command::Kill(3 | 4)
             | Command::SpellingStep(_)
+            | Command::Tree(
+                crate::tree_actions::Action::Previous
+                | crate::tree_actions::Action::Next
+                | crate::tree_actions::Action::Activate
+                | crate::tree_actions::Action::Left
+                | crate::tree_actions::Action::Right
+            )
     )
 }
 
@@ -2540,6 +2569,11 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
     let p = t.id.index();
     let parent = t.parent.index();
     match command {
+        Command::Tree(action) => {
+            if let Some(tree) = &t.tree {
+                crate::tree_actions::execute(window, live, tree, t.id, action);
+            }
+        }
         Command::NewFile => window.invoke_pane_new_file(p),
         Command::NewFromTemplate(name) => crate::new_from_template(window, live, t.id, &name),
         // RFN01-114: -1は既定のシェル（キーは特定のシェルを指さない、書き手の合意 2026-09-21）。
@@ -2749,11 +2783,12 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
     }
 }
 
-/// キーボードを自分で取る操作（パレット・選ぶ一覧・左ペインの欄・設定）。
+/// キーボードを自分で扱う操作。実行前に本文へフォーカスを戻さない。
 fn takes_keyboard(command: &Command) -> bool {
     matches!(
         command,
         Command::CommandPalette(_)
+            | Command::Tree(_)
             | Command::TemplatePicker
             | Command::RecentPicker
             | Command::WordModePicker
