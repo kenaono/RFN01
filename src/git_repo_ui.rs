@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
@@ -26,8 +27,8 @@ use crate::git_ui::{self, Action};
 use crate::i18n::pick;
 use crate::inline_diff;
 use crate::{
-    AppWindow, GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitLine, GitRef, GitRow, Live,
-    MAX_DOCUMENT_CHARACTERS, Opening, StatusBar, say,
+    AppWindow, GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitHunkLine, GitHunkRow,
+    GitLine, GitRef, GitRow, Live, MAX_DOCUMENT_CHARACTERS, Opening, StatusBar, say,
 };
 
 /// 1度に読む Commit の数（「Show more」で同じだけ足す）。
@@ -118,6 +119,7 @@ struct Repo {
     selected: Option<Selected>,
     detail: Option<git::Detail>,
     diff: Option<DiffShown>,
+    block_mode: bool,
     side: Vec<Side>,
     /// グラフの行の Commit（`None`は `// WIP`）。
     rows: Vec<Option<String>>,
@@ -155,6 +157,7 @@ pub fn open(window: &AppWindow, live: &Live) {
         repo.selected = None;
         repo.detail = None;
         repo.diff = None;
+        repo.block_mode = false;
     });
     let name = root
         .file_name()
@@ -294,6 +297,7 @@ fn collect(window: &AppWindow, live: &Live) {
                     repo.selected = None;
                     repo.detail = None;
                     repo.diff = None;
+                    repo.block_mode = false;
                 }
                 repo.data = Some(data);
                 repo.error = None;
@@ -551,8 +555,38 @@ fn side_rows(data: &Data) -> (Vec<GitBranchRow>, Vec<Side>) {
 
 /// 右の列：何も選んでいない（0）、Commit（1）、WIP（2）、差分（3）。
 fn publish_detail(window: &AppWindow, repo: &Repo) {
+    let patch = match &repo.diff {
+        Some(DiffShown::Wip(preview)) => preview.patch.as_deref(),
+        _ => None,
+    };
+    window.set_git_repo_hunks_available(patch.is_some());
+    window.set_git_repo_hunks_active(repo.block_mode && patch.is_some());
+    if let Some(patch) = patch.filter(|_| repo.block_mode) {
+        let rows: Vec<_> = patch
+            .hunks
+            .iter()
+            .map(|hunk| GitHunkRow {
+                title: hunk.heading.clone().into(),
+                lines: ModelRc::new(VecModel::from(
+                    hunk.lines
+                        .iter()
+                        .map(|(kind, text)| GitHunkLine {
+                            kind: *kind,
+                            text: text.as_str().into(),
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+            })
+            .collect();
+        window.set_git_repo_hunks_staged(patch.staged);
+        window.set_git_repo_hunks(ModelRc::new(VecModel::from(rows)));
+    } else {
+        window.set_git_repo_hunks(ModelRc::default());
+    }
     if let (Some(diff), Some(root)) = (&repo.diff, &repo.root) {
-        publish_diff(window, root, diff);
+        if !window.get_git_repo_hunks_active() {
+            publish_diff(window, root, diff);
+        }
         return;
     }
     match (&repo.selected, &repo.detail) {
@@ -632,6 +666,7 @@ fn select_row(window: &AppWindow, index: usize) {
         repo.selected = Some(selected);
         repo.detail = detail;
         repo.diff = None;
+        repo.block_mode = false;
     });
     window.set_git_repo_selected(index as i32);
     REPO.with(|repo| publish_detail(window, &repo.borrow()));
@@ -1033,6 +1068,7 @@ fn set_diff(window: &AppWindow, diff: DiffShown) {
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
         repo.diff = Some(diff);
+        repo.block_mode = false;
         publish_detail(window, &repo);
     });
 }
@@ -1042,8 +1078,55 @@ fn diff_back(window: &AppWindow) {
     git_ui::cancel_change_diff();
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
-        repo.diff = None;
+        if repo.block_mode {
+            repo.block_mode = false;
+        } else {
+            repo.diff = None;
+        }
         publish_detail(window, &repo);
+    });
+}
+
+fn open_hunks(window: &AppWindow) {
+    REPO.with(|repo| {
+        let mut repo = repo.borrow_mut();
+        if matches!(&repo.diff, Some(DiffShown::Wip(preview)) if preview.patch.is_some()) {
+            repo.block_mode = true;
+            publish_detail(window, &repo);
+        }
+    });
+}
+
+fn selected_patch() -> Option<(PathBuf, Arc<crate::git_hunks::Patch>)> {
+    REPO.with(|repo| {
+        let repo = repo.borrow();
+        if let Some(DiffShown::Wip(preview)) = &repo.diff
+            && repo.block_mode
+        {
+            return Some((repo.root.clone()?, preview.patch.clone()?));
+        }
+        None
+    })
+}
+
+fn apply_block(window: &AppWindow, live: &Live, index: i32) {
+    let (Ok(block), Some((root, patch))) = (usize::try_from(index), selected_patch()) else {
+        return;
+    };
+    later(window, live, move |window, live| {
+        if !window.get_git_repo_active()
+            || !selected_patch()
+                .is_some_and(|(shown, current)| shown == root && Arc::ptr_eq(&current, &patch))
+            || !git_ui::apply_hunk(window, live, &root, patch, block)
+        {
+            return;
+        }
+        REPO.with(|repo| {
+            let mut repo = repo.borrow_mut();
+            repo.diff = None;
+            repo.block_mode = false;
+            publish_detail(window, &repo);
+        });
     });
 }
 
@@ -1227,6 +1310,14 @@ pub fn wire(window: &AppWindow, live: &Live) {
         diff_working_chosen(w, working)
     });
     on!(on_git_repo_diff_open_full, |w, _l| diff_open_full(w));
+    on!(on_git_repo_open_hunks, |w, _l| open_hunks(w));
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_git_repo_apply_hunk(move |index| {
+        if let Some(window) = weak.upgrade() {
+            apply_block(&window, &held, index);
+        }
+    });
     on!(on_git_repo_diff_width_changed, |w, _l, width| {
         diff_width_changed(w, width)
     });

@@ -463,6 +463,62 @@ fn both_git_changes_surfaces_compare_the_selected_section() {
 }
 
 #[test]
+fn the_wip_block_button_stages_and_unstages_the_selected_hunk() {
+    let Some((root, harness)) = manuscript("repo-hunk-buttons") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    let path = "原稿.md";
+    let base = format!("first base\n{}last base\n", "context\n".repeat(16));
+    fs::write(root.join(path), &base).unwrap();
+    git::commit(&root, "base for blocks", true, false).unwrap();
+    let working = base
+        .replace("first base", "first working")
+        .replace("last base", "last working");
+    fs::write(root.join(path), &working).unwrap();
+    git_ui::wire(window, live);
+    wire(window, live);
+    open(window, live);
+    settle(window, live);
+    select_row(window, 0);
+
+    let show = |kind| {
+        let rows = window.get_git_rows();
+        let row = (0..rows.row_count())
+            .find(|&at| rows.row_data(at).unwrap().kind == kind)
+            .unwrap() as i32;
+        window.invoke_git_repo_changes_clicked(row);
+        settle(window, live);
+        assert!(window.get_git_repo_hunks_available());
+        window.invoke_git_repo_open_hunks();
+        slint::platform::update_timers_and_animations();
+        assert!(window.get_git_repo_hunks_active());
+    };
+    show(4);
+    assert_eq!(window.get_git_repo_hunks().row_count(), 2);
+    window.invoke_git_repo_apply_hunk(1);
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert_eq!(window.get_git_repo_detail_mode(), 2);
+    assert_eq!(
+        git::change_blob(&root, "", path).unwrap(),
+        base.replace("last base", "last working").into_bytes(),
+    );
+
+    show(3);
+    assert!(window.get_git_repo_hunks_staged());
+    assert_eq!(window.get_git_repo_hunks().row_count(), 1);
+    window.invoke_git_repo_apply_hunk(0);
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert_eq!(
+        git::change_blob(&root, "", path).unwrap(),
+        base.into_bytes()
+    );
+    assert_eq!(fs::read_to_string(root.join(path)).unwrap(), working);
+}
+
+#[test]
 fn long_lines_are_folded_with_the_number_on_the_first_row() {
     let text = "あ".repeat(100);
     let unified = inline_diff::unified("", &format!("{text}\n"), 3);

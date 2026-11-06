@@ -1536,6 +1536,24 @@ msgstr "違いはありません"
 msgid "View Diff"
 msgstr "差分を表示"
 
+msgid "Diff"
+msgstr "差分"
+
+msgid "Review Git Blocks…"
+msgstr "Gitの変更ブロックを確認…"
+
+msgid "Git patch from saved versions. Unsaved edits are excluded."
+msgstr "保存済みのGit差分です。未保存の編集は含みません。"
+
+msgid "Stage Block"
+msgstr "ブロックをStage"
+
+msgid "Unstage Block"
+msgstr "ブロックをUnstage"
+
+msgid "No newline at end of file"
+msgstr "ファイル末尾に改行なし"
+
 msgid "Previous Commit"
 msgstr "親Commit"
 

@@ -21,7 +21,7 @@ export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
 import { BackupHistoryList, BackupPaneRow, BackupRow, BackupsView } from "backup-view.slint";
 import { GitChangesView, GitRow } from "git-view.slint";
-import { GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitLine, GitRef, GitRepositoryView } from "git-repository.slint";
+import { GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitHunkLine, GitHunkRow, GitLine, GitRef, GitRepositoryView } from "git-repository.slint";
 import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
 import { UnusedFolderRow, WorkspaceFolderRow, WorkspaceManager, WorkspaceRow } from "workspace-manager.slint";
@@ -1285,6 +1285,10 @@ export component AppWindow inherits Window {
     in property <bool> git-repo-diff-working;
     in property <bool> git-repo-diff-switchable;
     in property <[GitDiffRow]> git-repo-diff-rows;
+    in property <bool> git-repo-hunks-available;
+    in property <bool> git-repo-hunks-active;
+    in property <bool> git-repo-hunks-staged;
+    in property <[GitHunkRow]> git-repo-hunks;
     in property <bool> git-repo-can-undo;
     in property <string> git-repo-undo-tip;
     in property <bool> git-repo-can-redo;
@@ -1296,6 +1300,8 @@ export component AppWindow inherits Window {
     callback git-repo-diff-back();
     callback git-repo-diff-working-chosen(bool);
     callback git-repo-diff-open-full();
+    callback git-repo-open-hunks();
+    callback git-repo-apply-hunk(int);
     callback git-repo-diff-width-changed(float);
     /// 左ペインの Backups の行（`backup_ui::publish_pane`）。
     in property <[BackupPaneRow]> backup-pane-rows;
@@ -7000,6 +7006,10 @@ export component AppWindow inherits Window {
             diff-working: root.git-repo-diff-working;
             diff-switchable: root.git-repo-diff-switchable;
             diff-rows: root.git-repo-diff-rows;
+            hunks-available: root.git-repo-hunks-available;
+            hunks-active: root.git-repo-hunks-active;
+            hunks-staged: root.git-repo-hunks-staged;
+            hunks: root.git-repo-hunks;
             can-undo: root.git-repo-can-undo;
             undo-tip: root.git-repo-undo-tip;
             can-redo: root.git-repo-can-redo;
@@ -7009,6 +7019,8 @@ export component AppWindow inherits Window {
             diff-back => { root.git-repo-diff-back(); }
             diff-working-chosen(working) => { root.git-repo-diff-working-chosen(working); }
             diff-open-full => { root.git-repo-diff-open-full(); }
+            open-hunks => { root.git-repo-open-hunks(); }
+            apply-hunk(index) => { root.git-repo-apply-hunk(index); }
             diff-width-changed(width) => { root.git-repo-diff-width-changed(width); }
             changes-mode: root.git-mode;
             changes-note: root.git-note;

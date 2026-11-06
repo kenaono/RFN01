@@ -1397,6 +1397,7 @@ File の「Git Repository…」か、Git Changes の見出しの右端のアイ�
 - **右の列**：選んだ Commit の詳細と変更したファイル。**ファイルを押すと右の列が広がって差分が出ます**（消した行は赤、足した行は緑、行の中で変わった字は濃く塗ります。変わった所の前後3行だけを出します）。上の「Previous Commit／Working Copy」で比べる相手を替え、「Open in Comparison」で左右に並べる比較の画面を開きます（閉じるとここへ戻ります）。「‹ Files」で一覧へ戻ります。「// WIP」のファイルを押すと、Git Changesと同じ比較元の差分が出ます。「Open in Comparison」でもその差分の内容が引き継がれます。
 - **Undo／Redo**：アプリを起動してからの Git の操作（Commit・Amend・Checkout・Merge・Pull・Revert・Cherry-pick・Reset・ブランチの作成と削除・Stash All と Pop）を、リポジトリごとに戻せます。マウスを載せると何を戻すかが出ます。Push と Fetch は戻せません。Terminal などで外から HEAD を動かしたあとや、Push 済みの Commit を外すことになるときは使えません。Reset — Delete Changes を戻しても、消えた変更は戻りません。
 - **Commit の右クリック**：New Branch…、Revert（今のブランチの Commit）、Cherry-pick（ほかのブランチの Commit）、Reset — Keep Changes／Delete Changes…（今のブランチの Commit。Delete Changes と、Push 済みの Commit を外す Reset は確認します）。
+- **変更ブロック**。WIPで追跡済みテキストの変更を開き、「Gitの変更ブロックを確認…」を押します。Changesでは選んだブロックをStageし、Staged ChangesではUnstageします。保存済みの内容をGitが変換した差分で確認できます。操作後はファイル一覧に戻ります。
 - 未保存の文書の確かめ、衝突したら中止して元に戻すこと、終わったあとの読み直しは Git Changes と同じです。Merge していないブランチを消すときは、もう一度確認します。
 
 ## Git History

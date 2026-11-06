@@ -879,6 +879,29 @@ fn quick(
     );
 }
 
+pub(crate) fn apply_hunk(
+    window: &AppWindow,
+    live: &Live,
+    root: &Path,
+    patch: std::sync::Arc<crate::git_hunks::Patch>,
+    block: usize,
+) -> bool {
+    if window.get_git_busy()
+        || window.get_diff_active()
+        || live.pending.borrow().is_some()
+        || active_root().as_deref() != Some(root)
+    {
+        return false;
+    }
+    let name = if patch.staged {
+        "unstage-hunk"
+    } else {
+        "stage-hunk"
+    };
+    quick(window, live, name, move |root| patch.apply(root, block));
+    true
+}
+
 /// 確認・未保存の確かめを済ませてから、操作を走らせる。
 fn request(window: &AppWindow, live: &Live, pending: Pending) {
     if live.pending.borrow().is_some() {
@@ -1892,7 +1915,16 @@ pub(crate) fn diff_clicked(window: &AppWindow, live: &Live, index: i32, inline: 
                 change,
             };
             std::thread::spawn(move || {
-                let _ = sender.send(git_change_diff::read(&target));
+                let mut preview = git_change_diff::read(&target);
+                if inline && target.change.kind == Kind::Modified && preview.text.is_ok() {
+                    preview.patch = crate::git_hunks::Patch::read(
+                        &target.root,
+                        &target.change.path,
+                        target.staged,
+                    )
+                    .map(std::sync::Arc::new);
+                }
+                let _ = sender.send(preview);
             });
             poll(window, live);
         }

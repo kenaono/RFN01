@@ -55,6 +55,7 @@ mod git_change_diff;
 mod git_file_history;
 mod git_graph;
 mod git_history;
+mod git_hunks;
 mod git_repo_ui;
 mod git_ui;
 mod git_version;

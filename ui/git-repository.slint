@@ -61,6 +61,16 @@ export struct GitDiffRow {
     parts: [GitDiffPart],
 }
 
+export struct GitHunkLine {
+    kind: int,
+    text: string,
+}
+
+export struct GitHunkRow {
+    title: string,
+    lines: [GitHunkLine],
+}
+
 export struct GitBranchRow {
     // 0 見出し、1 ローカル、2 リモート、3 リモートの名前、4 Stash、5 案内の文。
     kind: int,
@@ -138,9 +148,13 @@ export component GitRepositoryView inherits Rectangle {
     in property <int> diff-removed;
     in property <int> diff-added;
     in property <bool> diff-working;
-    // WIP のファイルの差分では Previous／Working Copy を選ばせない（今のファイルと前回の Commit だけ）。
+    // WIP の差分は行の区分が比較元を決める。
     in property <bool> diff-switchable;
     in property <[GitDiffRow]> diff-rows;
+    in property <bool> hunks-available;
+    in property <bool> hunks-active;
+    in property <bool> hunks-staged;
+    in property <[GitHunkRow]> hunks;
     // Undo／Redo（PR 2b）。
     in property <bool> can-undo;
     in property <string> undo-tip;
@@ -195,6 +209,8 @@ export component GitRepositoryView inherits Rectangle {
     callback diff-back();
     callback diff-working-chosen(bool);
     callback diff-open-full();
+    callback open-hunks();
+    callback apply-hunk(int);
     // 右の列の幅（差分の段を Rust が折る）。
     callback diff-width-changed(float);
     // WIP の右の列から（Git Changes と同じ操作）。
@@ -1022,7 +1038,7 @@ export component GitRepositoryView inherits Rectangle {
                                         }
                                     }
                                     Text {
-                                        text: @tr("Files");
+                                        text: root.hunks-active ? @tr("Diff") : @tr("Files");
                                         color: Tok.accent;
                                         font-size: 12px;
                                         vertical-alignment: center;
@@ -1089,19 +1105,19 @@ export component GitRepositoryView inherits Rectangle {
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
-                            if root.diff-note == "": Text {
+                            if root.diff-note == "" && !root.hunks-active: Text {
                                 text: "−" + root.diff-removed;
                                 color: Tok.alert;
                                 font-size: 12px;
                                 vertical-alignment: center;
                             }
-                            if root.diff-note == "": Text {
+                            if root.diff-note == "" && !root.hunks-active: Text {
                                 text: "+" + root.diff-added;
                                 color: #2e7d32;
                                 font-size: 12px;
                                 vertical-alignment: center;
                             }
-                            if root.diff-note == "": VerticalLayout {
+                            if root.diff-note == "" && !root.hunks-active: VerticalLayout {
                                 alignment: center;
                                 TextButton {
                                     title: @tr("Open in Comparison");
@@ -1117,7 +1133,88 @@ export component GitRepositoryView inherits Rectangle {
                             background: Tok.rule;
                         }
                     }
-                    Rectangle {
+                    if root.hunks-available && !root.hunks-active: HorizontalLayout {
+                        height: 38px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: end;
+                        VerticalLayout {
+                            alignment: center;
+                            TextButton {
+                                title: @tr("Review Git Blocks…");
+                                enabled: !root.busy;
+                                clicked => { root.open-hunks(); }
+                            }
+                        }
+                    }
+                    if root.hunks-active: VerticalLayout {
+                        vertical-stretch: 1;
+                        spacing: 2px;
+                        Text {
+                            height: 30px;
+                            text: @tr("Git patch from saved versions. Unsaved edits are excluded.");
+                            color: Tok.ink-muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                alignment: start;
+                                padding: 8px;
+                                spacing: 10px;
+                                for hunk[index] in root.hunks: VerticalLayout {
+                                    spacing: 1px;
+                                    HorizontalLayout {
+                                        height: 34px;
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        spacing: 6px;
+                                        Text {
+                                            text: hunk.title;
+                                            font-family: "Consolas";
+                                            font-size: 12px;
+                                            color: Tok.ink-muted;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                            vertical-alignment: center;
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            TextButton {
+                                                title: root.hunks-staged ? @tr("Unstage Block") : @tr("Stage Block");
+                                                enabled: !root.busy;
+                                                clicked => { root.apply-hunk(index); }
+                                            }
+                                        }
+                                    }
+                                    for line in hunk.lines: Rectangle {
+                                        background: line.kind == 1 ? Tok.diff-removed : line.kind == 2 ? Tok.diff-added : Tok.paper;
+                                        HorizontalLayout {
+                                            padding: 4px;
+                                            spacing: 4px;
+                                            Text {
+                                                width: 14px;
+                                                text: line.kind == 1 ? "−" : line.kind == 2 ? "+" : "";
+                                                color: Tok.ink-muted;
+                                                horizontal-alignment: center;
+                                            }
+                                            Text {
+                                                text: line.kind == 3 ? @tr("No newline at end of file") : line.text;
+                                                color: line.kind == 3 ? Tok.ink-muted : Tok.doc-ink;
+                                                font-size: 13px;
+                                                wrap: char-wrap;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !root.hunks-active: Rectangle {
                         vertical-stretch: 1;
                         background: Tok.paper;
                         if root.diff-rows.length == 0: Text {

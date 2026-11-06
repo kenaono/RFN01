@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::file_io::{self, LoadError};
 use crate::git::{self, Change, Kind};
@@ -20,6 +21,7 @@ pub(crate) struct Preview {
     pub left_label: String,
     pub right_label: String,
     pub text: Result<(String, String), String>,
+    pub patch: Option<Arc<crate::git_hunks::Patch>>,
 }
 
 impl Preview {
@@ -82,6 +84,7 @@ pub(crate) fn read(target: &Target) -> Preview {
         text: left.and_then(|left| {
             right.map(|right| (left.unwrap_or_default(), right.unwrap_or_default()))
         }),
+        patch: None,
     }
 }
 

@@ -9,7 +9,7 @@
 //! - **出力は英語で読む**（`LC_ALL=C`）。衝突や`safe.directory`の断りを文で見分けるため。
 //!   ファイル名は`-z`と`core.quotepath=false`で生のUTF-8のまま受け取る。
 //! - **衝突したら中止して元に戻す**（書き手の判断 2026-10-03）。衝突を解く画面は持たない。
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -122,8 +122,20 @@ fn program() -> String {
 }
 
 fn run(folder: &Path, arguments: &[&str], cancel: Option<&Cancel>) -> Result<Output, GitError> {
-    let mut child = command(folder)
-        .args(arguments)
+    let mut git = command(folder);
+    git.args(arguments);
+    run_command(git, None, cancel)
+}
+
+fn run_command(
+    mut git: Command,
+    input: Option<&[u8]>,
+    cancel: Option<&Cancel>,
+) -> Result<Output, GitError> {
+    if input.is_some() {
+        git.stdin(Stdio::piped());
+    }
+    let mut child = git
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -153,6 +165,13 @@ fn run(folder: &Path, arguments: &[&str], cancel: Option<&Cancel>) -> Result<Out
             .take()
             .map(|s| Box::new(s) as Box<dyn Read + Send>),
     );
+    let input_result = input.map(|bytes| {
+        child
+            .stdin
+            .take()
+            .expect("piped Git stdin")
+            .write_all(bytes)
+    });
     let status = loop {
         if cancel.is_some_and(Cancel::cancelled) {
             let _ = child.kill();
@@ -167,6 +186,11 @@ fn run(folder: &Path, arguments: &[&str], cancel: Option<&Cancel>) -> Result<Out
     };
     let stdout = stdout.join().unwrap_or_default();
     let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+    if status.success()
+        && let Some(Err(error)) = input_result
+    {
+        return Err(GitError::Failed(error.to_string()));
+    }
     Ok(Output {
         ok: status.success(),
         stdout,
@@ -1045,6 +1069,74 @@ pub(crate) fn change_blob(root: &Path, revision: &str, path: &str) -> Result<Vec
 fn blob_output(root: &Path, revision: &str, path: &str) -> Result<Output, GitError> {
     let object = format!("{revision}:{path}");
     run(root, &["cat-file", "blob", &object], None)
+}
+
+pub(crate) fn index_path(root: &Path) -> Result<PathBuf, GitError> {
+    let path = checked(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        None,
+    )?;
+    Ok(PathBuf::from(path.trim_end_matches(['\r', '\n'])))
+}
+
+pub(crate) fn hunk_patch(root: &Path, path: &str, staged: bool) -> Result<Vec<u8>, GitError> {
+    let mut git = command(root);
+    git.args([
+        "--literal-pathspecs",
+        "-c",
+        "core.quotepath=true",
+        "diff",
+        "--patch",
+        "--full-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--no-relative",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--unified=3",
+        "--inter-hunk-context=0",
+        "--diff-algorithm=myers",
+        "--no-indent-heuristic",
+    ]);
+    if staged {
+        git.args(["--cached", "HEAD"]);
+    }
+    git.args(["--", path]);
+    let output = run_command(git, None, None)?;
+    if output.ok {
+        Ok(output.stdout)
+    } else {
+        Err(output.failure())
+    }
+}
+
+pub(crate) fn apply_hunk(
+    root: &Path,
+    index: &Path,
+    patch: &[u8],
+    reverse: bool,
+) -> Result<(), GitError> {
+    let mut git = command(root);
+    git.env("GIT_INDEX_FILE", index).args([
+        "-c",
+        "apply.ignoreWhitespace=no",
+        "apply",
+        "--cached",
+        "--whitespace=nowarn",
+    ]);
+    if reverse {
+        git.arg("--reverse");
+    }
+    git.arg("-");
+    let output = run_command(git, Some(patch), None)?;
+    if output.ok {
+        Ok(())
+    } else {
+        Err(output.failure())
+    }
 }
 
 /// 途中で止まった操作（Merge・Revert・Cherry-pick）が残っていれば`--abort`で戻し、衝突と答える。
