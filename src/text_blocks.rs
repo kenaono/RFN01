@@ -115,6 +115,8 @@ pub struct Typography {
     /// what a name nobody has set looks like.
     /// E11: bold, italic, strike, background, heading rule bits, Body/H1..H6.
     pub decorations: [u8; 7],
+    /// Editor Panel の文字に引く下線。
+    pub underline: bool,
     pub backgrounds: [[f32; 3]; 7],
     pub body_font: String,
     pub heading_font: [String; MAX_HEADING_LEVEL],
@@ -241,6 +243,7 @@ impl Typography {
             ruby_offset: 0.0,
             heading_scale: [1.0; MAX_HEADING_LEVEL],
             decorations: [0; 7],
+            underline: false,
             backgrounds: [DEFAULT_PAPER; 7],
             body_font: DEFAULT_BODY_FONT.to_owned(),
             heading_font: [const { String::new() }; MAX_HEADING_LEVEL]

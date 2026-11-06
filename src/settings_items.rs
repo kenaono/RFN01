@@ -559,21 +559,21 @@ fn items() -> Vec<Item> {
         "Auto Backup 名前"
     );
 
-    for (owner, ja, route, tab, underline) in [
-        ("Terminal", "Terminal", "style.terminal", 1, true),
+    for (owner, ja, route, tab, editor_panel) in [
+        ("Terminal", "Terminal", "style.terminal", 1, false),
         (
             "Editor Panel",
             "Editor Panel",
             "style.editor-panel",
             1,
-            false,
+            true,
         ),
         (
             "Terminal Panel",
             "Terminal Panel",
             "style.terminal-panel",
             3,
-            true,
+            false,
         ),
     ] {
         for (field, field_ja, field_en) in [
@@ -587,7 +587,7 @@ fn items() -> Vec<Item> {
             ("underline", "下線", "Underline"),
             ("random", "ランダム背景", "Random Background"),
         ] {
-            if field != "underline" || underline {
+            if editor_panel || !matches!(field, "ink" | "underline") {
                 add(
                     &format!("{route}.{field}"),
                     &format!("{ja}の{field_ja}"),
@@ -668,7 +668,7 @@ fn items() -> Vec<Item> {
                 (1, "斜体", "Italic"),
                 (2, "取消線", "Strikethrough"),
                 (3, "背景の表示", "Background Enabled"),
-                (4, "罫線", "Rule"),
+                (4, "下線", "Underline"),
             ] {
                 sheet!(
                     route,

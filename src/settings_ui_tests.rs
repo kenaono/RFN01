@@ -2012,6 +2012,12 @@ fn the_setting_catalog_covers_persisted_preferences_and_resolves_its_routes() {
         .map(|item| item.id.as_str())
         .collect();
     assert_eq!(items.len(), settings_items::Item::all().count());
+    assert!(items.contains("style.editor-panel.ink"));
+    assert!(items.contains("style.editor-panel.underline"));
+    for shell in ["style.terminal", "style.terminal-panel"] {
+        assert!(!items.contains(format!("{shell}.ink").as_str()));
+        assert!(!items.contains(format!("{shell}.underline").as_str()));
+    }
     for (key, _) in settings_values(&harness.window) {
         let outside_settings = [
             "print.size",

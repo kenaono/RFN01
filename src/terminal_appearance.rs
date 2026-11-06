@@ -25,19 +25,18 @@ pub(crate) fn default_style(window: &AppWindow, kind: usize) -> PanelStyle {
         })
 }
 
-/// 外観から、升目を組む見た目を作る（倍率は掛けない）。
+/// Terminal と Terminal Panel の升目の外観。既定文字色は表示時の背景から決める。
 pub(crate) fn look_of(style: &PanelStyle) -> cells::TerminalLook {
     let paper = channels(style.paper);
     cells::TerminalLook {
         family: style.family.to_string(),
         font_size: style.size.clamp(8, 72) as f32,
         paper,
-        ink: channels(style.ink),
+        ink: readable_ink(DEFAULT_INK, paper),
         palette: cells::TerminalLook::palette_for(paper),
         transparent: style.transparency > 0,
         bold: style.bold,
         italic: style.italic,
-        underline: style.underline,
         ..Default::default()
     }
 }
@@ -48,7 +47,9 @@ pub(crate) fn random_style(window: &AppWindow, kind: usize) -> Option<PanelStyle
         return None;
     }
     style.paper = slint_colour(random_paper(style.random == 1, random_seed()));
-    style.ink = slint_colour(readable_ink(channels(style.ink), channels(style.paper)));
+    if kind == 1 {
+        style.ink = slint_colour(readable_ink(channels(style.ink), channels(style.paper)));
+    }
     style.paper_own = true;
     Some(style)
 }
@@ -210,9 +211,9 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
             }
         };
         window.set_appearance_default(scope == 0);
-        window.set_appearance_underline_allowed(
-            !matches!(&target, Target::Default(1))
-                && !(scope == 2 && PaneId::from_index(at).screen(&window).terminal),
+        window.set_appearance_editor_panel(
+            matches!(&target, Target::Default(1))
+                || (scope == 2 && PaneId::from_index(at).screen(&window).terminal),
         );
         window.set_appearance_title(format!("{title} — {}", pick("外観", "Appearance")).into());
         window.set_appearance_style(style);

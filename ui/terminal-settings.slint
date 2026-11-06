@@ -130,5 +130,5 @@ export component TerminalSettings inherits VerticalLayout {
         font-size: 11px;
     }
     if root.show-terminal-style: PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Terminal"; style: root.terminal-style; changed style => { root.terminal-style-edited(self.style); } defaults: true; }
-    if root.show-editor-panel-style: PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Editor Panel"; style: root.editor-panel-style; changed style => { root.editor-panel-style-edited(self.style); } defaults: true; underline-allowed: false; }
+    if root.show-editor-panel-style: PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; heading: "Editor Panel"; style: root.editor-panel-style; changed style => { root.editor-panel-style-edited(self.style); } defaults: true; editor-panel: true; }
 }

@@ -1206,6 +1206,9 @@ msgstr "未登録のプロファイルです。「適用」で登録します。
 msgid "Underline"
 msgstr "下線"
 
+msgid "Text color follows the background."
+msgstr "文字色は背景に合わせて自動で決まります。"
+
 msgid "Editor"
 msgstr "Editor"
 

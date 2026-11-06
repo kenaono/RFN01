@@ -2305,7 +2305,7 @@ export component TextRow inherits AppearanceCard {
             swatch: root.background-on ? root.background-colour : root.paper-colour;
             clicked => { background-palette.show(); }
         }
-        if root.heading: TextButton { title: @tr("Rule"); role: root.rule-on ? Role.primary : Role.normal; clicked => { root.decoration-toggled(4, root.rule-on); } }
+        if root.heading: TextButton { title: @tr("Underline"); role: root.rule-on ? Role.primary : Role.normal; clicked => { root.decoration-toggled(4, root.rule-on); } }
         Rectangle { horizontal-stretch: 1; }
     }
 

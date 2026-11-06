@@ -236,6 +236,7 @@ fn editor_panel_uses_source_engine_document_and_selection() {
         screen.below_kind = 2;
         screen.below_height = 240.;
         screen.panel_style = terminal_appearance::initial_style();
+        screen.panel_style.underline = true;
     });
     terminal_panels::ensure(&h.window, &h.live, owner);
     let entry = terminal_panels::current(&h.live, owner).unwrap();
@@ -245,6 +246,8 @@ fn editor_panel_uses_source_engine_document_and_selection() {
     let id = entry.borrow().source_id.unwrap();
     assert!(id.screen(&h.window).embedded_panel);
     assert!(!id.screen(&h.window).preview && !id.vertical(&h.window));
+    assert!(pane_typography(&h.window, id).underline);
+    assert!(!pane_typography(&h.window, owner).underline);
     assert!(Rc::ptr_eq(&h.live.states.document(id), &document));
     let state = h.live.states.of(id);
     assert!(Rc::ptr_eq(&state, &entry.borrow().view));
@@ -1381,6 +1384,7 @@ fn terminal_appearance_roundtrip_and_pane_reset_preserve_formatting() {
     style.transparency = 65;
     style.bold = true;
     style.italic = true;
+    style.underline = true;
     style.paper = Color::from_rgb_u8(20, 40, 60);
     let encoded = terminal_appearance::encode(&style);
     assert_eq!(
@@ -1400,7 +1404,33 @@ fn terminal_appearance_roundtrip_and_pane_reset_preserve_formatting() {
     let style = entry.borrow().style.clone().unwrap();
     assert!(!style.paper_own);
     assert!(style.bold && style.italic);
+    assert!(style.underline);
     assert_eq!(style.transparency, 65);
+}
+
+#[test]
+fn terminal_surfaces_choose_default_ink_from_their_own_paper() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    let saved_ink = Color::from_rgb_u8(255, 0, 0);
+    id.update_screen(&h.window, |screen| {
+        screen.front_style = PanelStyle {
+            paper: Color::from_rgb_u8(0, 0, 0),
+            ink: saved_ink,
+            ..terminal_appearance::initial_style()
+        };
+        screen.panel_style = PanelStyle {
+            paper: Color::from_rgb_u8(255, 255, 255),
+            ink: saved_ink,
+            ..terminal_appearance::initial_style()
+        };
+    });
+    let front = terminal_appearance::look(&h.window, id, TerminalSpot::Front);
+    let below = terminal_appearance::look(&h.window, id, TerminalSpot::Below);
+    assert_eq!(front.ink, DEFAULT_INK.map(|channel| 1.0 - channel));
+    assert_eq!(below.ink, DEFAULT_INK);
+    assert_eq!(id.screen(&h.window).front_style.ink, saved_ink);
+    assert_eq!(id.screen(&h.window).panel_style.ink, saved_ink);
 }
 
 #[test]

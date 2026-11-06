@@ -1150,7 +1150,7 @@ export component AppWindow inherits Window {
     callback appearance-requested(int, int);
     callback appearance-applied();
     callback appearance-reset();
-    in-out property <bool> appearance-underline-allowed: true;
+    in-out property <bool> appearance-editor-panel;
     in-out property <[string]> shell-profile-names;
     in-out property <int> shell-profile-index;
     in-out property <bool> shell-profile-default;
@@ -7469,7 +7469,7 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 16px; spacing: 8px; alignment: start;
                 Text { text: root.appearance-title; color: Tok.ink; height: 28px; vertical-stretch: 0; }
-                PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; style <=> root.appearance-style; defaults: root.appearance-default; underline-allowed: root.appearance-underline-allowed; }
+                PanelStyleEditor { font-list-requested => { root.font-list-requested(); } font-names: root.font-names; style <=> root.appearance-style; defaults: root.appearance-default; editor-panel: root.appearance-editor-panel; }
                 HorizontalLayout {
                     TextButton { title: @tr("Default"); clicked => { root.appearance-reset(); } }
                     Rectangle { horizontal-stretch: 1; }

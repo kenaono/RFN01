@@ -15622,6 +15622,7 @@ fn pane_typography(window: &AppWindow, id: PaneId) -> Typography {
         spec.paper = channels(style.paper);
         spec.line_numbers = false;
         spec.ruby_room = false;
+        spec.underline = style.underline;
         spec.decorations = [u8::from(style.bold) | (u8::from(style.italic) << 1); 7];
     }
     // 追加要件 2026-09-15: 壁紙を敷いているあいだ、紙は面が1枚だけ透かして塗る。
@@ -19810,7 +19811,7 @@ fn refresh_terminal(
             channel.to_bits().hash(&mut hasher);
         }
         look.family.hash(&mut hasher);
-        (look.transparent, look.bold, look.italic, look.underline).hash(&mut hasher);
+        (look.transparent, look.bold, look.italic).hash(&mut hasher);
         hasher.finish()
     };
     let shape = (

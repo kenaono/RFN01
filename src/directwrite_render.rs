@@ -4367,7 +4367,7 @@ fn apply_typography(
 ) -> Result<()> {
     let spacing = typography.character_spacing;
     let has_spacing = spacing.abs() > f32::EPSILON;
-    if !has_spacing && runs.is_empty() && typography.decorations[0] & 7 == 0 {
+    if !has_spacing && runs.is_empty() && typography.decorations[0] & 7 == 0 && !typography.underline {
         return Ok(());
     }
     let layout1 = if has_spacing {
@@ -4400,6 +4400,9 @@ fn apply_typography(
             all,
         )?;
         layout.SetStrikethrough(body & 4 != 0, all)?;
+        if typography.underline {
+            layout.SetUnderline(true, all)?;
+        }
         if let Some(layout1) = &layout1 {
             set_character_spacing(layout1, typography.font_size, spacing, 0, utf16_len)?;
         }
@@ -5682,6 +5685,7 @@ fn hash_typography(typography: &Typography, hasher: &mut DefaultHasher) {
     // belongs here rather than only in the tile's signature. Two specs that
     // differ by a font are not the same layout and never were.
     typography.decorations.hash(hasher);
+    typography.underline.hash(hasher);
     for background in typography.backgrounds {
         for channel in background {
             channel.to_bits().hash(hasher);
@@ -12806,6 +12810,41 @@ mod tests {
     }
 
     #[test]
+    fn editor_panel_underline_reaches_the_pixels_of_plain_text() {
+        let styled = StyledText::plain("Editor Panel");
+        let mut spec = Typography::new(24.0);
+        let mut engine = engine_set(WritingMode::Horizontal, styled, &spec);
+        let render = |engine: &mut TextEngine| {
+            let tiles = engine.visible_tiles(
+                -engine.flow_bounds().0,
+                engine.total_flow_size() as f32,
+                0,
+                0.0,
+                LINE_EXTENT as f32,
+            );
+            let mut drawn = DrawnTiles::default();
+            engine.render_tiles(&tiles, &[], &mut drawn).unwrap();
+            drawn.tiles.remove(0).3
+        };
+        let plain = render(&mut engine);
+        spec.underline = true;
+        engine
+            .update(
+                StyledText::plain("Editor Panel"),
+                LineFit::Extent(LINE_EXTENT),
+                &spec,
+            )
+            .unwrap();
+        let underlined = render(&mut engine);
+        let added_ink = plain
+            .chunks_exact(4)
+            .zip(underlined.chunks_exact(4))
+            .filter(|(before, after)| before[0] > 200 && after[0] < 180)
+            .count();
+        assert!(added_ink > 10, "expected the underline to add ink");
+    }
+
+    #[test]
     fn links_draw_normal_or_invalid_ink_in_both_directions() {
         for mode in [WritingMode::Horizontal, WritingMode::Vertical] {
             for (invalid, dark) in [(false, false), (true, false), (false, true)] {
@@ -13522,7 +13561,6 @@ pub mod cells {
         pub transparent: bool,
         pub bold: bool,
         pub italic: bool,
-        pub underline: bool,
         pub font_size: f32,
         /// Multiplier on the font's own line height. **Terminals are set tight** —
         /// the grid is the reading aid, not the leading.
@@ -13587,7 +13625,6 @@ pub mod cells {
                 transparent: false,
                 bold: false,
                 italic: false,
-                underline: false,
                 font_size: 15.0,
                 line_spacing: 1.0,
                 paper: crate::text_blocks::DEFAULT_PAPER,
@@ -13899,7 +13936,7 @@ pub mod cells {
                             target.FillRectangle(&rect, &brush);
                         }
                         if run.attrs.hidden || run.text.trim().is_empty() {
-                            if run.attrs.underline || look.underline {
+                            if run.attrs.underline {
                                 brush.SetColor(&colour(foreground));
                                 let line_rect = D2D_RECT_F {
                                     top: top + cell.line - 2.0,
@@ -13924,7 +13961,7 @@ pub mod cells {
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
                             DWRITE_MEASURING_MODE_NATURAL,
                         );
-                        if run.attrs.underline || look.underline {
+                        if run.attrs.underline {
                             let line_rect = D2D_RECT_F {
                                 top: top + cell.line - 2.0,
                                 bottom: top + cell.line - 1.0,

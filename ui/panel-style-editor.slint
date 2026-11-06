@@ -8,7 +8,7 @@ export component PanelStyleEditor inherits VerticalLayout {
     in property <[string]> font-names;
     callback font-list-requested();
     in property <string> heading;
-    in property <bool> underline-allowed: true;
+    in property <bool> editor-panel: false;
     in property <bool> defaults: false;
     spacing: 10px;
     vertical-stretch: 0;
@@ -42,6 +42,7 @@ export component PanelStyleEditor inherits VerticalLayout {
     AppearanceCard {
         AppearanceFontRow {
             family: root.style.family;
+            show-ink: root.editor-panel;
             ink: root.style.ink;
             ink-chosen(colour) => { root.style.ink = colour; }
             chose-font => { root.font-list-requested(); font-menu.show(); }
@@ -76,8 +77,14 @@ export component PanelStyleEditor inherits VerticalLayout {
             Text { text: "px"; color: Tok.ink-muted; vertical-alignment: center; }
             CheckBox { text: @tr("Bold"); checked <=> root.style.bold; }
             CheckBox { text: @tr("Italic"); checked <=> root.style.italic; }
-            if root.underline-allowed: CheckBox { text: @tr("Underline"); checked <=> root.style.underline; }
+            if root.editor-panel: CheckBox { text: @tr("Underline"); checked <=> root.style.underline; }
             Rectangle { horizontal-stretch: 1; }
+        }
+        if !root.editor-panel: Text {
+            text: @tr("Text color follows the background.");
+            color: Tok.ink-muted;
+            font-size: 11px;
+            wrap: word-wrap;
         }
     }
 }
