@@ -1898,8 +1898,7 @@ fn the_key_list_is_searched_with_full_width_letters_too() {
     }
 }
 
-/// RFN01-66（2026-11-05）: 古いTerminalの値（地・字・書体・大きさ）は、読めば外観の既定へ移り、
-/// もう書かない。後ろに外観の値があれば、そちらが勝つ。
+/// 現行の設定を反映し、廃止済みの Terminal 外観キーを無視することを確認する。
 #[test]
 fn current_settings_take_effect_and_retired_keys_do_not() {
     let (harness, _) = crate::saving::Harness::new(|weak| OpenDocument::untitled(1, weak));

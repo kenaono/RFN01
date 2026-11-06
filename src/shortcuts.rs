@@ -795,8 +795,7 @@ fn passes_terminal(command: i32) -> bool {
         })
 }
 
-/// 割り当ての一覧のid（アクションの表の位置）で、その操作を走らせる。キーからも、コマンド
-/// パレットからも（RFN01-87）——**同じ道**（`menu_commands::run`）で、前提もそこで確かめる。
+/// キーに割り当てたアクションを表の位置から引き、共通の実行入口へ渡す。
 pub(crate) fn run_command(app: &AppWindow, live: &Live, pane: crate::PaneId, command: i32) {
     let Ok(id) = usize::try_from(command) else {
         return;

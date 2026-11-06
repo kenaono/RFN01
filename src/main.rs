@@ -2011,13 +2011,11 @@ fn main() -> Result<(), slint::PlatformError> {
             window.invoke_folder_search_finished();
         });
     };
-    // 要件 12: the quick draft's window, once it has been asked for. **Held
-    // here rather than by the window itself**, so that asking twice brings the
-    // one that is open forward.
     // 要件 11.6: the editor's own list of strings, kept apart from Windows'
     // clipboard. It belongs to the run rather than to a document, because a
     // kill taken from one document is worth putting into another.
     let kill_ring: Rc<RefCell<Kills>> = Rc::default();
+    // Quick Draft を保持し、再度開く操作で既存のウィンドウを前面へ出す（要件 12）。
     let draft = Rc::new(RefCell::new(quick_draft::QuickDraftWindow::default()));
     let live = Live {
         closed_tabs: Rc::default(),
@@ -8258,22 +8256,6 @@ const SEARCHED_FILES: usize = 5_000;
 const REPORTED_HITS: usize = 500;
 const HITS_PER_FILE: usize = 50;
 
-/// Search every file in the work folder (要件 7.7).
-///
-/// **Asked for here and answered somewhere else.** This is the one place the
-/// editor reads many files at once, and 要件 2 wants that off the UI thread —
-/// so what happens here is that a question is written down and handed over.
-/// The answer comes back through [`collect_search`], turns of the event loop
-/// later, and may be for a word the writer has already stopped typing.
-///
-/// The bounds stay. They were the whole defence when this ran on the UI thread
-/// and they are still what makes a work folder somebody dropped a repository
-/// into merely unhelpful: a list of ten thousand lines is no better than a
-/// wait, whichever thread built it.
-///
-/// **The old way is still here**, for a run where the thread could not be
-/// started. It is the same search on the same data; only who waits for it
-/// differs.
 /// RFN01-70: 検索パネルの探し方。本文の検索帯と同じ3つ（範囲内検索は無い）。
 fn folder_rules(window: &AppWindow) -> find::Rules {
     find::Rules {
@@ -8296,6 +8278,8 @@ fn folder_search_roots(live: &Live, needle: &str) -> Vec<PathBuf> {
     }
 }
 
+/// 対象フォルダの検索をワーカーに依頼し、結果は collect_search で受け取る。
+/// ワーカーに送れない場合は、その場で同じ検索を実行する。
 fn search_work_folder(window: &AppWindow, live: &Live) {
     // RFN01-75: the tree's search never reaches outside the tree. The Search
     // panel's may — that is what narrowing it to a folder is for.

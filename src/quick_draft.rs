@@ -416,10 +416,6 @@ fn show_tabs(window: &QuickDraft, editor: &Rc<Editor>, target: &Rc<RefCell<Strin
 }
 
 /// Put what the window holds into the history, and leave the window empty.
-///
-/// **The one way a draft leaves the window**, whether it was cleared, sent,
-/// copied away or closed on. Nothing here can lose text: it is written to the
-/// history before it is taken off the screen.
 fn retire(window: &QuickDraft, history: &Rc<RefCell<Vec<String>>>, target: &str) {
     let text = window.get_text().to_string();
     {

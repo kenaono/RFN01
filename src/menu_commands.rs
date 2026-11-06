@@ -1461,9 +1461,7 @@ fn text_state(window: &AppWindow, live: &Live, t: &Target) -> (bool, bool) {
     (text, editable)
 }
 
-/// RFN01-66 第2弾（書き手と合意 2026-11-05）: メニューの中身。**Windowsのメニューにする前の形**
-/// で、タイトルバーのメニュー（[`native`]）、コマンドパレット（[`menu_snapshot`]）、分類が
-/// 開けるかの判定（[`menu_opens`]）が同じものを読む。押せるかは組むときに[`Scene::enabled`]で決める。
+/// Windows のメニューに変換する前の行。押せるかは Scene::enabled で決める。
 pub(crate) enum Item {
     Row {
         ja: String,

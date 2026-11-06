@@ -650,8 +650,7 @@ pub fn session_tab(tab: &PaneTab, keep_output: bool) -> app_data::SessionTab {
             .iter()
             .filter_map(|shell| session_shell(&shell.borrow(), keep_output))
             .collect(),
-        // 要件 7.9（2026-09-08）: この文書のモード。**名前で覚える**——番号は
-        // モードを作り消しすれば別のものを指す。
+        // このタブの単語チェックモードを固定 ID で保存する（要件 7.9）。
         word_mode: tab.word_mode,
         origin: file.path().map(Path::to_path_buf),
         untitled: file.untitled_number(),
