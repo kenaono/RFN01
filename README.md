@@ -1384,7 +1384,7 @@ PCにインストールされている`git`を使います。Gitが無い（イ�
 - **Commit の▾** に Stash All。しまった変更は Stashes の行に並び、行の右端の釦で Pop（取り出してStashを消す）、右クリックで Apply／Pop／Drop…。Apply・Pop は変更が無いときだけできます。
 - Gitの管理下にないフォルダでは「Create Git Repository」が出ます。
 - Pull・Sync・ブランチの切り替え・Stashの取り出しの前に、そのリポジトリの未保存の文書を保存するか破棄するかを訊きます。Commit の前は保存するかを訊きます。終わったあと、変わったファイルのTABを読み直します。
-- **衝突したら中止して元に戻し**、ダイアログで知らせます。衝突はTerminalで解いてください。
+- **Merge・Merge方式のPullが衝突したとき**は、Gitの途中状態を残します。Git ChangesまたはGit Repositoryの「Mergeの解消を開く」から再開できます。Terminalから始めたMergeも、アプリの起動後やGitの再読込時に認識します。
 - Push・Pullでサインインが要るときは、Git Credential Managerの窓が出ます。Fetch・Pull・Push・Sync は面の Cancel で止められます。
 - 面が出ているあいだは5秒ごとに読み直すので、Terminalで打った`git`も映ります。
 
@@ -1397,10 +1397,12 @@ File の「Git Repository…」か、Git Changes の見出しの右端のアイ�
 - **右の列**：選んだ Commit の詳細と変更したファイル。**ファイルを押すと右の列が広がって差分が出ます**（消した行は赤、足した行は緑、行の中で変わった字は濃く塗ります。変わった所の前後3行だけを出します）。上の「Previous Commit／Working Copy」で比べる相手を替え、「Open in Comparison」で左右に並べる比較の画面を開きます（閉じるとここへ戻ります）。「‹ Files」で一覧へ戻ります。「// WIP」のファイルを押すと、Git Changesと同じ比較元の差分が出ます。「Open in Comparison」でもその差分の内容が引き継がれます。
 - **Undo／Redo**：アプリを起動してからの Git の操作（Commit・Amend・Checkout・Merge・Pull・Revert・Cherry-pick・Reset・ブランチの作成と削除・Stash All と Pop）を、リポジトリごとに戻せます。マウスを載せると何を戻すかが出ます。Push と Fetch は戻せません。Terminal などで外から HEAD を動かしたあとや、Push 済みの Commit を外すことになるときは使えません。Reset — Delete Changes を戻しても、消えた変更は戻りません。
 - **Commit の右クリック**：New Branch…、Revert（今のブランチの Commit）、Cherry-pick（ほかのブランチの Commit）、Reset — Keep Changes／Delete Changes…（今のブランチの Commit。Delete Changes と、Push 済みの Commit を外す Reset は確認します）。
-- **変更ブロック**。WIPで追跡済みテキストの変更を開き、「Gitの変更ブロックを確認…」を押します。Changesでは選んだブロックをStageし、Staged ChangesではUnstageします。保存済みの内容をGitが変換した差分で確認できます。操作後はファイル一覧に戻ります。
+- **変更ブロック**。WIPで追跡済みテキストの変更を開き、「Gitの変更ブロックを確認…」を押します。ChangesではブロックをStageし、Staged ChangesではUnstageします。見出しを選ぶと、コマンドパレットからもそのブロックに操作できます。保存済みの内容をGitが変換した差分で確認できます。操作後はファイル一覧に戻ります。
 - **履歴検索**。Git Repositoryの上部からメッセージ、作者、SHA、パスで検索します。グラフの表示件数に関係なく、ローカル・リモートブランチとHEADの履歴を探し、結果からコミットの詳細と差分を開けます。パスはリポジトリのルートから指定します。
 - **二点比較**。コミットの詳細かブランチの右クリックから「比較元に設定」を押し、次のコミットかブランチで「比較元との差分」を選びます。両端のコミットIDと変更ファイルを表示し、ファイルを選ぶとその二点の差分が開きます。
-- 未保存の文書の確かめ、衝突したら中止して元に戻すこと、終わったあとの読み直しは Git Changes と同じです。Merge していないブランチを消すときは、もう一度確認します。
+- **コマンドパレット**。Git RepositoryでCtrl+Shift+Pを押すと、表示中の差分を比較画面で開く操作、履歴検索、選択中のコミットの二点比較など、その場面で使えるGitアクションを実行できます。
+- **Mergeの解消**。未解決ファイルを選んで共通祖先・現在側・取り込み側・作業中の結果を切り替えます。「解消結果を編集」で作業ファイルを文書タブに開き、保存してから解消画面でStageします。片側が削除したファイルは、残った版を編集・Stageするか、確認して削除を採用できます。未解決ファイルがなくなったら「Mergeを続行」でマージコミットを作ります。「Mergeを中止…」は、解消結果が失われることを確認してからGitに中止を依頼します。これらの操作は同じ画面でコマンドパレットからも実行できます。
+- 未保存の文書の確かめと、操作後の読み直しは Git Changes と同じです。Stash・Revert・Cherry-pickの衝突は自動で中止します。Mergeしていないブランチを消すときは、もう一度確認します。
 
 ## Git History
 

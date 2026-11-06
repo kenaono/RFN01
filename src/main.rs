@@ -56,6 +56,7 @@ mod git_file_history;
 mod git_graph;
 mod git_history;
 mod git_hunks;
+mod git_merge_ui;
 mod git_repo_ui;
 mod git_ui;
 mod git_version;
@@ -14216,6 +14217,8 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     // The question took the keyboard away from the pane to ask (6.14).
     if window.get_question_return_to_tree() {
         tree_actions::restore_focus(window);
+    } else if window.get_git_repo_active() && !window.get_diff_active() {
+        git_repo_ui::regain_focus(window);
     } else {
         restore_editor_focus(window);
     }

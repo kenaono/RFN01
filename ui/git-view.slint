@@ -76,6 +76,10 @@ component Picker inherits Rectangle {
 }
 
 export component GitChangesView inherits Rectangle {
+    in property <bool> merging;
+    in property <string> resolve-title;
+    in property <bool> resolve-allowed;
+    callback resolve-merge();
     // 0 案内の文だけ、1 Gitの管理下にない（Create Git Repository）、2 リポジトリ。
     in property <int> mode;
     in property <string> note;
@@ -190,7 +194,24 @@ export component GitChangesView inherits Rectangle {
             vertical-stretch: 1;
         }
 
-        if root.mode == 2: VerticalLayout {
+        if root.mode == 2 && root.merging: VerticalLayout {
+            spacing: 8px;
+            Text {
+                text: @tr("Merge in progress");
+                color: Tok.ink-strong;
+                font-weight: 650;
+            }
+            TextButton {
+                title: root.resolve-title;
+                wide: true;
+                role: Role.primary;
+                enabled: root.resolve-allowed;
+                clicked => { root.resolve-merge(); }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+
+        if root.mode == 2 && !root.merging: VerticalLayout {
             spacing: 6px;
             vertical-stretch: 1;
 

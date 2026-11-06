@@ -50,6 +50,7 @@ struct Snapshot {
     /// `None`はGitの管理下にない。
     root: Option<PathBuf>,
     status: Status,
+    merge: Option<git::MergeState>,
     stashes: Vec<Stash>,
     branches: Vec<String>,
 }
@@ -147,6 +148,11 @@ pub(crate) enum Action {
     Switch(String),
     Pull,
     Sync,
+    ResolveMerge {
+        state: git::MergeState,
+        path: Option<String>,
+        resolution: git::Resolution,
+    },
     StashApply {
         name: String,
         pop: bool,
@@ -221,6 +227,7 @@ impl Action {
             Action::Reset { hard: false, .. }
             | Action::DeleteBranch { .. }
             | Action::PushBranch(_)
+            | Action::ResolveMerge { .. }
             | Action::History { files: false, .. } => Guard::None,
             Action::History { files: true, .. } => Guard::SaveOrDiscard,
             Action::Commit { .. } | Action::StashAll(_) => Guard::SaveOnly,
@@ -279,6 +286,13 @@ pub(crate) fn workspace_folders(live: &Live) -> Vec<PathBuf> {
 
 pub(crate) fn active_root() -> Option<PathBuf> {
     PANE.with(|pane| root_of(&pane.borrow()))
+}
+
+pub(crate) fn merge_snapshot() -> Option<(PathBuf, git::MergeState)> {
+    PANE.with(|pane| {
+        let pane = pane.borrow();
+        Some((root_of(&pane)?, pane.snapshot.as_ref()?.merge.clone()?))
+    })
 }
 
 fn root_of(pane: &Pane) -> Option<PathBuf> {
@@ -412,6 +426,7 @@ fn read(folder: PathBuf) -> Result<Snapshot, GitError> {
             folder,
             root: None,
             status: Status::default(),
+            merge: None,
             stashes: Vec::new(),
             branches: Vec::new(),
         });
@@ -419,6 +434,7 @@ fn read(folder: PathBuf) -> Result<Snapshot, GitError> {
     Ok(Snapshot {
         folder,
         status: git::status(&root)?,
+        merge: git::merge_state(&root)?,
         stashes: git::stashes(&root)?,
         branches: git::branches(&root)?,
         root: Some(root),
@@ -551,7 +567,7 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
     let outcome = match &result {
         Ok(_) => "ok".to_owned(),
         Err(GitError::Cancelled) => "cancelled".to_owned(),
-        Err(GitError::Conflict) => "conflict".to_owned(),
+        Err(GitError::Conflict | GitError::MergeStopped) => "conflict".to_owned(),
         Err(_) => "failed".to_owned(),
     };
     live.cache
@@ -573,6 +589,7 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
             }
         }
         Err(GitError::Cancelled) => window.tell(GitError::Cancelled.to_string().into()),
+        Err(GitError::MergeStopped) => window.tell(GitError::MergeStopped.to_string().into()),
         // Merge されていないブランチは、もう一度訊いてから`-D`で消す。
         Err(GitError::NotMerged(name)) => request(
             window,
@@ -590,7 +607,7 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
 }
 
 /// 知らせるだけの問い。Gitの文は長いので、帯ではなくダイアログで見せる。
-fn notice(window: &AppWindow, live: &Live, text: String) {
+pub(crate) fn notice(window: &AppWindow, live: &Live, text: String) {
     if live.pending.borrow().is_some() {
         window.tell(text.into());
         return;
@@ -717,6 +734,7 @@ fn render(window: &AppWindow) {
         window.set_git_rows(ModelRc::new(VecModel::from(rows)));
         pane.lines = lines;
     });
+    crate::git_merge_ui::publish(window);
 }
 
 fn build_rows(
@@ -875,7 +893,10 @@ fn quick(
         Vec::new(),
         After::Nothing,
         name,
-        move |root, _| work(root).map(|()| String::new()),
+        move |root, _| {
+            git::require_no_merge(root)?;
+            work(root).map(|()| String::new())
+        },
     );
 }
 
@@ -904,7 +925,19 @@ pub(crate) fn apply_hunk(
 
 /// 確認・未保存の確かめを済ませてから、操作を走らせる。
 fn request(window: &AppWindow, live: &Live, pending: Pending) {
-    if live.pending.borrow().is_some() {
+    if live.pending.borrow().is_some() || window.get_git_busy() {
+        return;
+    }
+    if matches!(&pending.action, Action::ResolveMerge { .. }) {
+        if !edited_in_scope(live, &pending).is_empty() {
+            notice(window, live, pick(
+                "対象に未保存の文書があります。保存してからやり直してください。",
+                "Save the affected open documents before resolving the merge.",
+            ).to_owned());
+            return;
+        }
+    } else if merge_snapshot().is_some_and(|(root, _)| root == pending.root) {
+        notice(window, live, GitError::MergeStopped.to_string());
         return;
     }
     if !pending.confirmed
@@ -914,6 +947,12 @@ fn request(window: &AppWindow, live: &Live, pending: Pending) {
             Action::Commit { .. } => (pick("Amendする", "Amend"), -1),
             Action::StashDrop(_) => (pick("Dropする", "Drop"), 0),
             Action::Merge { .. } => (pick("Mergeする", "Merge"), -1),
+            Action::ResolveMerge { resolution: git::Resolution::Abort, .. } => {
+                (pick("Mergeを中止", "Abort Merge"), 0)
+            }
+            Action::ResolveMerge { resolution: git::Resolution::Delete(_), .. } => {
+                (pick("削除してStage", "Delete and Stage"), 0)
+            }
             Action::Reset { hard: true, .. } => {
                 (pick("Resetして変更を消す", "Reset and Delete Changes"), 0)
             }
@@ -993,6 +1032,17 @@ fn confirmation(pending: &Pending) -> Option<String> {
             "{name}を捨てますか？\n\n元に戻せません。",
             "Drop {name}?\n\nThis cannot be undone."
         )),
+        Action::ResolveMerge { resolution: git::Resolution::Abort, .. } => {
+            let root = pending.root.display();
+            Some(say!(
+                "{root} のMergeを中止しますか？\n\nGitがMerge前の状態への復元を試みます。衝突の解消のために保存・Stageした変更も失われます。",
+                "Abort the merge in {root}?\n\nGit will try to restore the pre-merge state. Saved and staged conflict resolutions will be discarded."
+            ))
+        }
+        Action::ResolveMerge { path: Some(path), resolution: git::Resolution::Delete(_), .. } => Some(say!(
+            "{path} の削除を採用しますか？\n\n現在の作業ファイルを削除し、削除をStageします。",
+            "Accept deletion of {path}?\n\nThis removes the current working file and stages the deletion."
+        )),
         Action::Merge {
             branch,
             into,
@@ -1011,8 +1061,8 @@ fn confirmation(pending: &Pending) -> Option<String> {
                 ));
             }
             text.push_str(&say!(
-                "衝突したら中止して元に戻します。",
-                "If there are conflicts, it stops and undoes the merge."
+                "衝突した場合は、解消できるようMergeを一時停止します。",
+                "If there are conflicts, the merge pauses for resolution."
             ));
             Some(text)
         }
@@ -1067,6 +1117,7 @@ fn edited_in_scope(live: &Live, pending: &Pending) -> Vec<Rc<OpenDocument>> {
             .flat_map(|c| std::iter::once(&c.path).chain(c.from.as_ref()))
             .map(|p| pending.root.join(p))
             .collect(),
+        Action::ResolveMerge { path: Some(path), .. } => vec![pending.root.join(path)],
         _ => Vec::new(),
     };
     crate::open_documents(live)
@@ -1229,6 +1280,26 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
                 Ok(pick("Syncしました", "Synced").to_owned())
             },
         ),
+        Action::ResolveMerge { state, path, resolution } => {
+            let reload = if matches!(resolution, git::Resolution::Delete(_) | git::Resolution::Abort) {
+                Reload::Repository
+            } else {
+                Reload::None
+            };
+            start(
+                window, live, root, "", false, reload, discarded, After::Nothing,
+                "merge-resolution",
+                move |root, _| {
+                    git::resolve_merge(root, &state, path.as_deref(), resolution)?;
+                    Ok(match resolution {
+                        git::Resolution::Stage | git::Resolution::Delete(_) =>
+                            pick("解消結果をStageしました", "Staged the resolution"),
+                        git::Resolution::Continue => pick("Mergeを完了しました", "Merge completed"),
+                        git::Resolution::Abort => pick("Mergeを中止しました", "Merge aborted"),
+                    }.to_owned())
+                },
+            );
+        }
         Action::StashApply { name, pop } => {
             let told = if pop {
                 say!("{name}をPopしました", "Popped {name}")
@@ -1278,6 +1349,7 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
             After::ClearMessage,
             "commit",
             move |root, _| {
+                git::require_no_merge(root)?;
                 git::commit(root, &message, all, amend)?;
                 Ok(if amend {
                     pick("Amendしました", "Amended").to_owned()
@@ -1998,6 +2070,10 @@ fn stage_paths(change: &Change) -> Vec<String> {
 }
 
 fn row_staged(window: &AppWindow, live: &Live, index: usize) {
+    if window.get_git_merge_active() {
+        window.tell(GitError::MergeStopped.to_string().into());
+        return;
+    }
     let unborn = status_now().is_some_and(|s| s.unborn);
     match row(index) {
         Some((Some(Section::Staged), ..)) => {

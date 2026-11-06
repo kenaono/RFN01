@@ -1,0 +1,217 @@
+import { ScrollView } from "std-widgets.slint";
+import { Tok } from "tokens.slint";
+import { Role, TextButton } from "controls.slint";
+
+export component GitMergeView inherits Rectangle {
+    in property <string> repository;
+    in property <string> branch;
+    in property <string> head;
+    in property <string> incoming;
+    in property <[string]> paths;
+    in property <int> selected;
+    in property <int> version;
+    in property <string> body;
+    in property <bool> can-delete;
+    in property <bool> ready;
+    in property <int> focus-generation;
+    callback back();
+    callback select(int);
+    callback show-version(int);
+    callback action(string);
+    pure callback allowed(string) -> bool;
+    pure callback action-title(string) -> string;
+    callback shortcut(string, bool, bool, bool) -> bool;
+
+    changed focus-generation => { keys.focus(); }
+    background: Tok.paper;
+
+    keys := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.back();
+                return accept;
+            }
+            return root.shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject;
+        }
+    }
+
+    VerticalLayout {
+        Rectangle {
+            height: 60px;
+            background: Tok.chrome;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 12px;
+                TextButton {
+                    title: @tr("Back to Repository");
+                    clicked => { root.back(); }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: @tr("Merge Resolution");
+                        color: Tok.ink-strong;
+                        font-size: 16px;
+                        font-weight: 650;
+                    }
+                    Text {
+                        text: root.repository + "  /  " + root.branch;
+                        color: Tok.ink-muted;
+                        overflow: elide;
+                    }
+                }
+                TextButton {
+                    title: root.action-title("git.merge-abort");
+                    enabled: root.allowed("git.merge-abort");
+                    clicked => { root.action("git.merge-abort"); }
+                }
+                TextButton {
+                    title: root.action-title("git.merge-continue");
+                    role: Role.primary;
+                    enabled: root.allowed("git.merge-continue");
+                    clicked => { root.action("git.merge-continue"); }
+                }
+            }
+        }
+        HorizontalLayout {
+            Rectangle {
+                width: 260px;
+                background: Tok.chrome;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+                    Text {
+                        text: @tr("Unresolved Files") + "  ·  " + root.paths.length;
+                        color: Tok.ink-strong;
+                        font-size: 12px;
+                        font-weight: 650;
+                    }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        content-width: self.visible-width;
+                        VerticalLayout {
+                            width: parent.visible-width;
+                            spacing: 2px;
+                            alignment: start;
+                            for path[index] in root.paths: Rectangle {
+                                height: 30px;
+                                border-radius: 4px;
+                                background: index == root.selected ? Tok.accent-soft :
+                                    (hit.has-hover ? Tok.chrome-sunken : transparent);
+                                Text {
+                                    x: 8px;
+                                    width: parent.width - 16px;
+                                    text: path;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    color: Tok.ink;
+                                }
+                                hit := TouchArea {
+                                    clicked => { keys.focus(); root.select(index); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle { width: 1px; background: Tok.rule; }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                padding: 16px;
+                spacing: 8px;
+                Text {
+                    text: @tr("Current Side") + "  " + root.head;
+                    overflow: elide;
+                    color: Tok.ink-muted;
+                    font-size: 11px;
+                }
+                Text {
+                    text: @tr("Incoming Side") + "  " + root.incoming;
+                    overflow: elide;
+                    color: Tok.ink-muted;
+                    font-size: 11px;
+                }
+                if root.ready: Text {
+                    text: @tr("All conflicts are staged. Continue Merge to create the merge commit.");
+                    color: Tok.ink;
+                    wrap: word-wrap;
+                }
+                if root.selected >= 0: VerticalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.paths[root.selected];
+                        color: Tok.ink-strong;
+                        font-size: 15px;
+                        font-weight: 650;
+                        overflow: elide;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 5px;
+                        for title[index] in [@tr("Common Ancestor"), @tr("Current Side"), @tr("Incoming Side"), @tr("Working Result")]: TextButton {
+                            title: title;
+                            role: index == root.version ? Role.primary : Role.normal;
+                            clicked => { keys.focus(); root.show-version(index); }
+                        }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        border-width: 1px;
+                        border-color: Tok.rule;
+                        border-radius: 4px;
+                        background: Tok.chrome;
+                        ScrollView {
+                            x: 10px;
+                            y: 8px;
+                            width: parent.width - 20px;
+                            height: parent.height - 16px;
+                            content-width: self.visible-width;
+                            Text {
+                                x: 0px;
+                                y: 0px;
+                                width: parent.visible-width;
+                                text: root.body;
+                                wrap: char-wrap;
+                                vertical-alignment: top;
+                                color: Tok.ink;
+                                font-family: "Consolas";
+                                font-size: 13px;
+                            }
+                        }
+                    }
+                    Text {
+                        text: @tr("Edit and save the working file, then stage the result here.");
+                        color: Tok.ink-muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 6px;
+                        TextButton {
+                            title: root.action-title("git.merge-edit-result");
+                            enabled: root.allowed("git.merge-edit-result");
+                            clicked => { root.action("git.merge-edit-result"); }
+                        }
+                        TextButton {
+                            title: root.action-title("git.merge-stage-result");
+                            role: Role.primary;
+                            enabled: root.allowed("git.merge-stage-result");
+                            clicked => { root.action("git.merge-stage-result"); }
+                        }
+                        if root.can-delete: TextButton {
+                            title: root.action-title("git.merge-stage-deletion");
+                            enabled: root.allowed("git.merge-stage-deletion");
+                            clicked => { root.action("git.merge-stage-deletion"); }
+                        }
+                    }
+                }
+                if root.ready: Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+}

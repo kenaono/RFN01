@@ -261,7 +261,7 @@ fn branches_are_listed_created_and_switched() {
 }
 
 #[test]
-fn publishes_pulls_and_undoes_a_conflicting_pull() {
+fn publishes_pulls_and_preserves_a_conflicting_pull_for_resolution() {
     let scratch = Scratch::new("remote");
     let remote = scratch.0.join("remote.git");
     let mine = scratch.0.join("mine");
@@ -296,11 +296,17 @@ fn publishes_pulls_and_undoes_a_conflicting_pull() {
     write(&mine, "a.md", "mine\n");
     commit(&mine, "mine", true, false).unwrap();
     let head = checked(&mine, &["rev-parse", "HEAD"], None).unwrap();
-    assert_eq!(pull(&mine, &cancel), Err(GitError::Conflict));
+    assert_eq!(pull(&mine, &cancel), Err(GitError::MergeStopped));
     assert_eq!(checked(&mine, &["rev-parse", "HEAD"], None).unwrap(), head);
+    assert!(read(&mine, "a.md").contains("<<<<<<<"));
+    let merge = merge_state(&mine).unwrap().unwrap();
+    assert_eq!(merge.conflicts[0].path, "a.md");
+    // A second Pull must preserve the in-progress merge.
+    assert_eq!(pull(&mine, &cancel), Err(GitError::MergeStopped));
+    assert_eq!(merge_state(&mine).unwrap(), Some(merge.clone()));
+    resolve_merge(&mine, &merge, None, Resolution::Abort).unwrap();
     assert_eq!(read(&mine, "a.md"), "mine\n");
-    let merging = run(&mine, &["rev-parse", "-q", "--verify", "MERGE_HEAD"], None);
-    assert!(!merging.unwrap().ok);
+    assert!(merge_state(&mine).unwrap().is_none());
 
     // 衝突しない取り込みは通る。
     fetch(&mine, &cancel).unwrap();
@@ -404,7 +410,7 @@ fn a_repository_without_commits_has_an_empty_log() {
 }
 
 #[test]
-fn conflicting_merge_revert_and_cherry_pick_are_undone() {
+fn conflicting_cherry_pick_is_undone_and_revert_still_commits() {
     let scratch = Scratch::new("abort");
     let root = &scratch.0;
     if repository(root).is_none() {
@@ -421,7 +427,6 @@ fn conflicting_merge_revert_and_cherry_pick_are_undone() {
     commit(root, "main", true, false).unwrap();
     let head = head_sha(root).unwrap();
 
-    assert_eq!(merge(root, "draft"), Err(GitError::Conflict));
     assert_eq!(cherry_pick(root, &draft, false), Err(GitError::Conflict));
     for (name, ok) in [("MERGE_HEAD", false), ("CHERRY_PICK_HEAD", false)] {
         let found = run(root, &["rev-parse", "-q", "--verify", name], None).unwrap();
@@ -441,6 +446,65 @@ fn conflicting_merge_revert_and_cherry_pick_are_undone() {
     revert(root, &b, false).unwrap();
     assert!(!root.join("b.md").exists());
     assert!(last_message(root).unwrap().starts_with("Revert \"b\""));
+}
+
+#[test]
+fn merge_resolution_reads_index_versions_and_continues_with_the_staged_result() {
+    let scratch = Scratch::new("merge-resolution");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    let text = "資料 [1].md";
+    let deleted = "removed.md";
+    write(root, text, "base\n");
+    write(root, deleted, "base\n");
+    commit(root, "base", true, false).unwrap();
+    git_ok(root, &["switch", "-qc", "incoming"]);
+    write(root, text, "theirs\n");
+    std::fs::remove_file(root.join(deleted)).unwrap();
+    commit(root, "theirs", true, false).unwrap();
+    let incoming = head_sha(root).unwrap();
+    git_ok(root, &["switch", "-q", "main"]);
+    write(root, text, "ours\n");
+    write(root, deleted, "keep?\n");
+    commit(root, "ours", true, false).unwrap();
+    let head = head_sha(root).unwrap();
+
+    assert_eq!(merge(root, "incoming"), Err(GitError::MergeStopped));
+    let stopped = merge_state(root).unwrap().unwrap();
+    assert_eq!(stopped.head, head);
+    assert_eq!(stopped.incoming, [incoming.clone()]);
+    let conflict = stopped.conflicts.iter().find(|file| file.path == text).unwrap();
+    for (version, expected) in conflict.versions.iter().zip(["base\n", "ours\n", "theirs\n"]) {
+        let actual = conflict_blob(root, version.as_ref().unwrap()).unwrap();
+        assert_eq!(std::str::from_utf8(&actual).unwrap().replace("\r\n", "\n"), expected);
+    }
+    assert!(resolve_merge(root, &stopped, None, Resolution::Continue).is_err());
+    assert!(resolve_merge(root, &stopped, Some(text), Resolution::Stage).is_err());
+    write(root, text, "resolved\n");
+    resolve_merge(root, &stopped, Some(text), Resolution::Stage).unwrap();
+    // Terminal changes to the index invalidate any action captured before the change.
+    assert!(resolve_merge(root, &stopped, None, Resolution::Abort).is_err());
+
+    let state = merge_state(root).unwrap().unwrap();
+    assert_eq!(state.conflicts.len(), 1);
+    assert_eq!(state.conflicts[0].path, deleted);
+    assert!(state.conflicts[0].versions[2].is_none());
+    let path = root.join(deleted);
+    let stale = worktree_stamp(&path);
+    write(root, deleted, "an externally edited version\n");
+    assert!(resolve_merge(root, &state, Some(deleted), Resolution::Delete(stale)).is_err());
+    resolve_merge(root, &state, Some(deleted), Resolution::Delete(worktree_stamp(&path))).unwrap();
+    assert!(!path.exists());
+
+    let ready = merge_state(root).unwrap().unwrap();
+    assert!(ready.conflicts.is_empty());
+    resolve_merge(root, &ready, None, Resolution::Continue).unwrap();
+    assert!(merge_state(root).unwrap().is_none());
+    let parents = checked(root, &["show", "-s", "--format=%P", "HEAD"], None).unwrap();
+    assert_eq!(parents.trim(), format!("{head} {incoming}"));
+    assert_eq!(read(root, text), "resolved\n");
 }
 
 #[test]

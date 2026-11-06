@@ -1650,3 +1650,52 @@ msgstr "選択を開始・解除"
 
 msgid "Start / Cancel Rectangle Selection"
 msgstr "矩形選択を開始・解除"
+
+# RFN01-138
+msgid "Open Merge Resolution"
+msgstr "Mergeの解消を開く"
+
+msgid "Merge in progress"
+msgstr "Mergeが進行中です"
+
+msgid "Merge Resolution"
+msgstr "Mergeの解消"
+
+msgid "Back to Repository"
+msgstr "リポジトリに戻る"
+
+msgid "Unresolved Files"
+msgstr "未解決ファイル"
+
+msgid "Common Ancestor"
+msgstr "共通祖先"
+
+msgid "Current Side"
+msgstr "現在側"
+
+msgid "Incoming Side"
+msgstr "取り込み側"
+
+msgid "Working Result"
+msgstr "作業中の結果"
+
+msgid "Edit and save the working file, then stage the result here."
+msgstr "作業ファイルを編集して保存した後、ここで解消結果をStageします。"
+
+msgid "Edit Merge Result"
+msgstr "解消結果を編集"
+
+msgid "Stage Merge Result"
+msgstr "解消結果をStage"
+
+msgid "Accept Deletion and Stage…"
+msgstr "削除を採用してStage…"
+
+msgid "Continue Merge"
+msgstr "Mergeを続行"
+
+msgid "Abort Merge…"
+msgstr "Mergeを中止…"
+
+msgid "All conflicts are staged. Continue Merge to create the merge commit."
+msgstr "すべての衝突が解消されています。Mergeを続行するとマージコミットを作成します。"

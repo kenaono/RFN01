@@ -26,6 +26,8 @@ pub enum GitError {
     Cancelled,
     /// 衝突したので中止し、元に戻した。
     Conflict,
+    /// Merge／Pull が衝突した。Gitに作業ツリーと索引を残している。
+    MergeStopped,
     /// Gitが断った。中身はGitの文（資格情報を伏せたもの）か、こちらの文。
     Failed(String),
     /// ブランチがどこにも Merge されていないので、`-d`では消せない（`-D`なら消せる）。
@@ -47,6 +49,10 @@ impl std::fmt::Display for GitError {
             GitError::Conflict => f.write_str(crate::i18n::pick(
                 "衝突したため中止し、元に戻しました。衝突はTerminalで解いてください",
                 "There were conflicts, so it was stopped and undone. Resolve them in a Terminal",
+            )),
+            GitError::MergeStopped => f.write_str(crate::i18n::pick(
+                "Mergeを一時停止しました。衝突を解消してから続行できます。",
+                "Merge paused. Resolve the conflicts before continuing.",
             )),
             GitError::Failed(said) => f.write_str(said),
             GitError::NotMerged(name) => f.write_str(&crate::say!(
@@ -654,8 +660,12 @@ pub fn fetch(root: &Path, cancel: &Cancel) -> Result<(), GitError> {
     checked(root, &["fetch", "-q"], Some(cancel)).map(drop)
 }
 
-/// Pull（取り込みはMerge）。**衝突したら`merge --abort`で元に戻す**。
+mod merge_resolution;
+pub(crate) use merge_resolution::*;
+
+/// Pull（取り込みはMerge）。衝突時は解消のためにGitの状態を残す。
 pub fn pull(root: &Path, cancel: &Cancel) -> Result<(), GitError> {
+    require_no_merge(root)?;
     let output = run(
         root,
         &["pull", "-q", "--no-rebase", "--no-edit"],
@@ -664,12 +674,7 @@ pub fn pull(root: &Path, cancel: &Cancel) -> Result<(), GitError> {
     if output.ok {
         return Ok(());
     }
-    let merging = run(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"], None)?;
-    if merging.ok {
-        checked(root, &["merge", "--abort"], None)?;
-        return Err(GitError::Conflict);
-    }
-    Err(output.failure())
+    Err(merge_failure(root, output))
 }
 
 /// Push。上流が無ければPublish（`-u`で`origin`へ。無ければ最初のリモートへ）。
@@ -1262,7 +1267,7 @@ pub(crate) fn apply_hunk(
     }
 }
 
-/// 途中で止まった操作（Merge・Revert・Cherry-pick）が残っていれば`--abort`で戻し、衝突と答える。
+/// 途中で止まったRevert・Cherry-pickが残っていれば`--abort`で戻し、衝突と答える。
 fn abort_if_stopped(root: &Path, failed: Output, head: &str, command: &str) -> GitError {
     if run(root, &["rev-parse", "-q", "--verify", head], None).is_ok_and(|o| o.ok) {
         return match checked(root, &[command, "--abort"], None) {
@@ -1273,13 +1278,14 @@ fn abort_if_stopped(root: &Path, failed: Output, head: &str, command: &str) -> G
     failed.failure()
 }
 
-/// `branch`を今のブランチへ Merge する。衝突したら`merge --abort`。
+/// `branch`を今のブランチへ Merge する。衝突時は解消のためにGitの状態を残す。
 pub fn merge(root: &Path, branch: &str) -> Result<(), GitError> {
+    require_no_merge(root)?;
     let output = run(root, &["merge", "-q", "--no-edit", branch, "--"], None)?;
     if output.ok {
         return Ok(());
     }
-    Err(abort_if_stopped(root, output, "MERGE_HEAD", "merge"))
+    Err(merge_failure(root, output))
 }
 
 /// Revert。Merge の Commit は1つ目の親に対して打ち消す。衝突したら`revert --abort`。

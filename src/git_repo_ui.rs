@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
@@ -100,6 +101,7 @@ enum DiffShown {
     Range(Preview),
 }
 
+#[derive(Clone)]
 struct CommitDiff {
     sha: String,
     parent: Option<String>,
@@ -108,7 +110,7 @@ struct CommitDiff {
     working: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct ComparePoint {
     sha: String,
     branch: Option<String>,
@@ -165,8 +167,9 @@ struct Repo {
     again: bool,
     selected: Option<Selected>,
     detail: Option<git::Detail>,
-    diff: Option<DiffShown>,
+    diff: Option<Rc<DiffShown>>,
     block_mode: bool,
+    block: usize,
     search: Option<SearchResults>,
     lookup: Option<Receiver<Result<Lookup, GitError>>>,
     off_graph: bool,
@@ -180,9 +183,133 @@ struct Repo {
 thread_local! {
     static REPO: RefCell<Repo> = RefCell::new(Repo::default());
     static POLL: Timer = Timer::default();
+    static BRANCH_MENU: RefCell<Option<BranchMenu>> = const { RefCell::new(None) };
 }
 
-fn root() -> Option<PathBuf> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RepoAction {
+    OpenComparison,
+    ReviewBlocks,
+    StageBlock,
+    UnstageBlock,
+    OpenSearch,
+    CloseSearch,
+    SetBase,
+    CompareWithBase,
+}
+
+#[derive(Clone)]
+pub(crate) struct ActionTarget {
+    root: PathBuf,
+    diff: Option<Rc<DiffShown>>,
+    block_mode: bool,
+    block: usize,
+    search_open: bool,
+    point: Option<ComparePoint>,
+    base: Option<ComparePoint>,
+    from_menu: bool,
+}
+
+impl ActionTarget {
+    pub(crate) fn capture(window: &AppWindow) -> Option<Self> {
+        if !window.get_git_repo_active() {
+            return None;
+        }
+        REPO.with(|repo| {
+            let repo = repo.borrow();
+            let point = repo.detail.as_ref().map(|detail| ComparePoint {
+                sha: detail.sha.clone(),
+                branch: None,
+            });
+            Some(Self {
+                root: repo.root.clone()?,
+                diff: repo.diff.clone(),
+                block_mode: repo.block_mode,
+                block: repo.block,
+                search_open: window.get_git_repo_search_open(),
+                point,
+                base: repo.base.clone(),
+                from_menu: false,
+            })
+        })
+    }
+
+    pub(crate) fn for_branch(mut self, branch: &Ref) -> Self {
+        self.point = Some(ComparePoint {
+            sha: branch.sha.clone(),
+            branch: Some(branch.name.clone()),
+        });
+        self.from_menu = true;
+        self
+    }
+
+    pub(crate) fn valid(&self, current: &Self, action: RepoAction) -> bool {
+        use RepoAction::*;
+        if self.root != current.root {
+            return false;
+        }
+        let same_diff = || self.diff.as_ref().zip(current.diff.as_ref())
+            .is_some_and(|(left, right)| Rc::ptr_eq(left, right))
+            && self.block_mode == current.block_mode;
+        let same_point = || self.from_menu || self.point == current.point;
+        match action {
+            OpenComparison | ReviewBlocks => same_diff(),
+            StageBlock | UnstageBlock => same_diff() && self.block == current.block,
+            OpenSearch | CloseSearch => self.search_open == current.search_open,
+            SetBase => same_point(),
+            CompareWithBase => same_point() && self.base == current.base,
+        }
+    }
+
+    fn patch(&self) -> Option<&Arc<crate::git_hunks::Patch>> {
+        match self.diff.as_deref() {
+            Some(DiffShown::Wip(preview)) => preview.patch.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn enabled(&self, window: &AppWindow, action: RepoAction) -> bool {
+        use RepoAction::*;
+        match action {
+            OpenComparison => window.get_git_repo_detail_mode() == 3
+                && window.get_git_repo_diff_note().is_empty()
+                && self.diff.is_some() && !self.block_mode,
+            ReviewBlocks => window.get_git_repo_hunks_available()
+                && !self.block_mode && !window.get_git_busy(),
+            StageBlock | UnstageBlock => self.block_mode && !window.get_git_busy()
+                && !window.get_git_merge_active()
+                && git_ui::active_root().as_ref() == Some(&self.root)
+                && self.patch().is_some_and(|patch| {
+                    patch.staged == (action == UnstageBlock) && patch.hunks.get(self.block).is_some()
+                }),
+            OpenSearch => !self.search_open,
+            CloseSearch => self.search_open,
+            SetBase => self.point.is_some(),
+            CompareWithBase => self.point.is_some() && self.base.is_some(),
+        }
+    }
+
+    pub(crate) fn execute(&self, window: &AppWindow, live: &Live, action: RepoAction) {
+        use RepoAction::*;
+        match action {
+            OpenComparison => diff_open_full(window),
+            ReviewBlocks => open_hunks(window),
+            StageBlock | UnstageBlock => {
+                if let Some(patch) = self.patch() {
+                    apply_block(window, live, &self.root, patch.clone(), self.block);
+                }
+            }
+            OpenSearch | CloseSearch => toggle_search(window),
+            SetBase | CompareWithBase => {
+                if let Some(point) = &self.point {
+                    choose_point(window, live, point.clone(), action == SetBase);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn root() -> Option<PathBuf> {
     REPO.with(|repo| repo.borrow().root.clone())
 }
 
@@ -196,6 +323,7 @@ pub fn open(window: &AppWindow, live: &Live) {
         }
     };
     git_ui::cancel_change_diff();
+    BRANCH_MENU.with(|menu| menu.borrow_mut().take());
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
         if repo.root.as_ref() != Some(&root) {
@@ -240,8 +368,10 @@ pub fn close(window: &AppWindow) {
         return;
     }
     git_ui::cancel_change_diff();
+    BRANCH_MENU.with(|menu| menu.borrow_mut().take());
     REPO.with(|repo| repo.borrow_mut().lookup = None);
     window.set_git_repo_active(false);
+    window.set_git_merge_open(false);
     crate::restore_editor_focus(window);
 }
 
@@ -480,12 +610,12 @@ fn publish_search(window: &AppWindow, search: Option<&SearchResults>) {
 
 fn toggle_search(window: &AppWindow) {
     let open = !window.get_git_repo_search_open();
+    window.set_git_repo_search_open(open);
     if !open {
         REPO.with(|repo| repo.borrow_mut().lookup = None);
         window.set_git_repo_inspection_note("".into());
         regain_focus(window);
     }
-    window.set_git_repo_search_open(open);
 }
 
 fn search(window: &AppWindow, live: &Live, field: i32, text: &str) {
@@ -803,12 +933,22 @@ fn side_rows(data: &Data) -> (Vec<GitBranchRow>, Vec<Side>) {
 
 /// 右の列：何も選んでいない（0）、Commit（1）、WIP（2）、差分（3）。
 fn publish_detail(window: &AppWindow, repo: &Repo) {
-    let patch = match &repo.diff {
+    publish_detail_contents(window, repo);
+    refresh_action_bindings(window);
+}
+
+fn refresh_action_bindings(window: &AppWindow) {
+    window.set_git_repo_action_generation(window.get_git_repo_action_generation().wrapping_add(1));
+}
+
+fn publish_detail_contents(window: &AppWindow, repo: &Repo) {
+    let patch = match repo.diff.as_deref() {
         Some(DiffShown::Wip(preview)) => preview.patch.as_deref(),
         _ => None,
     };
     window.set_git_repo_hunks_available(patch.is_some());
     window.set_git_repo_hunks_active(repo.block_mode && patch.is_some());
+    window.set_git_repo_hunk_selected(if repo.block_mode { repo.block as i32 } else { -1 });
     if let Some(patch) = patch.filter(|_| repo.block_mode) {
         let rows: Vec<_> = patch
             .hunks
@@ -833,7 +973,7 @@ fn publish_detail(window: &AppWindow, repo: &Repo) {
     }
     if let (Some(diff), Some(root)) = (&repo.diff, &repo.root) {
         if !window.get_git_repo_hunks_active() {
-            publish_diff(window, root, diff);
+            publish_diff(window, root, diff.as_ref());
         }
         return;
     }
@@ -944,19 +1084,6 @@ fn select_detail(
     REPO.with(|repo| publish_detail(window, &repo.borrow()));
 }
 
-fn choose_commit(window: &AppWindow, live: &Live, as_base: bool) {
-    let point = REPO.with(|repo| {
-        let repo = repo.borrow();
-        Some(ComparePoint {
-            sha: repo.detail.as_ref()?.sha.clone(),
-            branch: None,
-        })
-    });
-    if let Some(point) = point {
-        choose_point(window, live, point, as_base);
-    }
-}
-
 fn choose_point(window: &AppWindow, live: &Live, point: ComparePoint, as_base: bool) {
     if as_base {
         window.set_git_repo_compare_base(point.label(false).into());
@@ -966,6 +1093,7 @@ fn choose_point(window: &AppWindow, live: &Live, point: ComparePoint, as_base: b
             repo.base = Some(point);
             repo.lookup = None;
         });
+        refresh_action_bindings(window);
         return;
     }
     let left = REPO.with(|repo| repo.borrow().base.clone());
@@ -1031,6 +1159,28 @@ enum Picked {
     Local(Ref),
     Remote(Ref),
     Stash(Stash),
+}
+
+struct BranchMenu {
+    root: PathBuf,
+    picked: Picked,
+    target: crate::menu_commands::Target,
+}
+
+fn capture_branch_menu(window: &AppWindow, live: &Live, index: usize) {
+    let menu = root().zip(side_at(index)).map(|(root, picked)| {
+        let mut target = crate::menu_commands::Target::for_surface(window, live);
+        if let Picked::Local(branch) | Picked::Remote(branch) = &picked {
+            target.set_git_branch_target(branch);
+        }
+        BranchMenu { root, picked, target }
+    });
+    BRANCH_MENU.with(|stored| *stored.borrow_mut() = menu);
+    refresh_action_bindings(window);
+}
+
+pub(crate) fn branch_target() -> Option<crate::menu_commands::Target> {
+    BRANCH_MENU.with(|menu| menu.borrow().as_ref().map(|menu| menu.target.clone()))
 }
 
 fn side_at(index: usize) -> Option<Picked> {
@@ -1105,59 +1255,57 @@ fn branch_activated(window: &AppWindow, live: &Live, index: usize) {
 
 /// 左の列の右クリック。ローカル：0 Checkout、1 New Branch…、2 Merge into、3 Push、4 Delete…。
 /// リモート：0 Checkout、1 New Branch…、2 Merge into。Stash：0 Apply、1 Pop、2 Drop…。
-fn branch_menu(window: &AppWindow, live: &Live, index: usize, action: i32) {
-    let Some(root) = root() else {
+fn branch_menu(window: &AppWindow, live: &Live, action: i32) {
+    let Some(menu) = BRANCH_MENU.with(|stored| stored.borrow_mut().take()) else {
         return;
     };
+    if !window.get_git_repo_active() || root().as_ref() != Some(&menu.root) {
+        return;
+    }
+    let BranchMenu { root, picked, .. } = menu;
     let current = current_branch();
-    let action = match (side_at(index), action) {
-        (Some(Picked::Local(r)), 0) if Some(&r.name) != current.as_ref() => Action::Checkout {
+    let action = match (picked, action) {
+        (Picked::Local(r), 0) if Some(&r.name) != current.as_ref() => Action::Checkout {
             branch: r.name,
             remote: false,
         },
-        (Some(Picked::Remote(r)), 0) => Action::Checkout {
+        (Picked::Remote(r), 0) => Action::Checkout {
             branch: r.name,
             remote: true,
         },
-        (Some(Picked::Local(r) | Picked::Remote(r)), 1) => {
-            git_ui::ask_branch_name(window, live, root, Some(r.sha));
+        (Picked::Local(r) | Picked::Remote(r), 1) => {
+            later(window, live, move |window, live| {
+                git_ui::ask_branch_name(window, live, root, Some(r.sha));
+            });
             return;
         }
-        (Some(Picked::Local(r)), 2) if Some(&r.name) != current.as_ref() => Action::Merge {
+        (Picked::Local(r), 2) if Some(&r.name) != current.as_ref() => Action::Merge {
             branch: r.name,
             into: None,
             ask: false,
         },
-        (Some(Picked::Remote(r)), 2) => Action::Merge {
+        (Picked::Remote(r), 2) => Action::Merge {
             branch: r.name,
             into: None,
             ask: false,
         },
-        (Some(Picked::Local(r)), 3) => Action::PushBranch(r.name),
-        (Some(Picked::Local(r)), 4) if Some(&r.name) != current.as_ref() => Action::DeleteBranch {
+        (Picked::Local(r), 3) => Action::PushBranch(r.name),
+        (Picked::Local(r), 4) if Some(&r.name) != current.as_ref() => Action::DeleteBranch {
             name: r.name,
             force: false,
         },
-        (Some(Picked::Local(r) | Picked::Remote(r)), 5 | 6) => {
-            choose_point(
-                window,
-                live,
-                ComparePoint {
-                    sha: r.sha,
-                    branch: Some(r.name),
-                },
-                action == 5,
-            );
-            return;
-        }
-        (Some(Picked::Stash(s)), 0 | 1) => Action::StashApply {
+        (Picked::Stash(s), 0 | 1) => Action::StashApply {
             name: s.name,
             pop: action == 1,
         },
-        (Some(Picked::Stash(s)), 2) => Action::StashDrop(s.name),
+        (Picked::Stash(s), 2) => Action::StashDrop(s.name),
         _ => return,
     };
-    git_ui::act_on(window, live, root, action);
+    later(window, live, move |window, live| git_ui::act_on(window, live, root, action));
+}
+
+pub(crate) fn take_branch_target() -> Option<crate::menu_commands::Target> {
+    BRANCH_MENU.with(|menu| menu.borrow_mut().take().map(|menu| menu.target))
 }
 
 /// ブランチを別のローカルブランチへ落とした：確認してから Merge（書き手の求め 2026-10-03）。
@@ -1422,7 +1570,7 @@ fn open_file_diff(window: &AppWindow, live: &Live, index: usize) {
 fn set_diff(window: &AppWindow, diff: DiffShown) {
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
-        repo.diff = Some(diff);
+        repo.diff = Some(Rc::new(diff));
         repo.block_mode = false;
         publish_detail(window, &repo);
     });
@@ -1445,43 +1593,38 @@ fn diff_back(window: &AppWindow) {
 fn open_hunks(window: &AppWindow) {
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
-        if matches!(&repo.diff, Some(DiffShown::Wip(preview)) if preview.patch.is_some()) {
+        if matches!(repo.diff.as_deref(), Some(DiffShown::Wip(preview)) if preview.patch.is_some()) {
             repo.block_mode = true;
+            repo.block = 0;
             publish_detail(window, &repo);
         }
     });
 }
 
-fn selected_patch() -> Option<(PathBuf, Arc<crate::git_hunks::Patch>)> {
-    REPO.with(|repo| {
-        let repo = repo.borrow();
-        if let Some(DiffShown::Wip(preview)) = &repo.diff
-            && repo.block_mode
-        {
-            return Some((repo.root.clone()?, preview.patch.clone()?));
-        }
-        None
-    })
-}
-
-fn apply_block(window: &AppWindow, live: &Live, index: i32) {
-    let (Ok(block), Some((root, patch))) = (usize::try_from(index), selected_patch()) else {
+fn select_block(window: &AppWindow, index: i32) {
+    let Ok(block) = usize::try_from(index) else {
         return;
     };
-    later(window, live, move |window, live| {
-        if !window.get_git_repo_active()
-            || !selected_patch()
-                .is_some_and(|(shown, current)| shown == root && Arc::ptr_eq(&current, &patch))
-            || !git_ui::apply_hunk(window, live, &root, patch, block)
+    REPO.with(|repo| {
+        let mut repo = repo.borrow_mut();
+        if repo.block_mode && let Some(DiffShown::Wip(preview)) = repo.diff.as_deref()
+            && preview.patch.as_ref().is_some_and(|patch| patch.hunks.get(block).is_some())
         {
-            return;
+            repo.block = block;
+            window.set_git_repo_hunk_selected(index);
         }
-        REPO.with(|repo| {
-            let mut repo = repo.borrow_mut();
-            repo.diff = None;
-            repo.block_mode = false;
-            publish_detail(window, &repo);
-        });
+    });
+}
+
+fn apply_block(window: &AppWindow, live: &Live, root: &Path, patch: Arc<crate::git_hunks::Patch>, block: usize) {
+    if !git_ui::apply_hunk(window, live, root, patch, block) {
+        return;
+    }
+    REPO.with(|repo| {
+        let mut repo = repo.borrow_mut();
+        repo.diff = None;
+        repo.block_mode = false;
+        publish_detail(window, &repo);
     });
 }
 
@@ -1489,8 +1632,10 @@ fn apply_block(window: &AppWindow, live: &Live, index: i32) {
 fn diff_working_chosen(window: &AppWindow, working: bool) {
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
-        if let Some(DiffShown::Commit(commit)) = &mut repo.diff {
+        if let Some(DiffShown::Commit(commit)) = repo.diff.as_deref() {
+            let mut commit = commit.clone();
             commit.working = working;
+            repo.diff = Some(Rc::new(DiffShown::Commit(commit)));
             publish_detail(window, &repo);
         }
     });
@@ -1503,7 +1648,7 @@ fn diff_open_full(window: &AppWindow) {
         let (Some(root), Some(diff)) = (&repo.root, &repo.diff) else {
             return;
         };
-        match diff {
+        match diff.as_ref() {
             DiffShown::Wip(preview) | DiffShown::Range(preview) => preview.open(window),
             DiffShown::Commit(commit) => match commit_diff_texts(root, commit) {
                 Ok((left, right, caption)) => {
@@ -1607,6 +1752,7 @@ fn later(window: &AppWindow, live: &Live, body: impl FnOnce(&AppWindow, &Live) +
 }
 
 pub fn wire(window: &AppWindow, live: &Live) {
+    crate::git_merge_ui::wire(window);
     macro_rules! on {
         ($setter:ident, |$window:ident, $live:ident $(, $arg:ident)*| $body:expr) => {{
             let weak = window.as_weak();
@@ -1641,12 +1787,20 @@ pub fn wire(window: &AppWindow, live: &Live) {
         on_git_repo_branch_activated,
         |w, l, index| branch_activated(w, l, index.max(0) as usize)
     );
-    on!(on_git_repo_branch_menu, |w, l, index, action| branch_menu(
-        w,
-        l,
-        index.max(0) as usize,
-        action
-    ));
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_git_repo_capture_branch_menu(move |index| {
+        if let Some(window) = weak.upgrade() && let Ok(index) = usize::try_from(index) {
+            capture_branch_menu(&window, &held, index);
+        }
+    });
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_git_repo_branch_menu(move |action| {
+        if let Some(window) = weak.upgrade() {
+            branch_menu(&window, &held, action);
+        }
+    });
     on!(on_git_repo_branch_dropped, |w, l, from, to| branch_dropped(
         w,
         l,
@@ -1658,7 +1812,6 @@ pub fn wire(window: &AppWindow, live: &Live) {
         l,
         index.max(0) as usize,
     ));
-    on!(on_git_repo_toggle_search, |w, _l| toggle_search(w));
     on!(on_git_repo_search, |w, l, field, query| search(
         w,
         l,
@@ -1669,22 +1822,16 @@ pub fn wire(window: &AppWindow, live: &Live) {
     on!(on_git_repo_search_selected, |w, l, index| select_result(
         w, l, index
     ));
-    on!(on_git_repo_choose_commit, |w, l, as_base| choose_commit(
-        w, l, as_base
-    ));
     on!(on_git_repo_undo, |w, l| history(w, l, false));
     on!(on_git_repo_redo, |w, l| history(w, l, true));
     on!(on_git_repo_diff_back, |w, _l| diff_back(w));
     on!(on_git_repo_diff_working_chosen, |w, _l, working| {
         diff_working_chosen(w, working)
     });
-    on!(on_git_repo_diff_open_full, |w, _l| diff_open_full(w));
-    on!(on_git_repo_open_hunks, |w, _l| open_hunks(w));
     let weak = window.as_weak();
-    let held = live.clone();
-    window.on_git_repo_apply_hunk(move |index| {
+    window.on_git_repo_select_hunk(move |index| {
         if let Some(window) = weak.upgrade() {
-            apply_block(&window, &held, index);
+            select_block(&window, index);
         }
     });
     on!(on_git_repo_diff_width_changed, |w, _l, width| {

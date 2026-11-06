@@ -242,7 +242,9 @@ fn deleting_an_unmerged_branch_asks_twice() {
     let (window, live) = (&harness.window, &harness.live);
     open(window, live);
     settle(window, live);
-    branch_menu(window, live, side_index(window, 1, "draft"), 4);
+    capture_branch_menu(window, live, side_index(window, 1, "draft"));
+    branch_menu(window, live, 4);
+    slint::platform::update_timers_and_animations();
     let Question::GitConfirm(pending) = take_question(live) else {
         panic!("expected the delete confirmation");
     };
@@ -481,6 +483,8 @@ fn the_wip_block_button_stages_and_unstages_the_selected_hunk() {
     fs::write(root.join(path), &working).unwrap();
     git_ui::wire(window, live);
     wire(window, live);
+    crate::panel_actions::wire(window, live);
+    crate::command_palette::install(window, live);
     open(window, live);
     settle(window, live);
     select_row(window, 0);
@@ -493,13 +497,25 @@ fn the_wip_block_button_stages_and_unstages_the_selected_hunk() {
         window.invoke_git_repo_changes_clicked(row);
         settle(window, live);
         assert!(window.get_git_repo_hunks_available());
-        window.invoke_git_repo_open_hunks();
+        window.invoke_surface_action("git.review-blocks".into());
         slint::platform::update_timers_and_animations();
         assert!(window.get_git_repo_hunks_active());
     };
     show(4);
     assert_eq!(window.get_git_repo_hunks().row_count(), 2);
-    window.invoke_git_repo_apply_hunk(1);
+    assert!(window.invoke_git_action_allowed("git.stage-block".into(), false, 0));
+    window.invoke_git_repo_select_hunk(1);
+    crate::command_palette::open(window, live, true);
+    let title = pick("ブロックをStage", "Stage Block");
+    let at = window.get_palette_rows().iter().position(|row| row.title.contains(title)).unwrap();
+    window.set_palette_selected(at as i32);
+    window.invoke_git_repo_select_hunk(0);
+    window.invoke_palette_accepted();
+    slint::platform::update_timers_and_animations();
+    assert!(!window.get_git_busy());
+    assert_eq!(git::change_blob(&root, "", path).unwrap(), base.as_bytes());
+    window.invoke_git_repo_select_hunk(1);
+    window.invoke_surface_action("git.stage-block".into());
     slint::platform::update_timers_and_animations();
     settle(window, live);
     assert_eq!(window.get_git_repo_detail_mode(), 2);
@@ -511,7 +527,12 @@ fn the_wip_block_button_stages_and_unstages_the_selected_hunk() {
     show(3);
     assert!(window.get_git_repo_hunks_staged());
     assert_eq!(window.get_git_repo_hunks().row_count(), 1);
-    window.invoke_git_repo_apply_hunk(0);
+    crate::command_palette::open(window, live, true);
+    let rows = window.get_palette_rows();
+    let title = pick("ブロックをUnstage", "Unstage Block");
+    let at = rows.iter().position(|row| row.title.contains(title)).unwrap();
+    window.set_palette_selected(at as i32);
+    window.invoke_palette_accepted();
     slint::platform::update_timers_and_animations();
     settle(window, live);
     assert_eq!(
@@ -574,6 +595,7 @@ fn history_search_opens_a_commit_outside_the_graph_page() {
     let (window, live) = (&harness.window, &harness.live);
     attach_workspace(live, &root, SaveMode::Recovery);
     wire(window, live);
+    crate::panel_actions::wire(window, live);
     open(window, live);
     settle(window, live);
     assert!(
@@ -581,7 +603,7 @@ fn history_search_opens_a_commit_outside_the_graph_page() {
             .iter()
             .any(|message| message == "古いコミット")
     );
-    window.invoke_git_repo_toggle_search();
+    window.invoke_surface_action("git.open-history-search".into());
     slint::platform::update_timers_and_animations();
     window.invoke_git_repo_search(0, "[needle]".into());
     slint::platform::update_timers_and_animations();
@@ -609,6 +631,7 @@ fn comparison_pins_branch_tips_and_reads_the_two_committed_versions() {
         return;
     };
     let (window, live) = (&harness.window, &harness.live);
+    crate::panel_actions::wire(window, live);
     let old = "原稿 前.md";
     let new = "原稿 後.md";
     let shared = "same line\n".repeat(16);
@@ -628,11 +651,18 @@ fn comparison_pins_branch_tips_and_reads_the_two_committed_versions() {
 
     open(window, live);
     settle(window, live);
-    branch_menu(window, live, side_index(window, 1, "comparison-left"), 5);
+    let opened_row = side_index(window, 1, "comparison-left");
+    capture_branch_menu(window, live, opened_row);
     git_ok(&root, &["branch", "-f", "comparison-left", "main"]);
+    git_ok(&root, &["branch", "aaa-new-row"]);
     refresh(window, live);
     settle(window, live);
-    branch_menu(window, live, side_index(window, 1, "main"), 6);
+    assert_ne!(opened_row, side_index(window, 1, "comparison-left"));
+    window.invoke_git_repo_branch_action("git.set-compare-base".into());
+    slint::platform::update_timers_and_animations();
+    capture_branch_menu(window, live, side_index(window, 1, "main"));
+    window.invoke_git_repo_branch_action("git.compare-with-base".into());
+    slint::platform::update_timers_and_animations();
     settle(window, live);
     assert!(window.get_git_repo_range_left().ends_with(&left));
     assert!(window.get_git_repo_range_right().ends_with(&right));

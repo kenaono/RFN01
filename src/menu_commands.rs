@@ -1136,6 +1136,12 @@ impl Target {
         self
     }
 
+    pub(crate) fn set_git_branch_target(&mut self, branch: &crate::git::Ref) {
+        if let Some(context) = &mut self.panel_context {
+            context.set_git_branch_target(branch);
+        }
+    }
+
     fn valid(&self, window: &AppWindow, live: &Live) -> bool {
         self.id.is_shown(window)
             && Rc::ptr_eq(&self.document, &live.states.document(self.id))
@@ -1619,7 +1625,7 @@ impl<'a> Scene<'a> {
             (self.text, self.editable, self.main, self.path, self.field);
         let panel = t.id.is_panel();
         match command {
-            Command::PanelAction(action) => crate::panel_actions::enabled(window, *action, text, self.screen.settings),
+            Command::PanelAction(action) => crate::panel_actions::enabled(window, self.t.panel_context.as_ref(), *action, text, self.screen.settings),
             Command::Tree(action) => {
                 t.tree.as_ref().is_some_and(|tree| tree.enabled(window, self.live, *action))
                     && (*action != crate::tree_actions::Action::RevealDocument
@@ -2588,7 +2594,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
     let p = t.id.index();
     let parent = t.parent.index();
     match command {
-        Command::PanelAction(action) => crate::panel_actions::execute(window, live, action),
+        Command::PanelAction(action) => crate::panel_actions::execute(window, live, t.panel_context.as_ref(), action),
         Command::Tree(action) => {
             if let Some(tree) = &t.tree {
                 crate::tree_actions::execute(window, live, tree, t.id, action);

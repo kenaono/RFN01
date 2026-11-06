@@ -142,6 +142,47 @@ fn without_a_workspace_the_pane_says_how_to_start() {
 }
 
 #[test]
+fn merge_resolution_actions_use_the_palette_target_and_protect_unsaved_work() {
+    let Some((root, harness, document)) = manuscript("git-merge-palette") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    let path = root.join("原稿.md");
+    git_ok(&root, &["switch", "-qc", "incoming"]);
+    fs::write(&path, "incoming\n").unwrap();
+    git::commit(&root, "incoming", true, false).unwrap();
+    git_ok(&root, &["switch", "-q", "main"]);
+    fs::write(&path, "ours\n").unwrap();
+    git::commit(&root, "ours", true, false).unwrap();
+    assert_eq!(git::merge(&root, "incoming"), Err(GitError::MergeStopped));
+    show(window, live);
+    assert!(window.get_git_merge_active());
+
+    crate::panel_actions::wire(window, live);
+    crate::command_palette::install(window, live);
+    window.invoke_surface_action("git.merge-resolution".into());
+    slint::platform::update_timers_and_animations();
+    settle(window, live);
+    assert!(window.get_git_merge_open());
+    assert!(window.invoke_git_action_allowed("git.merge-stage-result".into(), false, 0));
+    assert!(!window.invoke_git_action_allowed("git.merge-continue".into(), false, 0));
+
+    edit(&document, "unsaved\n");
+    crate::command_palette::open(window, live, true);
+    let stage = pick("解消結果をStage", "Stage Merge Result");
+    let rows = window.get_palette_rows();
+    let at = rows.iter().position(|row| row.title.contains(stage)).unwrap();
+    assert!(!rows.iter().any(|row| row.title.contains(pick("Mergeを続行", "Continue Merge"))));
+    window.set_palette_selected(at as i32);
+    window.invoke_palette_accepted();
+    slint::platform::update_timers_and_animations();
+    assert!(matches!(*live.pending.borrow(), Some(Question::GitNotice)));
+    assert!(!window.get_git_busy());
+    assert!(document.text.edited());
+    assert_eq!(git::merge_state(&root).unwrap().unwrap().conflicts.len(), 1);
+}
+
+#[test]
 fn commit_asks_to_save_first_and_commits_what_is_shown() {
     let Some((root, harness, document)) = manuscript("git-commit") else {
         return;

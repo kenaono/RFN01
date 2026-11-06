@@ -87,6 +87,8 @@ component HistorySearchView inherits Rectangle {
     callback next-page();
     callback selected(int);
     callback dismissed();
+    callback shortcut(KeyEvent) -> EventResult;
+    public function focus-query() { query.take-focus(); }
 
     background: Tok.paper;
     changed visible => { if root.visible { query.take-focus(); } }
@@ -119,6 +121,7 @@ component HistorySearchView inherits Rectangle {
                 placeholder: field.current-index == 3 ? @tr("Path from repository root") : @tr("Search history");
                 accepted => { root.submit(field.current-index, self.text); }
                 escaped => { root.dismissed(); }
+                shortcut(event) => { return root.shortcut(event); }
             }
             VerticalLayout {
                 alignment: center;
@@ -230,6 +233,10 @@ component ToolButton inherits Rectangle {
 }
 
 export component GitRepositoryView inherits Rectangle {
+    in property <bool> merging;
+    callback action(string);
+    pure callback allowed(string, bool) -> bool;
+    pure callback action-title(string) -> string;
     in property <bool> search-open;
     in property <bool> search-more;
     in property <bool> search-done;
@@ -239,11 +246,9 @@ export component GitRepositoryView inherits Rectangle {
     in property <string> range-left;
     in property <string> range-right;
     property <bool> range-active: root.range-left != "";
-    callback toggle-search();
     callback search(int, string);
     callback next-search-page();
     callback search-selected(int);
-    callback choose-commit(bool);
     in property <string> repo-name;
     in property <string> branch;
     in property <[string]> branches;
@@ -322,7 +327,9 @@ export component GitRepositoryView inherits Rectangle {
     callback show-more();
     callback branch-clicked(int);
     callback branch-activated(int);
-    callback branch-menu(int, int);
+    callback capture-branch-menu(int);
+    callback branch-menu(int);
+    callback branch-action(string);
     callback branch-dropped(int, int);
     callback file-clicked(int);
     callback file-menu(int, int);
@@ -330,9 +337,10 @@ export component GitRepositoryView inherits Rectangle {
     callback redo();
     callback diff-back();
     callback diff-working-chosen(bool);
-    callback diff-open-full();
-    callback open-hunks();
-    callback apply-hunk(int);
+    callback select-hunk(int);
+    in property <int> hunk-selected: -1;
+    property <string> block-action: root.hunks-staged ? "git.unstage-block" : "git.stage-block";
+    property <string> search-action: root.search-open ? "git.close-history-search" : "git.open-history-search";
     // 右の列の幅（差分の段を Rust が折る）。
     callback diff-width-changed(float);
     // WIP の右の列から（Git Changes と同じ操作）。
@@ -379,7 +387,7 @@ export component GitRepositoryView inherits Rectangle {
         }
     }
     changed focus-generation => {
-        keys.focus();
+        if root.search-open { history.focus-query(); } else { keys.focus(); }
     }
 
     keys := FocusScope {
@@ -424,6 +432,12 @@ export component GitRepositoryView inherits Rectangle {
                 padding-right: 12px;
                 spacing: 4px;
                 alignment: start;
+                if root.merging: TextButton {
+                    title: root.action-title("git.merge-resolution");
+                    role: Role.primary;
+                    enabled: root.allowed("git.merge-resolution", false);
+                    clicked => { root.action("git.merge-resolution"); }
+                }
                 HorizontalLayout {
                     spacing: 6px;
                     padding-right: 6px;
@@ -599,8 +613,9 @@ export component GitRepositoryView inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
                     TextButton {
-                        title: root.search-open ? @tr("Commit Graph") : @tr("History Search");
-                        clicked => { root.toggle-search(); }
+                        title: root.action-title(root.search-action);
+                        enabled: root.allowed(root.search-action, false);
+                        clicked => { root.action(root.search-action); }
                     }
                 }
                 Text {
@@ -671,7 +686,7 @@ export component GitRepositoryView inherits Rectangle {
                                         root.drop-index = -1;
                                     }
                                     if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && (row.kind == 1 || row.kind == 2 || row.kind == 4) {
-                                        root.menu-row = index;
+                                        root.capture-branch-menu(index);
                                         root.menu-kind = row.kind == 1 ? 1 : row.kind == 2 ? 2 : 4;
                                         root.menu-current = row.current;
                                         root.menu-x = 16px;
@@ -1111,13 +1126,14 @@ export component GitRepositoryView inherits Rectangle {
                             height: 32px;
                             spacing: 6px;
                             TextButton {
-                                title: @tr("Set as Base");
-                                clicked => { root.choose-commit(true); }
+                                title: root.action-title("git.set-compare-base");
+                                enabled: root.allowed("git.set-compare-base", false);
+                                clicked => { root.action("git.set-compare-base"); }
                             }
                             TextButton {
-                                title: @tr("Compare with Base");
-                                enabled: root.compare-base != "";
-                                clicked => { root.choose-commit(false); }
+                                title: root.action-title("git.compare-with-base");
+                                enabled: root.allowed("git.compare-with-base", false);
+                                clicked => { root.action("git.compare-with-base"); }
                             }
                         }
                         Rectangle {
@@ -1292,9 +1308,10 @@ export component GitRepositoryView inherits Rectangle {
                             if root.diff-note == "" && !root.hunks-active: VerticalLayout {
                                 alignment: center;
                                 TextButton {
-                                    title: @tr("Open in Comparison");
+                                    title: root.action-title("git.open-comparison");
+                                    enabled: root.allowed("git.open-comparison", false);
                                     clicked => {
-                                        root.diff-open-full();
+                                        root.action("git.open-comparison");
                                     }
                                 }
                             }
@@ -1313,9 +1330,9 @@ export component GitRepositoryView inherits Rectangle {
                         VerticalLayout {
                             alignment: center;
                             TextButton {
-                                title: @tr("Review Git Blocks…");
-                                enabled: !root.busy;
-                                clicked => { root.open-hunks(); }
+                                title: root.action-title("git.review-blocks");
+                                enabled: root.allowed("git.review-blocks", false);
+                                clicked => { root.action("git.review-blocks"); }
                             }
                         }
                     }
@@ -1344,21 +1361,30 @@ export component GitRepositoryView inherits Rectangle {
                                         padding-left: 6px;
                                         padding-right: 6px;
                                         spacing: 6px;
-                                        Text {
-                                            text: hunk.title;
-                                            font-family: "Consolas";
-                                            font-size: 12px;
-                                            color: Tok.ink-muted;
-                                            overflow: elide;
+                                        Rectangle {
+                                            background: index == root.hunk-selected ? Tok.accent-soft : transparent;
                                             horizontal-stretch: 1;
-                                            vertical-alignment: center;
+                                            border-radius: 3px;
+                                            Text {
+                                                x: 6px;
+                                                width: parent.width - 12px;
+                                                text: hunk.title;
+                                                font-family: "Consolas";
+                                                font-size: 12px;
+                                                color: Tok.ink-muted;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                            TouchArea {
+                                                clicked => { root.select-hunk(index); keys.focus(); }
+                                            }
                                         }
                                         VerticalLayout {
                                             alignment: center;
                                             TextButton {
-                                                title: root.hunks-staged ? @tr("Unstage Block") : @tr("Stage Block");
-                                                enabled: !root.busy;
-                                                clicked => { root.apply-hunk(index); }
+                                                title: root.action-title(root.block-action);
+                                                enabled: root.allowed(root.block-action, false);
+                                                clicked => { root.select-hunk(index); root.action(root.block-action); }
                                             }
                                         }
                                     }
@@ -1469,6 +1495,10 @@ export component GitRepositoryView inherits Rectangle {
                     }
                 }
                 if root.detail-mode == 2: GitChangesView {
+                    merging: root.merging;
+                    resolve-title: root.action-title("git.merge-resolution");
+                    resolve-allowed: root.allowed("git.merge-resolution", false);
+                    resolve-merge => { root.action("git.merge-resolution"); }
                     mode: root.changes-mode;
                     note: root.changes-note;
                     // リポジトリとブランチはこの画面の上の帯が持つので、ここでは選ばせない。
@@ -1508,7 +1538,7 @@ export component GitRepositoryView inherits Rectangle {
         }
     }
 
-    HistorySearchView {
+    history := HistorySearchView {
         x: graph.absolute-position.x - root.absolute-position.x;
         y: graph.absolute-position.y - root.absolute-position.y;
         width: graph.width;
@@ -1521,7 +1551,8 @@ export component GitRepositoryView inherits Rectangle {
         submit(field, query) => { root.search(field, query); }
         next-page => { root.next-search-page(); }
         selected(index) => { root.search-selected(index); }
-        dismissed => { root.toggle-search(); }
+        dismissed => { root.action("git.close-history-search"); }
+        shortcut(event) => { return root.shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject; }
     }
 
     branch-menu := PopupWindow {
@@ -1680,17 +1711,18 @@ export component GitRepositoryView inherits Rectangle {
                     }
                 }
                 if root.menu-kind == 1 || root.menu-kind == 2: MenuRow {
-                    title: @tr("Set as Base");
+                    title: root.action-title("git.set-compare-base");
+                    enabled: root.allowed("git.set-compare-base", true);
                     activated => {
-                        root.side-chosen(5);
+                        root.branch-action("git.set-compare-base");
                         side-menu.close();
                     }
                 }
                 if root.menu-kind == 1 || root.menu-kind == 2: MenuRow {
-                    title: @tr("Compare with Base");
-                    enabled: root.compare-base != "";
+                    title: root.action-title("git.compare-with-base");
+                    enabled: root.allowed("git.compare-with-base", true);
                     activated => {
-                        root.side-chosen(6);
+                        root.branch-action("git.compare-with-base");
                         side-menu.close();
                     }
                 }
@@ -1702,7 +1734,7 @@ export component GitRepositoryView inherits Rectangle {
         if root.menu-kind == 5 {
             root.file-menu(root.menu-row, action);
         } else {
-            root.branch-menu(root.menu-row, action);
+            root.branch-menu(action);
         }
     }
 }

@@ -1830,6 +1830,7 @@ fn build() -> Vec<ActionDef> {
     }
     {
         use crate::panel_actions::Action as A;
+        use crate::git_repo_ui::RepoAction as G;
         v.extend([
         ("outline.collapse-all", ("アウトラインをすべて畳む", "Collapse All Outline Headings"), A::OutlineCollapse),
         ("outline.expand-all", ("アウトラインをすべて展開", "Expand All Outline Headings"), A::OutlineExpand),
@@ -1847,6 +1848,20 @@ fn build() -> Vec<ActionDef> {
         ("git.sync", ("Git Sync", "Git Sync"), A::GitSync),
         ("git.cancel", ("実行中のGit操作を中止", "Cancel Git Operation"), A::GitCancel),
         ("git.commit-changes", ("入力したメッセージでCommit", "Commit with Entered Message"), A::GitCommit),
+        ("git.open-comparison", ("比較画面で開く", "Open in Comparison"), A::GitRepo(G::OpenComparison)),
+        ("git.review-blocks", ("Gitの変更ブロックを確認…", "Review Git Blocks…"), A::GitRepo(G::ReviewBlocks)),
+        ("git.stage-block", ("ブロックをStage", "Stage Block"), A::GitRepo(G::StageBlock)),
+        ("git.unstage-block", ("ブロックをUnstage", "Unstage Block"), A::GitRepo(G::UnstageBlock)),
+        ("git.open-history-search", ("履歴検索", "History Search"), A::GitRepo(G::OpenSearch)),
+        ("git.close-history-search", ("コミットグラフに戻る", "Return to Commit Graph"), A::GitRepo(G::CloseSearch)),
+        ("git.set-compare-base", ("比較元に設定", "Set as Base"), A::GitRepo(G::SetBase)),
+        ("git.compare-with-base", ("比較元との差分", "Compare with Base"), A::GitRepo(G::CompareWithBase)),
+        ("git.merge-resolution", ("Mergeの解消を開く", "Open Merge Resolution"), A::GitMergeOpen),
+        ("git.merge-edit-result", ("解消結果を編集", "Edit Merge Result"), A::GitMergeEdit),
+        ("git.merge-stage-result", ("解消結果をStage", "Stage Merge Result"), A::GitMergeStage),
+        ("git.merge-stage-deletion", ("削除を採用してStage…", "Accept Deletion and Stage…"), A::GitMergeDelete),
+        ("git.merge-continue", ("Mergeを続行", "Continue Merge"), A::GitMergeContinue),
+        ("git.merge-abort", ("Mergeを中止…", "Abort Merge…"), A::GitMergeAbort),
         ("comparison.previous", ("前の差分", "Previous Difference"), A::DiffPrevious),
         ("comparison.next", ("次の差分", "Next Difference"), A::DiffNext),
         ("comparison.close", ("比較を終える", "End Comparison"), A::DiffClose),
@@ -1868,6 +1883,7 @@ fn build() -> Vec<ActionDef> {
             let category = match action {
                 A::WorkspaceClone | A::GitFetch | A::GitPull | A::GitPush | A::GitSync
                 | A::GitCancel | A::GitCommit => Git,
+                action if action.available_in_git_overlay() => Git,
                 _ => Surface,
             };
             def(id, title, action.description(), "", category, C::PanelAction(action))

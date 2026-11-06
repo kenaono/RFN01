@@ -19,6 +19,13 @@ pub(crate) enum Action {
     GitSync,
     GitCancel,
     GitCommit,
+    GitRepo(git_repo_ui::RepoAction),
+    GitMergeOpen,
+    GitMergeEdit,
+    GitMergeStage,
+    GitMergeDelete,
+    GitMergeContinue,
+    GitMergeAbort,
     DiffPrevious,
     DiffNext,
     DiffClose,
@@ -39,8 +46,18 @@ pub(crate) enum Action {
 }
 
 impl Action {
+    pub(crate) fn available_in_git_overlay(self) -> bool {
+        matches!(self, Self::GitRepo(_)) || self.is_merge_resolution()
+    }
+
+    pub(crate) fn is_merge_resolution(self) -> bool {
+        use Action::*;
+        matches!(self, GitMergeOpen | GitMergeEdit | GitMergeStage | GitMergeDelete | GitMergeContinue | GitMergeAbort)
+    }
+
     pub(crate) fn description(self) -> (&'static str, &'static str) {
         use Action::*;
+        use git_repo_ui::RepoAction::*;
         match self {
             OutlineCollapse | OutlineExpand => (
                 "表示中の文書の見出しに適用します。",
@@ -59,6 +76,20 @@ impl Action {
                 "選択したリポジトリが対象です。",
                 "Acts on the selected repository.",
             ),
+            GitRepo(OpenComparison) => ("表示中の差分を左右に並べます。", "Open the displayed diff side by side."),
+            GitRepo(ReviewBlocks) => ("表示中の差分を変更ブロックごとに確認します。", "Review the displayed diff one change block at a time."),
+            GitRepo(StageBlock) => ("選択した変更ブロックをStageします。", "Stage the selected change block."),
+            GitRepo(UnstageBlock) => ("選択した変更ブロックをUnstageします。", "Unstage the selected change block."),
+            GitRepo(OpenSearch) => ("リポジトリのコミット履歴を検索します。", "Search the repository's commit history."),
+            GitRepo(CloseSearch) => ("履歴検索からコミットグラフに戻ります。", "Return from history search to the commit graph."),
+            GitRepo(SetBase) => ("対象のコミットを二点比較の比較元にします。", "Use the target commit as the comparison base."),
+            GitRepo(CompareWithBase) => ("比較元と対象のコミットの差分を表示します。", "Compare the base with the target commit."),
+            GitMergeOpen => ("進行中のMergeと未解決のファイルを表示します。", "Inspect the in-progress merge and unresolved files."),
+            GitMergeEdit => ("選択したファイルの作業版を文書タブで開きます。", "Open the selected working file in an editor tab."),
+            GitMergeStage => ("選択したファイルの保存済みの解消結果をStageします。", "Stage the saved resolution for the selected file."),
+            GitMergeDelete => ("片側が削除したファイルを削除してStageします。", "Delete the selected file and stage that resolution."),
+            GitMergeContinue => ("未解決のファイルがなくなったMergeを完了します。", "Complete the merge after all conflicts are resolved."),
+            GitMergeAbort => ("確認してからGitにMergeの中止を依頼します。", "Confirm before asking Git to abort the merge."),
             DiffPrevious | DiffNext | DiffClose | DiffApply | DiffKeepLeft | DiffTakeRight
             | DiffCopyLeft | DiffCopyRight => (
                 "比較中に割り当てたキーで使えます。",
@@ -93,6 +124,8 @@ pub(crate) struct Context {
     comparison_rows: ModelRc<DiffRow>,
     difference: i32,
     backup_rows: ModelRc<BackupRow>,
+    merge: Option<(PathBuf, git::MergeState, Option<git::MergeConflict>)>,
+    repo_view: Option<git_repo_ui::ActionTarget>,
 }
 
 impl Context {
@@ -114,7 +147,13 @@ impl Context {
             comparison_rows: window.get_diff_rows(),
             difference: window.get_diff_selected_row(),
             backup_rows: window.get_backup_history_rows(),
+            merge: git_merge_ui::target(),
+            repo_view: git_repo_ui::ActionTarget::capture(window),
         }
+    }
+
+    pub(crate) fn set_git_branch_target(&mut self, branch: &git::Ref) {
+        self.repo_view = self.repo_view.take().map(|target| target.for_branch(branch));
     }
 
     pub(crate) fn valid(&self, window: &AppWindow, live: &Live, action: Action) -> bool {
@@ -132,6 +171,12 @@ impl Context {
             }
             GitFetch | GitPull | GitPush | GitSync | GitCancel => {
                 self.repo == current.repo && self.branch == current.branch
+            }
+            GitRepo(action) => self.workspace == current.workspace
+                && self.repo_view.as_ref().zip(current.repo_view.as_ref())
+                    .is_some_and(|(target, current)| target.valid(current, action)),
+            action if action.is_merge_resolution() => {
+                self.workspace == current.workspace && self.merge == current.merge
             }
             DiffPrevious | DiffNext | DiffClose | DiffCopyLeft | DiffCopyRight => {
                 self.comparison == current.comparison
@@ -152,7 +197,7 @@ impl Context {
     }
 }
 
-pub(crate) fn enabled(window: &AppWindow, action: Action, document: bool, settings: bool) -> bool {
+pub(crate) fn enabled(window: &AppWindow, context: Option<&Context>, action: Action, document: bool, settings: bool) -> bool {
     use Action::*;
     if window.get_question_open() {
         return false;
@@ -164,6 +209,9 @@ pub(crate) fn enabled(window: &AppWindow, action: Action, document: bool, settin
     let shown =
         |tab: LeftTab| !overlay && window.get_tree_open() && window.get_left_tab() == tab.index();
     let git = (shown(LeftTab::Git) || repository) && window.get_git_mode() == 2;
+    let merging = window.get_git_merge_active();
+    let merge_target = merging && (!repository || git_repo_ui::root() == git_ui::active_root());
+    let resolver = git && repository && merge_target && window.get_git_merge_open() && !window.get_git_busy();
     match action {
         OutlineCollapse | OutlineExpand => shown(LeftTab::Outline) && document,
         TagsCollapse | TagsExpand => shown(LeftTab::Tags) && window.get_tag_available(),
@@ -177,20 +225,29 @@ pub(crate) fn enabled(window: &AppWindow, action: Action, document: bool, settin
                 && !window.get_workspace_cloning()
         }
         GitFetch => git && !window.get_git_busy() && window.get_git_has_commit(),
-        GitPull => git && !window.get_git_busy() && window.get_git_has_upstream(),
+        GitPull => git && !merging && !window.get_git_busy() && window.get_git_has_upstream(),
         GitPush | GitSync => {
-            git && !window.get_git_busy()
+            git && !merging && !window.get_git_busy()
                 && window.get_git_has_commit()
                 && window.get_git_on_branch()
         }
         GitCancel => git && window.get_git_can_cancel(),
         GitCommit => {
-            git && !window.get_git_busy()
+            git && !merging && !window.get_git_busy()
                 && !window.get_git_message().trim().is_empty()
                 && (window.get_git_amend()
                     || window.get_git_staged_count() > 0
                     || window.get_git_change_count() > 0)
         }
+        GitRepo(action) => repository && !window.get_git_merge_open()
+            && context.and_then(|context| context.repo_view.as_ref())
+                .is_some_and(|target| target.enabled(window, action)),
+        GitMergeOpen => git && merge_target && !window.get_git_merge_open() && !window.get_git_busy(),
+        GitMergeEdit => resolver && window.get_git_merge_selected() >= 0 && window.get_git_merge_can_edit(),
+        GitMergeStage => resolver && window.get_git_merge_selected() >= 0,
+        GitMergeDelete => resolver && window.get_git_merge_selected() >= 0 && window.get_git_merge_can_delete(),
+        GitMergeContinue => resolver && window.get_git_merge_ready(),
+        GitMergeAbort => resolver,
         DiffPrevious => diff && window.get_diff_can_previous(),
         DiffNext => diff && window.get_diff_can_next(),
         DiffClose | DiffCopyLeft | DiffCopyRight => diff,
@@ -230,7 +287,7 @@ fn print_step(window: &AppWindow) -> i32 {
     window.get_print_sheets().row_count().max(1) as i32
 }
 
-pub(crate) fn execute(window: &AppWindow, live: &Live, action: Action) {
+pub(crate) fn execute(window: &AppWindow, live: &Live, context: Option<&Context>, action: Action) {
     match action {
         Action::OutlineCollapse => fold_whole_outline(window, live, true),
         Action::OutlineExpand => fold_whole_outline(window, live, false),
@@ -248,6 +305,11 @@ pub(crate) fn execute(window: &AppWindow, live: &Live, action: Action) {
         Action::GitSync => git_ui::act(window, live, git_ui::Action::Sync),
         Action::GitCancel => git_ui::cancel(),
         Action::GitCommit => git_ui::commit(window, live),
+        Action::GitRepo(action) => {
+            if let Some(target) = context.and_then(|context| context.repo_view.as_ref()) {
+                target.execute(window, live, action);
+            }
+        }
         Action::DiffPrevious => window.invoke_diff_next_difference(false),
         Action::DiffNext => window.invoke_diff_next_difference(true),
         Action::DiffClose => window.invoke_diff_dismissed(),
@@ -267,27 +329,72 @@ pub(crate) fn execute(window: &AppWindow, live: &Live, action: Action) {
         Action::SettingsExport => window.invoke_settings_export_requested(),
         Action::SettingsImport => window.invoke_settings_import_requested(),
         Action::SettingsReset => window.invoke_reset_all_requested(),
+        Action::GitMergeOpen | Action::GitMergeEdit | Action::GitMergeStage
+        | Action::GitMergeDelete | Action::GitMergeContinue | Action::GitMergeAbort => {
+            git_merge_ui::execute(window, live, action)
+        }
     }
 }
 
 pub(crate) fn wire(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
-    let live = live.clone();
+    let run_live = live.clone();
     window.on_surface_action(move |id| {
         let Some(window) = weak.upgrade() else { return };
-        let Some(action) =
-            actions::index_of(&id).and_then(|at| actions::all()[at].command.as_ref())
-        else {
-            return;
-        };
-        if let menu_commands::Command::PanelAction(action) = action {
-            queue(&window, &live, *action);
+        if let Some(action) = action_of(&id) {
+            queue(&window, &run_live, action);
         }
     });
+    let weak = window.as_weak();
+    let run_live = live.clone();
+    window.on_git_repo_branch_action(move |id| {
+        use git_repo_ui::RepoAction::{CompareWithBase, SetBase};
+        let Some(window) = weak.upgrade() else { return };
+        if let Some(action @ Action::GitRepo(SetBase | CompareWithBase)) = action_of(&id)
+            && let Some(target) = git_repo_ui::take_branch_target()
+        {
+            queue_target(&window, &run_live, target, action);
+        }
+    });
+    let weak = window.as_weak();
+    let live = live.clone();
+    window.on_git_action_allowed(move |id, branch_menu, _generation| {
+        let Some(window) = weak.upgrade() else { return false };
+        let Some(action) = action_of(&id) else { return false };
+        let command = menu_commands::Command::PanelAction(action);
+        let target = if branch_menu {
+            git_repo_ui::branch_target()
+        } else {
+            Some(menu_commands::Target::for_surface(&window, &live))
+        };
+        target.as_ref().is_some_and(|target| {
+            menu_commands::Scene::read(&window, &live, target).enabled(&command)
+        })
+    });
+    window.on_git_action_title(|id| {
+        actions::index_of(&id)
+            .map(|at| {
+                let title = &actions::all()[at].title;
+                pick(&title.0, &title.1).into()
+            })
+            .unwrap_or_default()
+    });
+}
+
+fn action_of(id: &str) -> Option<Action> {
+    let at = actions::index_of(id)?;
+    match actions::all()[at].command.as_ref()? {
+        menu_commands::Command::PanelAction(action) => Some(*action),
+        _ => None,
+    }
 }
 
 pub(crate) fn queue(window: &AppWindow, live: &Live, action: Action) {
     let target = menu_commands::Target::for_surface(window, live);
+    queue_target(window, live, target, action);
+}
+
+fn queue_target(window: &AppWindow, live: &Live, target: menu_commands::Target, action: Action) {
     let weak = window.as_weak();
     let live = live.clone();
     Timer::single_shot(Duration::ZERO, move || {

@@ -21,6 +21,7 @@ export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
 import { BackupHistoryList, BackupPaneRow, BackupRow, BackupsView } from "backup-view.slint";
 import { GitChangesView, GitRow } from "git-view.slint";
+import { GitMergeView } from "git-merge.slint";
 import { GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitHunkLine, GitHunkRow, GitLine, GitRef, GitRepositoryView, GitSearchRow } from "git-repository.slint";
 import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
@@ -1278,14 +1279,14 @@ export component AppWindow inherits Window {
     callback git-repo-commit-selected(int);
     callback git-repo-commit-menu(int, int);
     callback git-repo-show-more();
-    callback git-repo-toggle-search();
     callback git-repo-search(int, string);
     callback git-repo-next-search-page();
     callback git-repo-search-selected(int);
-    callback git-repo-choose-commit(bool);
     callback git-repo-branch-clicked(int);
     callback git-repo-branch-activated(int);
-    callback git-repo-branch-menu(int, int);
+    callback git-repo-capture-branch-menu(int);
+    callback git-repo-branch-menu(int);
+    callback git-repo-branch-action(string);
     callback git-repo-branch-dropped(int, int);
     callback git-repo-file-clicked(int);
     callback git-repo-file-menu(int, int);
@@ -1302,6 +1303,8 @@ export component AppWindow inherits Window {
     in property <bool> git-repo-hunks-active;
     in property <bool> git-repo-hunks-staged;
     in property <[GitHunkRow]> git-repo-hunks;
+    in property <int> git-repo-hunk-selected: -1;
+    in property <int> git-repo-action-generation;
     in property <bool> git-repo-can-undo;
     in property <string> git-repo-undo-tip;
     in property <bool> git-repo-can-redo;
@@ -1312,10 +1315,22 @@ export component AppWindow inherits Window {
     callback git-repo-redo();
     callback git-repo-diff-back();
     callback git-repo-diff-working-chosen(bool);
-    callback git-repo-diff-open-full();
-    callback git-repo-open-hunks();
-    callback git-repo-apply-hunk(int);
+    callback git-repo-select-hunk(int);
     callback git-repo-diff-width-changed(float);
+    in property <bool> git-merge-active;
+    in property <bool> git-merge-open;
+    in property <bool> git-merge-ready;
+    in property <bool> git-merge-can-edit;
+    in property <bool> git-merge-can-delete;
+    in property <int> git-merge-selected: -1;
+    in property <int> git-merge-version;
+    in property <string> git-merge-head;
+    in property <string> git-merge-incoming;
+    in property <string> git-merge-body;
+    in property <[string]> git-merge-paths;
+    callback git-merge-file(int);
+    callback git-merge-version-chosen(int);
+    callback git-merge-back();
     /// 左ペインの Backups の行（`backup_ui::publish_pane`）。
     in property <[BackupPaneRow]> backup-pane-rows;
     callback backup-pane-clicked(int);
@@ -1622,6 +1637,8 @@ export component AppWindow inherits Window {
     callback shortcut-is-tree(int) -> bool;
     callback shortcut-key(string, bool, bool, bool) -> bool;
     callback surface-action(string);
+    pure callback git-action-allowed(string, bool, int) -> bool;
+    pure callback git-action-title(string) -> string;
     callback panel-shortcut(string, bool, bool, bool) -> bool;
 
     // 要件 7.10: 紙の形で見る——印刷プレビュー。
@@ -1806,6 +1823,7 @@ export component AppWindow inherits Window {
     // 並びきらない分は末尾の「⋯」にまとめる（`FormatButtons`）。
     if root.format-toolbar-open: Rectangle {
         y: root.title-height;
+        visible: !root.git-merge-open;
         width: root.width;
         height: 34px;
         background: Tok.chrome;
@@ -1831,6 +1849,7 @@ export component AppWindow inherits Window {
     }
     VerticalBox {
         y: root.chrome-height;
+        visible: !root.git-merge-open;
         height: root.height - root.chrome-height;
         spacing: 0px;
 
@@ -2107,6 +2126,10 @@ export component AppWindow inherits Window {
                     if root.left-tab == 8: GitChangesView {
                         vertical-stretch: 1;
                         mode: root.git-mode;
+                        merging: root.git-merge-active;
+                        resolve-title: root.git-action-title("git.merge-resolution");
+                        resolve-allowed: root.git-action-allowed("git.merge-resolution", false, root.git-repo-action-generation);
+                        resolve-merge => { root.surface-action("git.merge-resolution"); }
                         note: root.git-note;
                         repos: root.git-repos;
                         repo-index: root.git-repo-index;
@@ -6982,8 +7005,32 @@ export component AppWindow inherits Window {
         height: root.height - root.title-height;
         background: Tok.paper;
         TouchArea { }
-        GitRepositoryView {
+        if root.git-merge-open: GitMergeView {
+            repository: root.git-repo-name;
+            branch: root.git-branch;
+            head: root.git-merge-head;
+            incoming: root.git-merge-incoming;
+            paths: root.git-merge-paths;
+            selected: root.git-merge-selected;
+            version: root.git-merge-version;
+            body: root.git-merge-body;
+            ready: root.git-merge-ready;
+            can-delete: root.git-merge-can-delete;
+            focus-generation: root.git-repo-focus-generation;
+            back => { root.git-merge-back(); }
+            select(index) => { root.git-merge-file(index); }
+            show-version(index) => { root.git-merge-version-chosen(index); }
+            action(id) => { root.surface-action(id); }
+            allowed(id) => { return root.git-action-allowed(id, false, root.git-repo-action-generation); }
+            action-title(id) => { return root.git-action-title(id); }
+            shortcut(text, control, alt, shift) => { return root.shortcut-key(text, control, alt, shift); }
+        }
+        if !root.git-merge-open: GitRepositoryView {
             repo-name: root.git-repo-name;
+            merging: root.git-merge-active;
+            action(id) => { root.surface-action(id); }
+            allowed(id, branch-menu) => { return root.git-action-allowed(id, branch-menu, root.git-repo-action-generation); }
+            action-title(id) => { return root.git-action-title(id); }
             branch: root.git-branch;
             branches: root.git-branches;
             has-commit: root.git-has-commit;
@@ -7031,6 +7078,7 @@ export component AppWindow inherits Window {
             hunks-active: root.git-repo-hunks-active;
             hunks-staged: root.git-repo-hunks-staged;
             hunks: root.git-repo-hunks;
+            hunk-selected: root.git-repo-hunk-selected;
             can-undo: root.git-repo-can-undo;
             undo-tip: root.git-repo-undo-tip;
             can-redo: root.git-repo-can-redo;
@@ -7039,9 +7087,7 @@ export component AppWindow inherits Window {
             redo => { root.git-repo-redo(); }
             diff-back => { root.git-repo-diff-back(); }
             diff-working-chosen(working) => { root.git-repo-diff-working-chosen(working); }
-            diff-open-full => { root.git-repo-diff-open-full(); }
-            open-hunks => { root.git-repo-open-hunks(); }
-            apply-hunk(index) => { root.git-repo-apply-hunk(index); }
+            select-hunk(index) => { root.git-repo-select-hunk(index); }
             diff-width-changed(width) => { root.git-repo-diff-width-changed(width); }
             changes-mode: root.git-mode;
             changes-note: root.git-note;
@@ -7065,15 +7111,15 @@ export component AppWindow inherits Window {
             cancel => { root.surface-action("git.cancel"); }
             commit-selected(index) => { root.git-repo-commit-selected(index); }
             commit-menu(index, action) => { root.git-repo-commit-menu(index, action); }
-            toggle-search => { root.git-repo-toggle-search(); }
             search(field, query) => { root.git-repo-search(field, query); }
             next-search-page => { root.git-repo-next-search-page(); }
             search-selected(index) => { root.git-repo-search-selected(index); }
-            choose-commit(as-base) => { root.git-repo-choose-commit(as-base); }
             show-more => { root.git-repo-show-more(); }
             branch-clicked(index) => { root.git-repo-branch-clicked(index); }
             branch-activated(index) => { root.git-repo-branch-activated(index); }
-            branch-menu(index, action) => { root.git-repo-branch-menu(index, action); }
+            capture-branch-menu(index) => { root.git-repo-capture-branch-menu(index); }
+            branch-menu(action) => { root.git-repo-branch-menu(action); }
+            branch-action(id) => { root.git-repo-branch-action(id); }
             branch-dropped(from, to) => { root.git-repo-branch-dropped(from, to); }
             file-clicked(index) => { root.git-repo-file-clicked(index); }
             file-menu(index, action) => { root.git-repo-file-menu(index, action); }
