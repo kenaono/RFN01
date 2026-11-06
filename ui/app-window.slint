@@ -1794,7 +1794,7 @@ export component AppWindow inherits Window {
     if root.custom-title: TitleMenuBar {
         x: 0px; y: 0px; width: root.width;
         menu-visible: root.title-menu-visible;
-        blocked: root.question-open || root.print-active || root.diff-active || root.git-repo-active || root.git-catalog-open;
+        blocked: root.question-open || root.print-active || root.diff-active || root.git-repo-active;
         maximized: root.title-maximized;
         hot: root.title-hot;
         pressed: root.title-pressed;
@@ -1837,7 +1837,7 @@ export component AppWindow inherits Window {
     // 並びきらない分は末尾の「⋯」にまとめる（`FormatButtons`）。
     if root.format-toolbar-open: Rectangle {
         y: root.title-height;
-        visible: !root.git-merge-open && !root.git-worktrees-open && !root.git-catalog-open;
+        visible: !root.git-merge-open && !root.git-worktrees-open;
         width: root.width;
         height: 34px;
         background: Tok.chrome;
@@ -1863,7 +1863,7 @@ export component AppWindow inherits Window {
     }
     VerticalBox {
         y: root.chrome-height;
-        visible: !root.git-merge-open && !root.git-worktrees-open && !root.git-catalog-open;
+        visible: !root.git-merge-open && !root.git-worktrees-open;
         height: root.height - root.chrome-height;
         spacing: 0px;
 
@@ -2000,19 +2000,15 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // RFN01-67（書き手と決めた 2026-10-03）: Git Changes。Backups の上。
+                // RFN01-140: Git Changesとリポジトリ一覧は同じ左ペインを使う。
                 IconButton {
                     x: 7px;
                     y: 214px;
                     icon: Icons.git;
-                    tip: @tr("Git Changes");
+                    tip: root.git-action-title("view.sidebar.git");
                     checked: root.tree-open && root.left-tab == 8;
-                    clicked => {
-                        root.tree-open = !(root.tree-open && root.left-tab == 8);
-                        root.left-tab = 8;
-                        root.left-tab-chosen(8);
-                        root.focus-generation += 1;
-                    }
+                    enabled: root.git-action-allowed("view.sidebar.git", false, root.git-repo-action-generation);
+                    clicked => { root.surface-action("view.sidebar.git"); }
                 }
 
                 // RFN01-61（書き手の求め 2026-09-27）: バックアップの管理はここへ集める。
@@ -2137,7 +2133,24 @@ export component AppWindow inherits Window {
                             IconButton { icon: "M1 2h14L9 8v6l-2-1V8z"; tip: @tr("Filter files…"); checked: root.workspace-filter-visible; clicked => { root.workspace-filter-visible = !root.workspace-filter-visible; } }
                         }
                     }
-                    if root.left-tab == 8: GitChangesView {
+                    if root.left-tab == 8 && root.git-catalog-open: GitCatalogView {
+                        vertical-stretch: 1;
+                        rows: root.git-catalog-rows;
+                        note: root.git-catalog-note;
+                        scanning: root.git-catalog-scanning;
+                        focus-generation: root.git-catalog-focus;
+                        workspace-active: root.workspace-active;
+                        tooltip-enabled: !root.question-open && !root.palette-open;
+                        selected <=> root.git-catalog-selected;
+                        filter <=> root.git-catalog-filter;
+                        current-only <=> root.git-catalog-current-only;
+                        filter-changed => { root.git-catalog-filter-changed(); }
+                        action(id) => { root.surface-action(id); }
+                        allowed(id) => { return root.git-action-allowed(id, false, root.git-repo-action-generation); }
+                        action-title(id) => { return root.git-action-title(id); }
+                        shortcut(event) => { return root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject; }
+                    }
+                    if root.left-tab == 8 && !root.git-catalog-open: GitChangesView {
                         vertical-stretch: 1;
                         mode: root.git-mode;
                         merging: root.git-merge-active;
@@ -6958,24 +6971,6 @@ export component AppWindow inherits Window {
         }
     }
 
-    if root.git-catalog-open: GitCatalogView {
-        y: root.title-height;
-        height: root.height - root.title-height;
-        rows: root.git-catalog-rows;
-        note: root.git-catalog-note;
-        scanning: root.git-catalog-scanning;
-        focus-generation: root.git-catalog-focus;
-        workspace-active: root.workspace-active;
-        selected <=> root.git-catalog-selected;
-        filter <=> root.git-catalog-filter;
-        current-only <=> root.git-catalog-current-only;
-        filter-changed => { root.git-catalog-filter-changed(); }
-        action(id) => { root.surface-action(id); }
-        allowed(id) => { return root.git-action-allowed(id, false, root.git-repo-action-generation); }
-        action-title(id) => { return root.git-action-title(id); }
-        shortcut(event) => { return root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject; }
-    }
-
     // RFN01-67 PR 2a: Git Repository。ペインとTABはこの下にそのまま残る。比較の画面はこの上に
     // 開く（ファイルの比較を閉じると、この画面へ戻る）。
     // **窓の題の帯は覆わない。**右上は Windows が窓の閉じる釦として扱う場所で、そこに
@@ -7197,6 +7192,19 @@ export component AppWindow inherits Window {
             property <bool> name-focused: false;
             property <bool> destination-focused: false;
             property <int> focus-field: 0;
+            property <length> choice-step: 36px;
+            property <length> choices-height: root.question-choices.length * self.choice-step - 8px;
+            changed selected-choice => {
+                if self.selected-choice >= 0 {
+                    let top = self.selected-choice * self.choice-step;
+                    let bottom = top + 28px;
+                    if top < -question-options.content-y {
+                        question-options.content-y = -top;
+                    } else if bottom > -question-options.content-y + question-options.visible-height {
+                        question-options.content-y = question-options.visible-height - bottom;
+                    }
+                }
+            }
             changed generation => {
                 self.selected-choice = -1;
             }
@@ -7415,23 +7423,30 @@ export component AppWindow inherits Window {
                             // draws over what is beside it rather than wrapping
                             // (6.23). A column fits whatever the words are, in
                             // any language.
-                            VerticalLayout {
-                                spacing: 8px;
+                            question-options := ScrollView {
+                                content-height: question-keys.choices-height;
+                                content-width: self.visible-width;
+                                height: max(28px, min(question-keys.choices-height, root.height * 0.45));
 
-                                for choice[index] in root.question-choices: TextButton {
-                                    enabled: !root.question-is-clone || !root.workspace-cloning || index != 0;
-                                    keyboard-selected: index == question-keys.selected-choice && question-keys.has-focus;
-                                    title: choice;
-                                    wide: true;
-                                    role: index == 0
-                                        ? Role.primary
-                                        : (index == root.question-danger
-                                            ? Role.danger
-                                            : (index == root.question-choices.length - 1
-                                                ? Role.quiet
-                                                : Role.normal));
-                                    clicked => {
-                                        root.question-answered(index);
+                                VerticalLayout {
+                                    width: parent.visible-width;
+                                    spacing: 8px;
+
+                                    for choice[index] in root.question-choices: TextButton {
+                                        enabled: !root.question-is-clone || !root.workspace-cloning || index != 0;
+                                        keyboard-selected: index == question-keys.selected-choice && question-keys.has-focus;
+                                        title: choice;
+                                        wide: true;
+                                        role: index == 0
+                                            ? Role.primary
+                                            : (index == root.question-danger
+                                                ? Role.danger
+                                                : (index == root.question-choices.length - 1
+                                                    ? Role.quiet
+                                                    : Role.normal));
+                                        clicked => {
+                                            root.question-answered(index);
+                                        }
                                     }
                                 }
                             }

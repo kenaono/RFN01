@@ -277,7 +277,18 @@ pub fn repository_root(folder: &Path) -> Result<Option<PathBuf>, GitError> {
 
 /// The catalog distinguishes a normal folder from an unreadable registration.
 pub(crate) fn registered_repository(folder: &Path) -> Result<Option<PathBuf>, GitError> {
-    std::fs::read_dir(folder).map_err(|error| GitError::Failed(error.to_string()))?;
+    std::fs::read_dir(folder).map_err(|error| {
+        let detail = if error.kind() == std::io::ErrorKind::NotFound {
+            crate::i18n::pick(
+                "登録フォルダが見つかりません。",
+                "The registered folder was not found.",
+            )
+            .to_owned()
+        } else {
+            error.to_string()
+        };
+        GitError::Failed(detail)
+    })?;
     let output = run(folder, &["rev-parse", "--show-toplevel"], None)?;
     if output.ok {
         let root = PathBuf::from(output.text().trim_end_matches(['\r', '\n']));

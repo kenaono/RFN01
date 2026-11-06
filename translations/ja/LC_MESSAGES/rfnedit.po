@@ -1721,11 +1721,8 @@ msgstr "新しいWorktree"
 msgid "Repositories"
 msgstr "リポジトリ一覧"
 
-msgid "Git repositories in your Workspaces"
-msgstr "Workspaceに登録されているGitリポジトリ"
-
-msgid "Filter by name, path, branch or Workspace"
-msgstr "名前・パス・ブランチ・Workspaceで絞り込み"
+msgid "Filter repositories"
+msgstr "リポジトリを絞り込み"
 
 msgid "Current Workspace"
 msgstr "現在のWorkspace"
@@ -1741,15 +1738,6 @@ msgstr "一致するリポジトリがありません。"
 
 msgid "No Git repositories in the registered folders."
 msgstr "登録フォルダにGitリポジトリがありません。"
-
-msgid "Current repository"
-msgstr "現在の作業先"
-
-msgid "Unavailable"
-msgstr "確認できません"
-
-msgid "Switch to Workspace: {}"
-msgstr "切り替え先のWorkspace：{}"
 
 msgid "Create a new branch from the current commit."
 msgstr "現在のコミットから新しいブランチを作成します。"

@@ -7456,7 +7456,8 @@ fn publish_left(window: &AppWindow, live: &Live) {
         LeftTab::Bookmarks => bookmark_ui::publish(window, live),
         LeftTab::Tags => publish_tags(window, live),
         LeftTab::Backups => backup_ui::publish_pane(window, live),
-        LeftTab::Git => git_ui::publish(window, live),
+        LeftTab::Git if !git_catalog_ui::visible(window) => git_ui::publish(window, live),
+        LeftTab::Git => {}
     }
 }
 
@@ -9506,21 +9507,44 @@ fn continue_workspace_change(
     live: &Live,
     target: Option<workspace::WorkspaceId>,
 ) {
+    let repository_destination = git_catalog_ui::workspace_destination(live);
     if closing_has_unsaved(live, target) {
+        let text = if let Some(name) = repository_destination {
+            say!(
+                "「{name}」に切り替えると、現在開いているタブを閉じます。\n\n未保存の文書があります。保存するか破棄するか選んでください。",
+                "Switching to “{name}” closes the currently open tabs.\n\nThere are unsaved documents. Choose whether to save or discard them."
+            )
+        } else {
+            say!(
+                "Workspaceを切り替えるため、今のTABを閉じます（WorkspaceのTABは、次に開いたときに戻ります）。未保存の文書があります。キャンセルすると現在のTABとWorkspaceを維持します。",
+                "Changing Workspace closes the current tabs (a Workspace's tabs come back when it is opened again). There are unsaved documents. Cancel keeps the current tabs and Workspace."
+            )
+        };
         ask_question(
             window,
             live,
             Question::ChangeWorkspace(target),
-            say!(
-                "Workspaceを切り替えるため、今のTABを閉じます（WorkspaceのTABは、次に開いたときに戻ります）。未保存の文書があります。キャンセルすると現在のTABとWorkspaceを維持します。",
-                "Changing Workspace closes the current tabs (a Workspace's tabs come back when it is opened again). There are unsaved documents. Cancel keeps the current tabs and Workspace."
-            ),
+            text,
             &[
                 pick("すべて保存して切り替える", "Save All and Switch"),
                 pick("破棄して切り替える", "Discard and Switch"),
                 cancel(),
             ],
             1,
+        );
+    } else if let (Some(target), Some(name)) = (target, repository_destination)
+        && window.get_workspace_active()
+    {
+        ask_question(
+            window,
+            live,
+            Question::ConfirmRepositoryWorkspace(target),
+            say!(
+                "Workspaceを「{name}」に切り替えますか？\n\n現在開いているタブを閉じます。",
+                "Switch to the “{name}” Workspace?\n\nThe currently open tabs will close."
+            ),
+            &[pick("閉じて切り替える", "Close Tabs and Switch"), cancel()],
+            -1,
         );
     } else {
         finish_workspace_change(window, live, target);
@@ -13870,6 +13894,10 @@ enum Question {
         source: Rc<RefCell<TerminalSession>>,
     },
     CloneWorkspaceUrl,
+    ChooseRepositoryWorkspace(Vec<git_catalog_ui::Selection>),
+    ChooseRepositoryRegistration(Vec<git_catalog_ui::Member>),
+    UnregisterRepository(git_catalog_ui::Removal),
+    ConfirmRepositoryWorkspace(workspace::WorkspaceId),
     ChangeWorkspace(Option<workspace::WorkspaceId>),
     /// RFN01-110: Explorerから入るWorkspaceの外のファイルが開いている。0で閉じて開く。
     OutsideForWorkspace(workspace::WorkspaceId),
@@ -14020,6 +14048,10 @@ impl Question {
             Self::PanelSwitch { .. } => "PanelSwitch",
             Self::PanelLogStamp { .. } => "PanelLogStamp",
             Self::TerminalClose(..) => "TerminalClose",
+            Self::ChooseRepositoryWorkspace(..) => "ChooseRepositoryWorkspace",
+            Self::ChooseRepositoryRegistration(..) => "ChooseRepositoryRegistration",
+            Self::UnregisterRepository(..) => "UnregisterRepository",
+            Self::ConfirmRepositoryWorkspace(..) => "ConfirmRepositoryWorkspace",
             Self::ChangeWorkspace(..) => "ChangeWorkspace",
             Self::OutsideForWorkspace(..) => "OutsideForWorkspace",
             Self::About => "About",
@@ -14241,6 +14273,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         return;
     };
     if matches!(&question, Question::ChangeWorkspace(_) if choice >= 2)
+        || matches!(&question, Question::ConfirmRepositoryWorkspace(_) if choice != 0)
         || matches!(&question, Question::DiscardForWorkspace(_) if choice != 0)
         || matches!(&question, Question::OutsideForWorkspace(_) if choice != 0)
     {
@@ -14250,7 +14283,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     // The question took the keyboard away from the pane to ask (6.14).
     if window.get_question_return_to_tree() {
         tree_actions::restore_focus(window);
-    } else if window.get_git_catalog_open() {
+    } else if git_catalog_ui::visible(window) {
         git_catalog_ui::regain_focus(window);
     } else if window.get_git_repo_active() && !window.get_diff_active() {
         git_repo_ui::regain_focus(window);
@@ -14345,6 +14378,26 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         }
         (Question::OutsideForWorkspace(target), 0) => {
             continue_workspace_change(window, live, Some(target));
+        }
+        (Question::ChooseRepositoryWorkspace(targets), choice) => {
+            if let Some(target) = usize::try_from(choice).ok().and_then(|index| targets.get(index)) {
+                git_catalog_ui::open(window, live, target.clone());
+            }
+        }
+        (Question::ChooseRepositoryRegistration(members), choice) => {
+            if let Some(member) = usize::try_from(choice).ok().and_then(|index| members.get(index)) {
+                git_catalog_ui::confirm_removal(window, live, member);
+            }
+        }
+        (Question::UnregisterRepository(removal), 0) => {
+            git_catalog_ui::unregister(window, live, removal);
+        }
+        (Question::ConfirmRepositoryWorkspace(target), 0) => {
+            if closing_has_unsaved(live, Some(target)) {
+                continue_workspace_change(window, live, Some(target));
+            } else {
+                finish_workspace_change(window, live, Some(target));
+            }
         }
         (Question::ChangeWorkspace(target), 0) => {
             saving::save_all_for_workspace(window, live);

@@ -1029,14 +1029,14 @@ fn build() -> Vec<ActionDef> {
         ),
         def(
             "view.sidebar.git",
-            ("サイドバー：Git Changes", "Sidebar: Git Changes"),
+            ("サイドバー：Git", "Sidebar: Git"),
             (
-                "左ペインにGitの変更を出します。",
-                "Shows Git changes in the left pane.",
+                "左ペインにGitを出します。出ていれば閉じます。",
+                "Shows or hides Git in the left pane.",
             ),
             "Ctrl+Shift+G",
             Git,
-            C::ShowLeftTab(8),
+            C::PanelAction(crate::panel_actions::Action::Repositories(crate::git_catalog_ui::Action::Enter)),
         ),
         def(
             "view.sidebar.backups",
@@ -1861,6 +1861,7 @@ fn build() -> Vec<ActionDef> {
         ("git.repositories", ("リポジトリ一覧…", "Repositories…"), A::Repositories(crate::git_catalog_ui::Action::Show)),
         ("git.repositories-refresh", ("一覧を更新", "Refresh Repository List"), A::Repositories(crate::git_catalog_ui::Action::Refresh)),
         ("git.repository-open", ("選択したリポジトリを開く", "Open Selected Repository"), A::Repositories(crate::git_catalog_ui::Action::Open)),
+        ("git.repository-unregister", ("登録解除…", "Remove Registration…"), A::Repositories(crate::git_catalog_ui::Action::Unregister)),
         ("git.repositories-close", ("リポジトリ一覧を閉じる", "Close Repository List"), A::Repositories(crate::git_catalog_ui::Action::Close)),
         ("git.merge-resolution", ("Mergeの解消を開く", "Open Merge Resolution"), A::GitMergeOpen),
         ("git.merge-edit-result", ("解消結果を編集", "Edit Merge Result"), A::GitMergeEdit),

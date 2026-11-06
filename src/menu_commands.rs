@@ -1204,7 +1204,6 @@ pub fn install(window: &AppWindow, live: &Live) {
             return;
         };
         if window.get_question_open() || window.get_print_active() || window.get_diff_active()
-            || window.get_git_catalog_open()
         {
             return;
         }

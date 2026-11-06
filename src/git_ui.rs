@@ -249,7 +249,8 @@ enum Guard {
 
 /// Git Changes が見えているか：左ペインか、Git Repository の画面（WIP の右の列）。
 fn visible(window: &AppWindow) -> bool {
-    (window.get_tree_open() && window.get_left_tab() == TAB) || window.get_git_repo_active()
+    (window.get_tree_open() && window.get_left_tab() == TAB && !window.get_git_catalog_open())
+        || window.get_git_repo_active()
 }
 
 /// 道を比べられる形に（大文字小文字・区切りを揃え、`\\?\`を外す）。
@@ -262,7 +263,7 @@ fn key(path: &Path) -> String {
     text
 }
 
-fn inside(path: &Path, folder: &Path) -> bool {
+pub(crate) fn inside(path: &Path, folder: &Path) -> bool {
     let (path, folder) = (key(path), key(folder));
     path == folder || path.starts_with(&(folder + "\\"))
 }
@@ -1821,7 +1822,7 @@ fn repo_chosen(window: &AppWindow, live: &Live, index: usize) {
     }
 }
 
-fn choose_folder(window: &AppWindow, live: &Live, folder: PathBuf) {
+fn choose_folder(window: &AppWindow, live: &Live, folder: PathBuf) -> bool {
     let changed = PANE.with(|pane| {
         let mut pane = pane.borrow_mut();
         if pane.chosen.as_ref().is_some_and(|c| key(c) == key(&folder)) {
@@ -1845,10 +1846,19 @@ fn choose_folder(window: &AppWindow, live: &Live, folder: PathBuf) {
         render(window);
         refresh(window, live);
     }
+    changed
 }
 
 pub(crate) fn select_registered_folder(window: &AppWindow, live: &Live, registered: &Path) {
     crate::git_repo_ui::open_folder(window, live, Some(registered));
+}
+
+pub(crate) fn show_changes(window: &AppWindow, live: &Live, folder: PathBuf) {
+    PANE.with(|pane| pane.borrow_mut().folders = workspace_folders(live));
+    if !choose_folder(window, live, folder) {
+        render(window);
+        refresh(window, live);
+    }
 }
 
 pub(crate) fn create_worktree(
