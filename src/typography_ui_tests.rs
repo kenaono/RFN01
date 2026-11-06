@@ -174,7 +174,8 @@ fn typography_settings_roundtrip_and_render() {
                 button: PointerEventButton::Left,
             });
     };
-    click(446.0, 277.0);
+    // The H1 background button sits below the preset header and Body settings.
+    click(508.0, 432.0);
     window.window().request_redraw();
     let mut pixels = vec![slint::Rgb8Pixel::default(); 1100 * 760];
     surface.draw_if_needed(|renderer| {
@@ -186,7 +187,7 @@ fn typography_settings_roundtrip_and_render() {
     }
     std::fs::write(output.join("background-menu.ppm"), ppm).unwrap();
     // 「Paperに合わせる」
-    click(307.0, 313.0);
+    click(530.0, 468.0);
     assert_eq!(Setting::Decoration(1, 3).read(&window, 0), 0);
     let saved_background = palette.row_data(colour_row(0, 9)).unwrap();
     set_colour(&palette, 0, PAPER_SLOT, [0.9, 1.0, 0.9]);

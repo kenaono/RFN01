@@ -161,16 +161,20 @@ pub fn undo(root: &Path, entry: &Entry) -> Result<String, GitError> {
         Kind::DeleteBranch { name, sha } => git::plain(root, &["branch", name, sha])?,
         Kind::StashAll { stash, .. } => {
             // 作った Stash がまだ一番上にあるときだけ取り出す。
-            if git::resolve(root, "refs/stash").as_ref() != stash.as_ref() {
-                return Err(GitError::Failed(
-                    crate::i18n::pick(
-                        "Stashが替わっているため戻せません",
-                        "The stash has changed, so it cannot be undone",
+            let current = git::stashes(root)?;
+            let selected = current
+                .first()
+                .filter(|current| Some(&current.oid) == stash.as_ref())
+                .ok_or_else(|| {
+                    GitError::Failed(
+                        crate::i18n::pick(
+                            "Stashが替わっているため戻せません",
+                            "The stash has changed, so it cannot be undone",
+                        )
+                        .to_owned(),
                     )
-                    .to_owned(),
-                ));
-            }
-            git::stash_apply(root, "stash@{0}", true)?;
+                })?;
+            git::stash_apply(root, selected, true)?;
         }
         Kind::Pop { message } => git::stash_all(root, message)?,
     }
@@ -190,14 +194,22 @@ pub fn redo(root: &Path, entry: &Entry) -> Result<String, GitError> {
             git::plain(root, &["reset", "-q", "--keep", needs(&after.head)?])?;
         }
         Kind::ResetKeep => git::plain(root, &["reset", "-q", "--mixed", needs(&after.head)?])?,
-        Kind::ResetDelete => git::plain(root, &["reset", "-q", "--hard", needs(&after.head)?])?,
+        Kind::ResetDelete => git::reset(root, needs(&after.head)?, true)?,
         Kind::NewBranch { name } => {
             git::plain(root, &["branch", name, needs(&after.head)?])?;
             git::plain(root, &["switch", "-q", name])?;
         }
         Kind::DeleteBranch { name, .. } => git::plain(root, &["branch", "-D", name])?,
         Kind::StashAll { message, .. } => git::stash_all(root, message)?,
-        Kind::Pop { .. } => git::stash_apply(root, "stash@{0}", true)?,
+        Kind::Pop { .. } => {
+            let stashes = git::stashes(root)?;
+            let selected = stashes.first().ok_or_else(|| {
+                GitError::Failed(
+                    crate::i18n::pick("Stashがありません", "No stash to apply").to_owned(),
+                )
+            })?;
+            git::stash_apply(root, selected, true)?;
+        }
     }
     Ok(say!("{}をやり直しました", "Redid {}", entry.label))
 }

@@ -57,6 +57,7 @@ pub fn work_copy_due(since_change: Duration, since_pending: Duration) -> bool {
 pub fn work_identity(file: &DocumentFile) -> app_data::WorkCopy {
     app_data::WorkCopy {
         origin: file.path().map(Path::to_path_buf),
+        identity: file.path_identity().map(Path::to_path_buf),
         untitled: file.untitled_number(),
         ..app_data::WorkCopy::default()
     }
@@ -73,6 +74,10 @@ pub fn work_identity(file: &DocumentFile) -> app_data::WorkCopy {
 /// スレッドが無いときはその場で消す——書き込みがその場で走る道と同じ側である。
 pub fn discard_work_copy(live: &Live, copy: &app_data::WorkCopy) {
     let name = app_data::work_file_name(copy);
+    discard_work_copy_named(live, &name);
+}
+
+fn discard_work_copy_named(live: &Live, name: &str) {
     for document in open_documents(live) {
         if app_data::work_file_name(&work_identity(&document.file.borrow())) == name {
             document.protective_recovery.set(false);
@@ -84,11 +89,10 @@ pub fn discard_work_copy(live: &Live, copy: &app_data::WorkCopy) {
     let Some(directory) = app_data::work_directory() else {
         return;
     };
-    let path = directory.join(app_data::work_file_name(copy));
-    if live.writer.remove(path) {
-        return;
+    let path = directory.join(name);
+    if !live.writer.remove(path.clone()) {
+        let _ = std::fs::remove_file(path);
     }
-    let _ = app_data::discard_in(&directory, copy);
 }
 
 pub(crate) fn work_copy_follows(
@@ -155,6 +159,8 @@ pub fn discard_memo_copy(window: &AppWindow, live: &Live, document: &Rc<OpenDocu
             )
             .into(),
         );
+    } else {
+        retire_previous_work_copies(live, document);
     }
     removed
 }
@@ -184,12 +190,12 @@ pub fn discard_all_work_copies(live: &Live) -> usize {
     // 名前を作るのに要るのは`work_file_name`だけで、道は
     // [`discard_work_copy`]がもう一度組み立てる。ここでフォルダを訊くのは
     // **置き場所が無ければ数える対象も無い**からである。
-    let records = app_data::read_records_in(&directory);
+    let records: Vec<_> = app_data::work_headers_in(&directory).collect();
     let documents = open_documents(live);
     let protected: std::collections::HashSet<_> = records
         .iter()
-        .filter(|(_, protected)| *protected)
-        .map(|(copy, _)| app_data::work_file_name(copy))
+        .filter(|(_, _, protected)| *protected)
+        .map(|(_, copy, _)| app_data::work_file_name(copy))
         .chain(
             documents
                 .iter()
@@ -197,23 +203,39 @@ pub fn discard_all_work_copies(live: &Live) -> usize {
                 .map(|document| app_data::work_file_name(&work_identity(&document.file.borrow()))),
         )
         .collect();
-    let mut named = Vec::new();
-    let mut copies = Vec::new();
-    for copy in records.into_iter().map(|(copy, _)| copy).chain(
-        documents
-            .iter()
-            .map(|document| work_identity(&document.file.borrow())),
-    ) {
+    let protected_old: std::collections::HashSet<_> = documents
+        .iter()
+        .filter(|document| document.protective_recovery.get())
+        .flat_map(|document| {
+            document
+                .previous_work_copies
+                .borrow()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut named = std::collections::HashSet::new();
+    for (name, copy, _) in records {
+        if !protected.contains(&app_data::work_file_name(&copy)) && !protected_old.contains(&name) {
+            named.insert(name);
+        }
+    }
+    for document in documents {
+        let copy = work_identity(&document.file.borrow());
         let name = app_data::work_file_name(&copy);
         if protected.contains(&name) || named.contains(&name) {
             continue;
         }
-        named.push(name);
-        copies.push(copy);
+        // An ordinary write can finish after enumeration. Check its header
+        // before queuing removal, and leave unreadable copies alone.
+        if app_data::may_discard_work_path(&directory.join(&name)) {
+            named.insert(name);
+        }
     }
-    let gone = copies.len();
-    for copy in &copies {
-        discard_work_copy(live, copy);
+    let gone = named.len();
+    for name in &named {
+        discard_work_copy_named(live, name);
     }
     live.cache
         .borrow_mut()
@@ -253,6 +275,14 @@ pub fn keep_work_copies_again(live: &Live) -> usize {
         .borrow_mut()
         .log_diag("work", &format!("autosave on, waiting={waiting}"));
     waiting
+}
+
+pub fn apply_autosave_transition(live: &Live, enabled: bool) {
+    if enabled {
+        keep_work_copies_again(live);
+    } else {
+        discard_all_work_copies(live);
+    }
 }
 
 /// Whether the settings file leaves the automatic work copies switched on.
@@ -409,7 +439,12 @@ fn write_work_copy_of_impl(
     let caret = showing.and_then(|id| live.states.of(id).borrow().caret_source_byte);
     let copy = app_data::WorkCopy {
         origin: file.borrow().path().map(Path::to_path_buf),
+        identity: file.borrow().path_identity().map(Path::to_path_buf),
         untitled: file.borrow().untitled_number(),
+        form: file.borrow().path().map(|_| {
+            let file = file.borrow();
+            (file.form(), file.chosen_encoding().is_some())
+        }),
         caret,
         // 要件 8.3（2026-09-08追加）: **どの版に対して書いていたか**を一緒に
         // 置く。これが無いと、次の起動で復元したとき「合意した姿」が*その時の*
@@ -471,12 +506,44 @@ fn write_work_copy_of_impl(
 /// `finish`のあと——**窓が閉じたあと**——にしか分からなかった。ディスクが一杯でも
 /// 書き込み権が無くても、書き手には最後の入力を失ったことを知る道が無い。
 ///
-/// 返すのは**書けなかった作業コピーの数**。0なら何も起きなかったのと同じで、
-/// 問いは増えない（要件 8.1 は静かな約束である）。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct WorkCopyFlush {
+    pub failed: usize,
+    pub pending: usize,
+}
+
+impl WorkCopyFlush {
+    pub fn unconfirmed(&self) -> usize {
+        self.failed + self.pending
+    }
+}
+
+#[cfg(test)]
 pub fn flush_work_copies(window: &AppWindow, live: &Live) -> usize {
+    settle_work_copies(window, live, WORK_COPY_SETTLE).unconfirmed()
+}
+
+pub(crate) fn settle_work_copies(
+    window: &AppWindow,
+    live: &Live,
+    timeout: Duration,
+) -> WorkCopyFlush {
     write_work_copy_now(window, live);
-    let landed = live.writer.settle(WORK_COPY_SETTLE);
-    report_write_results(window, live, landed)
+    let landed = live.writer.settle(timeout);
+    report_write_results(window, live, landed);
+    let mut status = WorkCopyFlush::default();
+    for document in open_documents(live) {
+        if !document.text.edited() || !(window.get_autosave() || document.protective_recovery.get())
+        {
+            continue;
+        }
+        if document.recovery_write.get().is_some() {
+            status.pending += 1;
+        } else if document.recovery_failed.get() || document.text.pending_since().is_some() {
+            status.failed += 1;
+        }
+    }
+    status
 }
 
 /// Log what the writer thread has finished since last asked.
@@ -558,8 +625,11 @@ pub fn report_write_results(
         // **新しい編集が来ていれば何もしない**（`retry_work_copy`は待っている
         // 旗があれば触らない）。そちらの時計のほうが正しい。
         if let Some(document) = document {
-            document.text.retry_work_copy();
-            document.recovery_failed.set(true);
+            if result.sequence.is_none() || document.recovery_write.get() == result.sequence {
+                document.recovery_write.set(None);
+                document.text.retry_work_copy();
+                document.recovery_failed.set(true);
+            }
         }
         // **画面にも出す。**要件 8.1 は書き手への約束なので、守れていないことは
         // 書き手が知っていなければならない。1件目だけ——同じ理由で失敗した
@@ -842,23 +912,62 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
     let Some(directory) = app_data::work_directory() else {
         return Vec::new();
     };
-    let mut tabs = Vec::new();
-    for (copy, protected) in app_data::read_records_in(&directory) {
-        if !ordinary_recovery && !protected {
-            continue;
-        }
+    let mut tabs: Vec<(Rc<OpenDocument>, EditorState)> = Vec::new();
+    for (name, copy, mut protected) in app_data::restore_work_records(&directory, ordinary_recovery)
+    {
         let untitled = copy.untitled.max(1);
-        let (file, saved_text) = match &copy.origin {
-            Some(path) => match DocumentFile::open(path, MAX_DOCUMENT_CHARACTERS) {
-                Ok((file, text)) => {
-                    let saved =
-                        (copy.stamp.is_some() && copy.stamp == file.agreed_stamp()).then_some(text);
-                    (file, saved)
+        let (mut file, mut saved_text) = match &copy.origin {
+            Some(path) => {
+                let loaded = match copy.form {
+                    Some((form, _)) => {
+                        DocumentFile::open_as(path, MAX_DOCUMENT_CHARACTERS, form.encoding)
+                    }
+                    None => DocumentFile::open(path, MAX_DOCUMENT_CHARACTERS),
+                };
+                match loaded {
+                    Ok((file, text)) => {
+                        let saved = (copy.stamp.is_some() && copy.stamp == file.agreed_stamp())
+                            .then_some(text);
+                        (file, saved)
+                    }
+                    Err(_) => (DocumentFile::unavailable(path.clone(), copy.stamp), None),
                 }
-                Err(_) => (DocumentFile::unavailable(path.clone(), copy.stamp), None),
-            },
+            }
             None => (DocumentFile::untitled(untitled), Some(String::new())),
         };
+        if let Some((form, explicit)) = copy.form {
+            file.restore_form(form, explicit);
+        }
+        if let Some(identity) = copy.identity {
+            if file.path_identity() != Some(identity.as_path()) {
+                saved_text = None;
+            }
+            file.restore_path_identity(identity);
+        }
+        let duplicate = file.path_identity().is_some()
+            && tabs.iter().any(|(document, _)| {
+                document.file.borrow().path_identity() == file.path_identity()
+            });
+        if duplicate {
+            // Older versions could save two different drafts through aliases.
+            // Give the additional text its own recovery identity.
+            let number = (1..)
+                .find(|number| {
+                    !directory
+                        .join(app_data::work_file_name(&app_data::WorkCopy {
+                            untitled: *number,
+                            ..Default::default()
+                        }))
+                        .exists()
+                        && tabs.iter().all(|(document, _)| {
+                            document.file.borrow().untitled_number() != *number
+                        })
+                })
+                .expect("a free untitled number");
+            file = DocumentFile::untitled(number);
+            saved_text = None;
+            protected = true;
+        }
         // Rounded here, because the copy was written by another run and nothing
         // guarantees the text is the same length now (6.7's rule, applied
         // across runs rather than across panes).
@@ -870,6 +979,9 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
         };
         let document = OpenDocument::new(file, copy.text, window.as_weak());
         document.protective_recovery.set(protected);
+        if name != app_data::work_file_name(&work_identity(&document.file.borrow())) {
+            document.previous_work_copies.borrow_mut().insert(name);
+        }
         // 要件 8.3（2026-09-08追加）: **退避した時点の姿へ戻す。**`open`は
         // いま読んだファイルの姿を「合意した姿」として持っているので、その
         // ままでは閉じているあいだに別のアプリが書き換えていても
@@ -886,6 +998,9 @@ pub fn restore_tabs(window: &AppWindow) -> Vec<(Rc<OpenDocument>, EditorState)> 
         // the copy on disk already holds it, so nothing is waiting to be
         // written.
         document.text.mark_restored(saved_text);
+        if duplicate {
+            document.text.mark_pending();
+        }
         let change = document.file.borrow().external_change();
         document.missing.set(change == ExternalChange::Missing);
         document.outside.set(change != ExternalChange::None);
@@ -1358,16 +1473,25 @@ pub fn backups_follow(window: &AppWindow, live: &Live, from: &Path, to: &Path) {
 /// document at a time by `Ctrl+S` — silently overwriting it here is exactly what
 /// 要件 8.3 exists to prevent. The status bar says how many were left.
 pub fn save_all(window: &AppWindow, live: &Live) {
-    save_all_native(window, live, false);
+    save_all_native(window, live, false, open_documents(live));
 }
 
-pub(crate) fn save_all_for_workspace(window: &AppWindow, live: &Live) {
-    save_all_native(window, live, true);
+pub(crate) fn save_all_for_workspace(
+    window: &AppWindow,
+    live: &Live,
+    closing: Vec<Rc<OpenDocument>>,
+) {
+    save_all_native(window, live, true, closing);
 }
 
-fn save_all_native(window: &AppWindow, live: &Live, include_memos: bool) {
+fn save_all_native(
+    window: &AppWindow,
+    live: &Live,
+    include_memos: bool,
+    documents: Vec<Rc<OpenDocument>>,
+) {
     let owner = ime::window_handle(window);
-    save_all_including_memos_with_choice(window, live, include_memos, |document| {
+    save_documents_with_choice(window, live, include_memos, documents, |document| {
         let held = document.file.borrow().form();
         let suggested = document.file.borrow().title();
         let chosen = file_dialog::save_document_as(owner, &suggested, save_fields(held))?;
@@ -1388,10 +1512,21 @@ pub(crate) fn save_all_with_choice(
     save_all_including_memos_with_choice(window, live, false, choose);
 }
 
+#[cfg(test)]
 pub(crate) fn save_all_including_memos_with_choice(
     window: &AppWindow,
     live: &Live,
     include_memos: bool,
+    choose: impl FnMut(&Rc<OpenDocument>) -> Option<(PathBuf, file_io::TextForm)>,
+) {
+    save_documents_with_choice(window, live, include_memos, open_documents(live), choose);
+}
+
+fn save_documents_with_choice(
+    window: &AppWindow,
+    live: &Live,
+    include_memos: bool,
+    documents: Vec<Rc<OpenDocument>>,
     mut choose: impl FnMut(&Rc<OpenDocument>) -> Option<(PathBuf, file_io::TextForm)>,
 ) {
     let mut saved = 0;
@@ -1399,7 +1534,7 @@ pub(crate) fn save_all_including_memos_with_choice(
     let mut conflicted = 0;
     let mut occupied = 0;
     let mut unnamed: Vec<Rc<OpenDocument>> = Vec::new();
-    for document in open_documents(live) {
+    for document in documents {
         if !document.text.edited()
             && !(include_memos
                 && document.file.borrow().path().is_none()
@@ -1816,16 +1951,15 @@ impl FolderAutoSave {
     /// to hear whether the writes landed.
     ///
     /// This is the "final flush" 要件 8.1 already has
-    /// ([`flush_work_copies`]) — this covers the documents this engine is
+    /// ([`settle_work_copies`]) — this covers the documents this engine is
     /// specifically protecting, on top of whatever the ordinary flush call
     /// already reaches, and works even with 要件 8.1's own switch off (the
     /// writer opted a folder into stronger protection, not a weaker one).
     /// Runs even for a document [`tick`](Self::tick) never got to — one
     /// [`arm`](Self::arm)ed right before exit is still covered, since this
     /// walks `self.entries` directly rather than only what a past `tick`
-    /// already drove. Returns the number of copies that did not land, the
-    /// same count [`flush_work_copies`] returns.
-    pub fn force_flush(&self, window: &AppWindow, live: &Live) -> usize {
+    /// already drove. Returns failed and still-pending copy counts.
+    pub fn force_flush(&self, window: &AppWindow, live: &Live) -> WorkCopyFlush {
         let documents = open_documents(live);
         for entry in &self.entries {
             if !documents
@@ -1834,16 +1968,14 @@ impl FolderAutoSave {
             {
                 continue;
             }
-            if let Some(document) = entry.document.upgrade() {
+            if let Some(document) = entry.document.upgrade()
+                && document.text.edited()
+                && (!document.protective_recovery.get() || document.recovery_failed.get())
+            {
                 force_work_copy_of(window, live, &document);
             }
         }
-        let landed = live.writer.settle(WORK_COPY_SETTLE);
-        report_write_results(window, live, landed);
-        documents
-            .iter()
-            .filter(|document| document.protective_recovery.get() && document.recovery_failed.get())
-            .count()
+        settle_work_copies(window, live, WORK_COPY_SETTLE)
     }
 }
 
@@ -2329,7 +2461,8 @@ mod folder_auto_save_tests {
 
         // The recovery copy still got the latest text, bypassing 8.1's own
         // switch, and it survives a forced flush.
-        harness.live.writer.settle(WORK_COPY_SETTLE);
+        let results = harness.live.writer.settle(WORK_COPY_SETTLE);
+        report_write_results(&harness.window, &harness.live, results);
         let work_directory = app_data::work_directory().unwrap();
         let copies = app_data::read_all_in(&work_directory);
         let copy = copies
@@ -2338,7 +2471,9 @@ mod folder_auto_save_tests {
             .expect("a recovery copy exists although 8.1's switch is off");
         assert_eq!(copy.text, "本文書き手の追記");
 
-        let lost = engine.force_flush(&harness.window, &harness.live);
+        let lost = engine
+            .force_flush(&harness.window, &harness.live)
+            .unconfirmed();
         assert_eq!(lost, 0);
     }
 

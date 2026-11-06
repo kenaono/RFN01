@@ -100,15 +100,14 @@ use crate::{
     activate_left_row, add_word_to_group, bullet_marks_of, choose_find_option, clear_find,
     close_word_naming, collect_search, colour_row, count_in_pane, drop_tree_row, edit_word_file,
     export_word_group, file_dialog, file_tree, find_in_pane, focused_pane, font_name, font_row,
-    go_to_line, go_to_remembered_folder, hold_word_modes, ime, navigate, new_word_group,
-    new_word_mode, next_word_colour, open_work_folder, pane_word_mode, paste_into_tab,
-    paste_targets, pick_tree_row, publish_left, publish_tabs, publish_word_mode_of,
-    publish_word_modes, quick_draft, read_word_source, remove_word_from_group, rename_word_group,
-    rename_word_mode, replace_all_in_pane, replace_in_pane, reset_settings_group,
-    restore_editor_focus, save_settings, schedule_relayout, search_in_folder, search_work_folder,
-    selected_runs, set_picked_colour, set_word_mode_of, show_bullet_marks, shown_sheet,
-    slint_colour, step_setting, tell_goto, toggle_goto, walk_find_history,
-    word_modes_now,
+    go_to_line, hold_word_modes, ime, navigate, new_word_group, new_word_mode, next_word_colour,
+    open_work_folder, pane_word_mode, paste_into_tab, paste_targets, pick_tree_row, publish_left,
+    publish_tabs, publish_word_mode_of, publish_word_modes, quick_draft, read_word_source,
+    remove_word_from_group, rename_word_group, rename_word_mode, replace_all_in_pane,
+    replace_in_pane, reset_settings_group, restore_editor_focus, save_settings, schedule_relayout,
+    search_in_folder, search_work_folder, selected_runs, set_picked_colour, set_word_mode_of,
+    show_bullet_marks, shown_sheet, slint_colour, step_setting, tell_goto, toggle_goto,
+    walk_find_history, word_modes_now,
 };
 
 /// 追加要件 2026-09-08（要件 6.8）: 端末の見た目。
@@ -127,7 +126,8 @@ pub fn wire_terminal_look(
     let cache = render_cache.clone();
     window.on_terminal_reset(move || {
         if let Some(window) = weak.upgrade() {
-            window.set_default_shell(0);
+            window.set_default_shell_id("".into());
+            crate::publish_shells(&window);
             window.set_terminal_confirm_paste(true);
             window.set_terminal_confirm_close(true);
             window.set_terminal_restore_output(true);
@@ -1353,7 +1353,7 @@ pub fn wire_open_and_draft(
         //
         // The two share what the list resolved to, so the place a row stands
         // for is decided once (`paste_targets`).
-        let resolved: Rc<RefCell<Vec<(PaneId, usize)>>> = Rc::default();
+        let resolved = Rc::new(RefCell::new(Vec::new()));
         let editor = quick_draft::Editor {
             tabs: {
                 let weak = window.as_weak();
@@ -1375,13 +1375,9 @@ pub fn wire_open_and_draft(
                 let live = draft_live.clone();
                 let resolved = resolved.clone();
                 Box::new(move |at, text| {
-                    let Some(&(id, index)) = resolved.borrow().get(at) else {
-                        return String::new();
-                    };
-                    let Some(window) = weak.upgrade() else {
-                        return String::new();
-                    };
-                    paste_into_tab(&window, &live, id, index, text)
+                    let (id, identity) = resolved.borrow().get(at)?.clone();
+                    let window = weak.upgrade()?;
+                    paste_into_tab(&window, &live, id, &identity, text)
                 })
             },
         };
@@ -1576,26 +1572,6 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
             };
             open_work_folder(&window, &folder_live, &chosen);
         }
-    });
-
-    // 要件 5.1: back to a folder worked in before, chosen by name rather than
-    // found again in the dialog.
-    //
-    // **Handed to the event loop rather than done here.** The rows are a
-    // repeater inside an open popup and switching folders redraws them, which
-    // is 6.18 again: the element whose handler is running would be replaced
-    // underneath it.
-    let weak = window.as_weak();
-    let history_live = live.clone();
-    window.on_recent_folder_chosen(move |index| {
-        let index = index.max(0) as usize;
-        let weak = weak.clone();
-        let live = history_live.clone();
-        Timer::single_shot(Duration::ZERO, move || {
-            if let Some(window) = weak.upgrade() {
-                go_to_remembered_folder(&window, &live, index);
-            }
-        });
     });
 
     let weak = window.as_weak();
@@ -1861,7 +1837,11 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
     let command_live = live.clone();
     window.on_tree_command(move |command| {
         if let (Some(window), Some(command)) = (weak.upgrade(), TreeCommand::from_index(command)) {
-            queue_tree_action(&window, &command_live, crate::tree_actions::Action::Entry(command));
+            queue_tree_action(
+                &window,
+                &command_live,
+                crate::tree_actions::Action::Entry(command),
+            );
         }
     });
 
@@ -1870,12 +1850,19 @@ pub fn wire_left_panel(window: &AppWindow, live: &Live) {
     let context_live = live.clone();
     let pending = context_target.clone();
     window.on_tree_context_command(move |command| {
-        let (Some(window), Some(command), Some(target)) =
-            (weak.upgrade(), TreeCommand::from_index(command), pending.borrow_mut().take())
-        else {
+        let (Some(window), Some(command), Some(target)) = (
+            weak.upgrade(),
+            TreeCommand::from_index(command),
+            pending.borrow_mut().take(),
+        ) else {
             return;
         };
-        crate::tree_actions::queue(&window, &context_live, target, crate::tree_actions::Action::Entry(command));
+        crate::tree_actions::queue(
+            &window,
+            &context_live,
+            target,
+            crate::tree_actions::Action::Entry(command),
+        );
     });
 
     let picked_live = live.clone();

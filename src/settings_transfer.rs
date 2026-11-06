@@ -474,14 +474,27 @@ fn choose(window: &AppWindow, live: &Live, kind: PresetKind, name: &str) {
 
 fn apply_keys(window: &AppWindow, live: &Live, keys: &str) {
     window.set_shortcut_bindings(keys.into());
+    publish_keys(window);
+    crate::save_settings(window, &live.cache);
+}
+
+fn publish_keys(window: &AppWindow) {
     window.set_shortcut_selected(-1);
     window.set_shortcut_edit("".into());
     crate::shortcuts::publish(window);
-    crate::save_settings(window, &live.cache);
 }
 
 /// 設定の値を画面に当てて、組み直し、書く。**起動のときと同じ`apply_settings`を通る**。
 fn apply_values(window: &AppWindow, live: &Live, values: &[(String, String)]) {
+    let language = window.get_language();
+    let autosave = window.get_autosave();
+    if set_values(window, values).is_ok() {
+        publish_applied_values(window, live, language, autosave);
+        crate::save_settings(window, &live.cache);
+    }
+}
+
+fn set_values(window: &AppWindow, values: &[(String, String)]) -> io::Result<()> {
     let numbers = window.get_sheet_numbers();
     let palette = window.get_palette();
     let fonts = window.get_sheet_fonts();
@@ -490,10 +503,16 @@ fn apply_values(window: &AppWindow, live: &Live, values: &[(String, String)]) {
         palette.as_any().downcast_ref::<VecModel<slint::Color>>(),
         fonts.as_any().downcast_ref::<VecModel<SharedString>>(),
     ) else {
-        return;
+        return Err(io::Error::other("Settings controls are unavailable"));
     };
-    let language = window.get_language();
     crate::apply_settings(window, numbers, palette, fonts, values);
+    Ok(())
+}
+
+fn publish_applied_values(window: &AppWindow, live: &Live, language: i32, autosave: bool) {
+    if window.get_autosave() != autosave {
+        crate::saving::apply_autosave_transition(live, window.get_autosave());
+    }
     // シェルの一覧と、開いているプロファイルの欄を出し直す（既定を選んだときと同じ）。
     crate::publish_shells(window);
     window.invoke_shell_profile_action(0, window.get_shell_profile_index());
@@ -509,7 +528,6 @@ fn apply_values(window: &AppWindow, live: &Live, values: &[(String, String)]) {
     crate::publish_left(window, live);
     window.invoke_terminal_woken();
     crate::relayout_panes(window, &live.states, &live.cache);
-    crate::save_settings(window, &live.cache);
 }
 
 /// いまの姿の書き出し。
@@ -534,13 +552,22 @@ pub(crate) fn backup_path(directory: &Path) -> PathBuf {
 /// 読んだ書き出しで全体を置き換える。**その前に、いまの姿を控える**——控えを書けなければ
 /// 取り込まない（戻れない置き換えをしない）。
 pub(crate) fn import(window: &AppWindow, live: &Live, export: Export) -> io::Result<()> {
-    if let Some(directory) = app_data::app_directory() {
-        std::fs::create_dir_all(&directory)?;
-        file_io::write_atomically(
-            &backup_path(&directory),
-            encode_export(&export_now(window)).as_bytes(),
-        )
-        .map(|_| ())?;
+    let directory = app_data::app_directory()
+        .ok_or_else(|| io::Error::other("The application data location is unavailable"))?;
+    let before = export_now(window);
+    std::fs::create_dir_all(&directory)?;
+    file_io::write_atomically(&backup_path(&directory), encode_export(&before).as_bytes())
+        .map_err(|error| import_error("before-import.rfnexport", error))?;
+    if export.words.is_some() {
+        // Older queued word edits must not overwrite the imported file.
+        let results = live.writer.settle(crate::WORK_COPY_SETTLE);
+        crate::saving::report_write_results(window, live, results);
+        if !live.writer.is_idle() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Pending word-set writes",
+            ));
+        }
     }
     // RFN01-61: **バックアップの保存先とファイル名の書式は取り込まない。**その場所・その名前で
     // この機械のバックアップがあり、替えるのは中身を移す・付け替える操作（Settings）だけが行う。
@@ -552,17 +579,40 @@ pub(crate) fn import(window: &AppWindow, live: &Live, export: Export) -> io::Res
         })
         .cloned()
         .collect();
-    apply_values(window, live, &settings);
-    if let Some(keys) = &export.keys {
-        apply_keys(window, live, keys);
+    let language = window.get_language();
+    let autosave = window.get_autosave();
+    let previous_keys = window.get_shortcut_bindings();
+    set_values(window, &settings)?;
+    if let Some(keys) = export.keys {
+        window.set_shortcut_bindings(keys.into());
     }
-    if let Some(words) = &export.words
-        && let Some((stored, _)) = app_data::decode_words(words)
-    {
+    if let Err(error) = app_data::write_settings(&directory, &crate::settings_values(window)) {
+        // The models were just validated by set_values and have not changed.
+        let _ = set_values(window, &before.settings);
+        window.set_shortcut_bindings(previous_keys);
+        return Err(import_error("settings", error));
+    }
+    publish_keys(window);
+    publish_applied_values(window, live, language, autosave);
+    publish(window);
+    if let Some(words) = export.words {
+        let (stored, _) = app_data::decode_words(&words)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid word sets"))?;
+        file_io::write_atomically(
+            &app_data::words_path(&directory),
+            app_data::encode_words(&stored).as_bytes(),
+        )
+        .map_err(|error| import_error("word sets", error))?;
         crate::take_word_modes(window, live, stored);
     }
-    hold_presets(window, live, export.presets);
+    write_presets(&directory, &export.presets).map_err(|error| import_error("presets", error))?;
+    PRESETS.with(|held| *held.borrow_mut() = export.presets);
+    publish(window);
     Ok(())
+}
+
+fn import_error(section: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{section}: {error}"))
 }
 
 /// 起動のとき：プリセットを読み、画面へ出し、操作をつなぐ。
@@ -709,8 +759,8 @@ pub(crate) fn import_answered(window: &AppWindow, live: &Live, export: &Export) 
         Ok(()) => window.tell(pick("設定を取り込みました", "Imported the settings").into()),
         Err(error) => window.tell(
             say!(
-                "いまの設定を控えられないので、取り込みませんでした: {error}",
-                "Did not import, because the current settings could not be kept: {error}"
+                "取り込みを中断しました: {error}\n一部が適用された場合は before-import.rfnexport を取り込むと元に戻せます。",
+                "Import stopped: {error}\nTo undo any applied changes, import before-import.rfnexport."
             )
             .into(),
         ),
@@ -754,7 +804,10 @@ mod tests {
             Preset {
                 kind: PresetKind::Keys,
                 name: "Emacs風".into(),
-                values: vec![(KEYS_SETTING.into(), "file.open=Ctrl+Alt+O;file.close-tab=Ctrl+Q;v=5".into())],
+                values: vec![(
+                    KEYS_SETTING.into(),
+                    "file.open=Ctrl+Alt+O;file.close-tab=Ctrl+Q;v=5".into(),
+                )],
             },
         ];
         PresetBook {

@@ -173,7 +173,7 @@ pub enum FormatProblem {
     Name,
     /// 秒までの日時（年・月・日・時・分・秒）のどれかが無い。
     Time,
-    /// `{ext}`が2つ以上ある。
+    /// `{ext}`がちょうど1つ無い。
     Ext,
     /// ファイル名に使えない字がある。
     Character(char),
@@ -182,6 +182,16 @@ pub enum FormatProblem {
 /// 書式が使えるか。**名前と秒までの日時が要る**——どちらが欠けても、どのファイルの・いつの
 /// バックアップかを名前から読み戻せない。
 pub fn check_format(format: &str) -> Result<(), FormatProblem> {
+    check_legacy_format(format)?;
+    if !pieces(format).contains(&Piece::Ext) {
+        return Err(FormatProblem::Ext);
+    }
+    Ok(())
+}
+
+// Previously accepted formats still identify the files for the Backups
+// inventory. Per-document history cannot assign an extension to these files.
+pub fn check_legacy_format(format: &str) -> Result<(), FormatProblem> {
     if let Some(bad) = format.chars().find(|c| {
         matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
     }) {
@@ -365,6 +375,9 @@ impl Store {
 
     /// `original`のバックアップ、新しい順。
     pub fn list(&self, original: &Path) -> Vec<Backup> {
+        if check_format(&self.format).is_err() {
+            return Vec::new();
+        }
         let Some(folder) = folder_of(&self.root, original) else {
             return Vec::new();
         };
@@ -434,6 +447,12 @@ impl Store {
         taken: LocalTime,
         require_exact: bool,
     ) -> io::Result<Option<PathBuf>> {
+        if check_format(&self.format).is_err() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Backup names require {ext} to identify the original file",
+            ));
+        }
         let folder = folder_of(&self.root, original).ok_or_else(|| unsupported(original))?;
         let name = name_for(&self.format, original, taken).ok_or_else(|| unsupported(original))?;
         let existing = self.list(original);
@@ -441,7 +460,10 @@ impl Store {
             .first()
             .is_some_and(|newest| fs::read(&newest.path).is_ok_and(|held| held == bytes));
         let target = folder.join(name);
-        if require_exact && !same && target.exists() && fs::read(&target)? != bytes {
+        if target.exists()
+            && (!existing.iter().any(|backup| backup.path == target)
+                || (require_exact && !same && fs::read(&target)? != bytes))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "A different backup already uses this timestamp",
@@ -566,50 +588,54 @@ impl Store {
     ///
     /// 入れ子（今の保存先の中のフォルダへ、またはその逆）も移せる：先に一覧を取り、歩くのは
     /// 写しのフォルダだけなので、移し先が移し元の中にあっても数え直さない。
+    #[cfg(test)]
     pub fn move_to(&self, to: &Path) -> Result<(), MoveError> {
+        self.move_to_after(to, || Ok(()))
+    }
+
+    pub fn move_to_after(
+        &self,
+        to: &Path,
+        commit: impl FnOnce() -> io::Result<()>,
+    ) -> Result<(), MoveError> {
         let from = &self.root;
-        if from == to {
-            return Ok(());
+        if from == to || (from.is_dir() && to.is_dir() && same_location(from, to)) {
+            return commit().map_err(MoveError::Io);
         }
-        let files = self.files();
-        if let Some(clash) = files.iter().map(|f| to.join(f)).find(|t| t.exists()) {
-            return Err(MoveError::Exists(clash));
-        }
-        let mut copied = Vec::new();
-        for relative in &files {
-            let target = to.join(relative);
-            let copy = target
-                .parent()
-                .map_or(Ok(()), fs::create_dir_all)
-                .and_then(|()| fs::copy(from.join(relative), &target));
-            if let Err(error) = copy {
-                let _ = fs::remove_file(&target);
-                for done in &copied {
-                    let _ = fs::remove_file(done);
-                    tidy(to, Path::new(done).parent());
-                }
-                tidy(to, target.parent());
-                return Err(MoveError::Io(error));
-            }
-            copied.push(target);
-        }
-        for relative in &files {
-            let source = from.join(relative);
-            let _ = fs::remove_file(&source);
-            tidy(from, source.parent());
-        }
-        Ok(())
+        let plan = self
+            .files()
+            .into_iter()
+            .map(|relative| (from.join(&relative), to.join(&relative)))
+            .collect::<Vec<_>>();
+        self.copy_then_commit(&plan, to, commit)
     }
 
     /// ファイル名の書式を`format`へ変えるとき、バックアップの名前を全部付け替える。
     ///
     /// **途中で失敗したら何も変えない**（保存先の変更と同じ）：付け替えたものを元の名前へ戻す。
+    #[cfg(test)]
     pub fn rename_to(&self, format: &str) -> Result<(), MoveError> {
+        self.rename_to_after(format, || Ok(()))
+    }
+
+    pub fn rename_to_after(
+        &self,
+        format: &str,
+        commit: impl FnOnce() -> io::Result<()>,
+    ) -> Result<(), MoveError> {
         if format == self.format {
-            return Ok(());
+            return commit().map_err(MoveError::Io);
+        }
+        check_format(format)
+            .map_err(|_| MoveError::Io(io::Error::other("Invalid backup name format")))?;
+        let files = self.files();
+        if !files.is_empty() && check_format(&self.format).is_err() {
+            return Err(MoveError::Io(io::Error::other(
+                "These backup names lack their originals' extensions. Keep or export the old files before changing the format.",
+            )));
         }
         let mut plan = Vec::new();
-        for relative in self.files() {
+        for relative in files {
             let from = self.root.join(&relative);
             let Some(name) = from.file_name().map(|n| n.to_string_lossy().into_owned()) else {
                 continue;
@@ -629,18 +655,58 @@ impl Store {
                 plan.push((from, to));
             }
         }
-        if let Some((_, clash)) = plan.iter().find(|(_, to)| to.exists()) {
-            return Err(MoveError::Exists(clash.clone()));
-        }
-        let mut done: Vec<&(PathBuf, PathBuf)> = Vec::new();
-        for step in &plan {
-            if let Err(error) = fs::rename(&step.0, &step.1) {
-                for (from, to) in done.into_iter().rev() {
-                    let _ = fs::rename(to, from);
-                }
-                return Err(MoveError::Io(error));
+        self.copy_then_commit(&plan, &self.root, commit)
+    }
+
+    fn copy_then_commit(
+        &self,
+        plan: &[(PathBuf, PathBuf)],
+        destination: &Path,
+        commit: impl FnOnce() -> io::Result<()>,
+    ) -> Result<(), MoveError> {
+        let mut targets = std::collections::HashSet::new();
+        for (_, target) in plan {
+            let key = if cfg!(windows) {
+                target
+                    .to_string_lossy()
+                    .trim_end_matches([' ', '.'])
+                    .to_uppercase()
+            } else {
+                target.to_string_lossy().into_owned()
+            };
+            if target.exists() || !targets.insert(key) {
+                return Err(MoveError::Exists(target.clone()));
             }
-            done.push(step);
+        }
+        let mut created = Vec::new();
+        let staged = (|| -> io::Result<()> {
+            for (source, target) in plan {
+                let mut input = fs::File::open(source)?;
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut output = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(target)?;
+                created.push(target);
+                io::copy(&mut input, &mut output)?;
+                output.sync_all()?;
+            }
+            commit()
+        })();
+        if let Err(error) = staged {
+            for target in created {
+                let _ = fs::remove_file(target);
+                tidy(destination, target.parent());
+            }
+            return Err(MoveError::Io(error));
+        }
+        // The new settings and all destination files are durable. If removing
+        // an old file fails, its extra copy can be left without losing history.
+        for (source, _) in plan {
+            let _ = fs::remove_file(source);
+            tidy(&self.root, source.parent());
         }
         Ok(())
     }
@@ -686,6 +752,14 @@ impl Store {
             })
             .collect()
     }
+}
+
+fn same_location(first: &Path, second: &Path) -> bool {
+    first
+        .canonicalize()
+        .ok()
+        .zip(second.canonicalize().ok())
+        .is_some_and(|(first, second)| first == second)
 }
 
 /// 空になったフォルダを、保存先の手前まで畳む。
@@ -1098,6 +1172,62 @@ mod tests {
         );
         assert_eq!(renamed.list(&b)[0].taken, at(2));
         assert!(store(&root).list(&a).is_empty());
+    }
+
+    #[test]
+    fn same_stem_different_extensions_keep_independent_histories() {
+        let root = scratch("different-extensions-root");
+        let work = scratch("different-extensions-work");
+        let markdown = work.join("draft.md");
+        let text = work.join("draft.txt");
+        let store = store(&root);
+        assert_eq!(
+            check_format("{name}.yyyy-MM-dd_HHmmss"),
+            Err(FormatProblem::Ext)
+        );
+        fs::write(&markdown, "md one").unwrap();
+        fs::write(&text, "txt one").unwrap();
+        store.take(&markdown, 1, at(1)).unwrap();
+        store.take(&text, 1, at(1)).unwrap();
+        fs::write(&markdown, "md two").unwrap();
+        store.take(&markdown, 1, at(2)).unwrap();
+        assert_eq!(
+            fs::read_to_string(&store.list(&markdown)[0].path).unwrap(),
+            "md two"
+        );
+        assert_eq!(
+            fs::read_to_string(&store.list(&text)[0].path).unwrap(),
+            "txt one"
+        );
+    }
+
+    #[test]
+    fn failed_commit_keeps_old_backup_paths_and_removes_staged_copies() {
+        let root = scratch("failed-commit-root");
+        let work = scratch("failed-commit-work");
+        let new_root = scratch("failed-commit-target");
+        let original = work.join("draft.md");
+        fs::write(&original, "original contents").unwrap();
+        let old = store(&root);
+        let old_file = old.take(&original, 1, at(1)).unwrap().unwrap();
+        let failed = || {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "settings blocked",
+            ))
+        };
+        assert!(matches!(
+            old.move_to_after(&new_root, failed),
+            Err(MoveError::Io(_))
+        ));
+        assert!(store(&new_root).list(&original).is_empty());
+        let format = "yyyyMMdd_HHmmss_{name}{ext}.bak";
+        assert!(matches!(
+            old.rename_to_after(format, failed),
+            Err(MoveError::Io(_))
+        ));
+        assert!(Store::new(&root, format).list(&original).is_empty());
+        assert_eq!(fs::read_to_string(&old_file).unwrap(), "original contents");
     }
 
     #[test]

@@ -28,6 +28,63 @@ fn two_panes(root: &Path) -> (Harness, PaneId, PaneId) {
     (harness, left, right)
 }
 
+#[test]
+fn quick_draft_keeps_tab_identity_through_reordering_and_rejects_a_closed_tab() {
+    let root = scratch_directory("draft-tab-identity");
+    let (h, _) = Harness::new(|weak| open_under(&root, "one.md", "one", weak));
+    let (window, live) = (&h.window, &h.live);
+    let pane = PaneId::FIRST;
+    let two = open_under(&root, "two.md", "two", window.as_weak());
+    add_tab(
+        window,
+        live,
+        pane,
+        PaneTab::showing(window, pane, two.clone()),
+    );
+    let mut rows = Vec::new();
+    paste_targets(window, live, "", &mut rows);
+    let (id, target) = &rows[1];
+    move_tab(window, live, pane, 1, 0);
+    assert!(paste_into_tab(window, live, *id, target, "draft").is_some());
+    assert!(two.text.borrow().contains("draft"));
+    let unrelated = live.tabs.borrow().of(pane).tabs[1].document.clone();
+    live.tabs.borrow_mut().of_mut(pane).unwrap().tabs.remove(0);
+    assert!(paste_into_tab(window, live, *id, target, "other").is_none());
+    assert_eq!(&*unrelated.text.borrow(), "one");
+}
+
+#[test]
+fn search_result_uses_the_query_and_rules_that_produced_its_row() {
+    let root = scratch_directory("result-query");
+    let (h, document) = Harness::new(|weak| open_under(&root, "result.md", "red BLUE blue", weak));
+    let (window, live) = (&h.window, &h.live);
+    let path = document.file.borrow().path().unwrap().to_owned();
+    let rules = find::Rules {
+        match_case: true,
+        regex: true,
+        ..Default::default()
+    };
+    live.results.borrow_mut().push(ResultRow {
+        text: "BLUE".to_owned(),
+        under_file: true,
+        path,
+        at: 4,
+        query: Rc::new(ResultQuery {
+            needle: "[A-Z]+".to_owned(),
+            rules,
+            roots: vec![root],
+        }),
+    });
+    window.set_folder_needle("red".into());
+    window.set_folder_regex(false);
+    window.set_folder_match_case(false);
+    open_result(window, live, 0);
+    assert_eq!(
+        selection_source_range(&live.states.of(PaneId::FIRST).borrow()),
+        Some((4, 8))
+    );
+}
+
 /// RFN01-71: 他のTAB・すべてのTABを閉じるは、押したPaneの中だけを閉じる。
 #[test]
 fn closing_other_tabs_stays_in_the_pane_that_asked() {
@@ -70,6 +127,11 @@ fn search_results_mark_the_file_in_front_of_each_pane() {
             under_file,
             path,
             at: 0,
+            query: Rc::new(ResultQuery {
+                needle: String::new(),
+                rules: find::Rules::default(),
+                roots: vec![root.clone()],
+            }),
         }
     };
     // b.md は`\\?\`付きで返ってきても同じファイルとして扱う（Workspaceの検索はそう返す）。

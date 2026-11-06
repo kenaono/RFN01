@@ -3,7 +3,8 @@
 use crate::actions::{self, Category, Scope};
 use crate::menu_commands::Command;
 use crate::{AppWindow, Live, ShortcutItem};
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use std::{cell::RefCell, rc::Rc};
 
 /// 変えられないキー。**同じ一覧に並べる**——「このキーは何か」を探す書き手に
 /// とって、変えられるかどうかは探したあとの話である。
@@ -165,6 +166,8 @@ const TAKEN: &[&str] = &[
     "Alt+Space",
     "F3",
     "Shift+F3",
+    "F10",
+    "Ctrl+0",
 ];
 /// 綴りから、キー1つ分の名前にする。**綴りは`chord`と揃える。**
 fn key_token(token: &str) -> Option<String> {
@@ -231,7 +234,9 @@ fn normalize(value: &str) -> Option<String> {
 }
 
 fn bare_tree_key(scope: i32, key: &str, shift: bool) -> bool {
-    scope == TREE_SCOPE && !shift && matches!(key, "Enter" | "Delete" | "Left" | "Right" | "Up" | "Down")
+    scope == TREE_SCOPE
+        && !shift
+        && matches!(key, "Enter" | "Delete" | "Left" | "Right" | "Up" | "Down")
 }
 
 /// 保存する綴りにそろえる。裸の操作キーはツリーに限り、固定キーは割り当てない。
@@ -363,6 +368,7 @@ fn bindings(raw: &str) -> Vec<String> {
             continue;
         };
         if let Some(at) = actions::index_of(name)
+            && !actions::all()[at].fixed
             && let Some(key) = normalize_for(value, scope_at(at))
         {
             keys[at] = key;
@@ -378,8 +384,25 @@ fn bindings(raw: &str) -> Vec<String> {
     keys
 }
 
+thread_local! {
+    static RESOLVED_BINDINGS: RefCell<Option<(SharedString, Rc<[String]>)>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn resolved_bindings(raw: &str) -> Rc<[String]> {
+    RESOLVED_BINDINGS.with_borrow_mut(|cached| {
+        if let Some((source, keys)) = cached
+            && source.as_str() == raw
+        {
+            return keys.clone();
+        }
+        let keys: Rc<[String]> = bindings(raw).into();
+        *cached = Some((raw.into(), keys.clone()));
+        keys
+    })
+}
+
 pub(crate) fn label(app: &AppWindow, id: usize) -> String {
-    bindings(&app.get_shortcut_bindings())
+    resolved_bindings(&app.get_shortcut_bindings())
         .get(id)
         .cloned()
         .unwrap_or_default()
@@ -403,7 +426,7 @@ pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shif
     let Some(key) = chord_for(text, control, alt, shift, scope) else {
         return -1;
     };
-    if let Some(i) = bindings(raw)
+    if let Some(i) = resolved_bindings(raw)
         .iter()
         .enumerate()
         .position(|(i, k)| scope_at(i) == scope && k == &key)
@@ -425,7 +448,7 @@ pub fn resolve(raw: &str, scope: i32, text: &str, control: bool, alt: bool, shif
 /// — every group with something to show is open and the others are left out,
 /// because a fold hiding the one match is a search that found nothing.
 pub fn publish(app: &AppWindow) {
-    let keys = bindings(&app.get_shortcut_bindings());
+    let keys = resolved_bindings(&app.get_shortcut_bindings());
     // 書き手の報告 2026-11-05: 設定の項目と同じそろえ方で（全角・半角、大文字・小文字）。
     let query = crate::fold_for_search(app.get_shortcut_query().trim());
     let key_query = app.get_shortcut_key_query().to_string();
@@ -506,7 +529,9 @@ pub fn publish(app: &AppWindow) {
 }
 pub fn wire(app: &AppWindow, live: &Live) {
     publish(app);
-    app.on_shortcut_is_tree(|id| usize::try_from(id).is_ok_and(|id| id < count() && scope_at(id) == TREE_SCOPE));
+    app.on_shortcut_is_tree(|id| {
+        usize::try_from(id).is_ok_and(|id| id < count() && scope_at(id) == TREE_SCOPE)
+    });
     let weak = app.as_weak();
     app.on_shortcut_filter(move || {
         if let Some(app) = weak.upgrade() {
@@ -658,6 +683,13 @@ pub fn wire(app: &AppWindow, live: &Live) {
             Command::ExplorePane => app.invoke_focus_explore(),
             Command::ToggleLeftPane => app.invoke_toggle_left_pane(),
             Command::ShowLeftTab(tab) => app.invoke_show_left_tab(*tab),
+            Command::PanelAction(crate::panel_actions::Action::GitRepositoryOpen) => {
+                crate::panel_actions::queue(
+                    &app,
+                    &field_live,
+                    crate::panel_actions::Action::GitRepositoryOpen,
+                );
+            }
             _ => return false,
         }
         true
@@ -681,11 +713,12 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return false;
         }
         let pane = crate::focused_pane(&app);
+        let target = crate::menu_commands::Target::for_pane(&app, &palette_live, pane);
         let weak = weak.clone();
         let live = palette_live.clone();
         slint::Timer::single_shot(std::time::Duration::ZERO, move || {
             if let Some(app) = weak.upgrade() {
-                run_command(&app, &live, pane, command);
+                run_command(&app, &live, &target, command);
             }
         });
         true
@@ -702,7 +735,12 @@ pub fn wire(app: &AppWindow, live: &Live) {
             return true;
         }
         if let Some(Command::Tree(action)) = usize::try_from(id).ok().and_then(command_at) {
-            crate::tree_actions::queue(&app, &tree_live, crate::menu_commands::Target::for_tree(&app, &tree_live), *action);
+            crate::tree_actions::queue(
+                &app,
+                &tree_live,
+                crate::menu_commands::Target::for_tree(&app, &tree_live),
+                *action,
+            );
             return true;
         }
         app.invoke_shortcut_key(text, control, alt, shift)
@@ -710,7 +748,9 @@ pub fn wire(app: &AppWindow, live: &Live) {
     let weak = app.as_weak();
     let overlay_live = live.clone();
     app.on_panel_shortcut(move |text, control, alt, shift| {
-        let Some(app) = weak.upgrade() else { return false };
+        let Some(app) = weak.upgrade() else {
+            return false;
+        };
         let id = resolve(&app.get_shortcut_bindings(), 0, &text, control, alt, shift);
         if let Some(Command::PanelAction(action)) = usize::try_from(id).ok().and_then(command_at) {
             crate::panel_actions::queue(&app, &overlay_live, *action);
@@ -731,24 +771,19 @@ pub fn wire(app: &AppWindow, live: &Live) {
         if command == -2 {
             return true;
         }
-        if let Some(Command::PanelAction(action)) = usize::try_from(command).ok().and_then(command_at) {
+        if let Some(Command::PanelAction(action)) =
+            usize::try_from(command).ok().and_then(command_at)
+        {
             crate::panel_actions::queue(&app, &keyed_live, *action);
             return true;
         }
-        // RFN01-67（書き手の求め 2026-10-03）: Git Repository の画面では「戻る」で画面を閉じる。
-        // ほかのショートカットは、下に隠れているペインへは届けない。
+        // Git Repository が出ている間は、背後の文書の操作を受け付けない。
         if app.get_git_repo_active() {
             let picked = usize::try_from(command).ok().and_then(command_at);
-            if picked == Some(&Command::Navigate(false)) {
-                let weak = weak.clone();
-                slint::Timer::single_shot(std::time::Duration::ZERO, move || {
-                    if let Some(app) = weak.upgrade() {
-                        crate::git_repo_ui::close(&app);
-                    }
-                });
-                return true;
-            }
-            if picked != Some(&Command::CommandPalette(true)) {
+            if !matches!(
+                picked,
+                Some(Command::Navigate(false) | Command::CommandPalette(true))
+            ) {
                 return false;
             }
         }
@@ -768,14 +803,15 @@ pub fn wire(app: &AppWindow, live: &Live) {
             .of(pane)
             .current()
             .is_some_and(|tab| tab.settings);
-        if on_settings && !passes_settings(command) {
+        if !app.get_git_repo_active() && on_settings && !passes_settings(command) {
             return true;
         }
+        let target = crate::menu_commands::Target::for_pane(&app, &keyed_live, pane);
         let weak = weak.clone();
         let live = keyed_live.clone();
         slint::Timer::single_shot(std::time::Duration::ZERO, move || {
             if let Some(app) = weak.upgrade() {
-                run_command(&app, &live, pane, command);
+                run_command(&app, &live, &target, command);
             }
         });
         true
@@ -796,11 +832,16 @@ fn passes_terminal(command: i32) -> bool {
 }
 
 /// キーに割り当てたアクションを表の位置から引き、共通の実行入口へ渡す。
-pub(crate) fn run_command(app: &AppWindow, live: &Live, pane: crate::PaneId, command: i32) {
+pub(crate) fn run_command(
+    app: &AppWindow,
+    live: &Live,
+    target: &crate::menu_commands::Target,
+    command: i32,
+) {
     let Ok(id) = usize::try_from(command) else {
         return;
     };
-    crate::menu_commands::run_key(app, live, pane, id, name(id));
+    crate::menu_commands::run_key(app, live, target, id, name(id));
 }
 #[cfg(test)]
 mod tests {
@@ -812,6 +853,19 @@ mod tests {
     }
     fn hit(id: &str) -> i32 {
         at(id) as i32
+    }
+
+    #[test]
+    fn shortcut_snapshot_is_reused_until_the_serialized_settings_change() {
+        let original = resolved_bindings("");
+        assert!(Rc::ptr_eq(&original, &resolved_bindings("")));
+        let edited = resolved_bindings("file.save=Ctrl+Alt+S;v=5");
+        assert!(!Rc::ptr_eq(&original, &edited));
+        assert_eq!(edited[at("file.save")], "Ctrl+Alt+S");
+        assert_eq!(
+            resolve("file.save=Ctrl+Alt+S;v=5", 0, "s", true, true, false),
+            hit("file.save")
+        );
     }
 
     /// RFN01-114: **保存はIDで書き、読み戻せる。**並びを変えても割り当ては動かない。

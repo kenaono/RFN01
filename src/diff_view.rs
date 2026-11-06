@@ -665,7 +665,13 @@ mod tests {
         surface.draw_if_needed(|renderer| {
             renderer.render(&mut vec![slint::Rgb8Pixel::default(); 1120 * 740], 1120);
         });
-        show(window, "left".into(), "first".into(), "right".into(), "second".into());
+        show(
+            window,
+            "left".into(),
+            "first".into(),
+            "right".into(),
+            "second".into(),
+        );
         slint::platform::update_timers_and_animations();
         window.window().request_redraw();
         surface.draw_if_needed(|renderer| {

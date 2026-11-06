@@ -16,6 +16,8 @@ use crate::file_io::{self, Encoding, FileStamp, LoadError, SaveError, TextForm};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavedFile {
     pub path: PathBuf,
+    /// The spelling of the resolved target when the editor adopted it.
+    identity: PathBuf,
     /// The shape the file was in, so a save writes it back the same way.
     pub form: TextForm,
     /// What the file was when the editor and it last agreed.
@@ -79,6 +81,7 @@ impl DocumentFile {
     pub fn unavailable(path: PathBuf, stamp: Option<FileStamp>) -> Self {
         Self {
             origin: Origin::Saved(SavedFile {
+                identity: file_io::document_path_identity(&path),
                 path,
                 form: TextForm::default(),
                 stamp,
@@ -106,13 +109,16 @@ impl DocumentFile {
         limit: usize,
         encoding: Encoding,
     ) -> Result<(Self, String), LoadError> {
-        Self::taken(path, file_io::read_as(path, limit, encoding)?)
+        let (mut document, text) = Self::taken(path, file_io::read_as(path, limit, encoding)?)?;
+        document.said = Some(encoding);
+        Ok((document, text))
     }
 
     /// 読めたファイルを、この文書の出どころとして受け取る。
     fn taken(path: &Path, loaded: file_io::LoadedFile) -> Result<(Self, String), LoadError> {
         let saved = SavedFile {
             path: path.to_path_buf(),
+            identity: file_io::document_path_identity(path),
             form: loaded.form,
             stamp: Some(loaded.stamp),
         };
@@ -132,6 +138,28 @@ impl DocumentFile {
         }
     }
 
+    pub fn is_at(&self, path: &Path) -> bool {
+        match &self.origin {
+            Origin::Saved(saved) => {
+                saved.path == path || saved.identity == file_io::document_path_identity(path)
+            }
+            Origin::Untitled(_) => false,
+        }
+    }
+
+    pub fn path_identity(&self) -> Option<&Path> {
+        match &self.origin {
+            Origin::Saved(saved) => Some(&saved.identity),
+            Origin::Untitled(_) => None,
+        }
+    }
+
+    pub fn restore_path_identity(&mut self, identity: PathBuf) {
+        if let Origin::Saved(saved) = &mut self.origin {
+            saved.identity = identity;
+        }
+    }
+
     pub fn mixed_newlines(&self) -> bool {
         self.mixed_newlines
     }
@@ -145,6 +173,7 @@ impl DocumentFile {
     /// in the file yet. A document with no file has nothing to follow.
     pub fn follow_rename(&mut self, path: PathBuf) {
         if let Origin::Saved(saved) = &mut self.origin {
+            saved.identity = file_io::document_path_identity(&path);
             saved.path = path;
         }
     }
@@ -180,6 +209,18 @@ impl DocumentFile {
         }
     }
 
+    pub fn chosen_encoding(&self) -> Option<Encoding> {
+        self.said
+    }
+
+    pub fn restore_form(&mut self, form: TextForm, explicit: bool) {
+        if let Origin::Saved(saved) = &mut self.origin {
+            saved.form = form;
+            self.mixed_newlines = form.mixed_newlines;
+            self.said = explicit.then_some(form.encoding);
+        }
+    }
+
     /// Write the document to `path` and take that file as its own.
     ///
     /// One call for both 上書き保存 and 名前を付けて保存: the two differ only in
@@ -196,7 +237,8 @@ impl DocumentFile {
         text: &str,
         form: TextForm,
     ) -> Result<(), SaveError> {
-        let stamp = file_io::save(&path, text, form)?;
+        let target = file_io::document_path_identity(&path);
+        let stamp = file_io::save(&target, text, form)?;
         self.took(path, form, stamp);
         Ok(())
     }
@@ -214,6 +256,7 @@ impl DocumentFile {
             ..form
         };
         self.origin = Origin::Saved(SavedFile {
+            identity: file_io::document_path_identity(&path),
             path,
             form,
             stamp: Some(stamp),
@@ -235,7 +278,12 @@ impl DocumentFile {
             return ExternalChange::None;
         };
         match FileStamp::read(&saved.path) {
-            Ok(stamp) if Some(stamp) == saved.stamp => ExternalChange::None,
+            Ok(stamp)
+                if Some(stamp) == saved.stamp
+                    && saved.identity == file_io::document_path_identity(&saved.path) =>
+            {
+                ExternalChange::None
+            }
             Ok(_) => ExternalChange::Modified,
             Err(_) => ExternalChange::Missing,
         }

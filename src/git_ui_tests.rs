@@ -171,8 +171,15 @@ fn merge_resolution_actions_use_the_palette_target_and_protect_unsaved_work() {
     crate::command_palette::open(window, live, true);
     let stage = pick("解消結果をStage", "Stage Merge Result");
     let rows = window.get_palette_rows();
-    let at = rows.iter().position(|row| row.title.contains(stage)).unwrap();
-    assert!(!rows.iter().any(|row| row.title.contains(pick("Mergeを続行", "Continue Merge"))));
+    let at = rows
+        .iter()
+        .position(|row| row.title.contains(stage))
+        .unwrap();
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.title.contains(pick("Mergeを続行", "Continue Merge")))
+    );
     window.set_palette_selected(at as i32);
     window.invoke_palette_accepted();
     slint::platform::update_timers_and_animations();
@@ -184,7 +191,11 @@ fn merge_resolution_actions_use_the_palette_target_and_protect_unsaved_work() {
     crate::answer_question(window, live, 0);
     crate::command_palette::open(window, live, true);
     let back = pick("リポジトリに戻る", "Back to Repository");
-    let at = window.get_palette_rows().iter().position(|row| row.title.contains(back)).unwrap();
+    let at = window
+        .get_palette_rows()
+        .iter()
+        .position(|row| row.title.contains(back))
+        .unwrap();
     window.set_palette_selected(at as i32);
     window.invoke_palette_accepted();
     slint::platform::update_timers_and_animations();
@@ -289,6 +300,95 @@ fn switching_branches_with_unsaved_work_can_discard_it() {
     assert!(!document.text.edited());
     let text = document.text.borrow().replace("\r\n", "\n");
     assert_eq!(text, "draft\n");
+}
+
+fn keeps_discarded_revision_when_git_cannot_discard_it(
+    name: &str,
+    result: Result<String, GitError>,
+    edit_while_waiting: bool,
+    changes_disk: bool,
+) {
+    let Some((root, harness, document)) = manuscript(name) else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    window.set_autosave(true);
+    edit(&document, "old unsaved\n");
+    crate::saving::write_work_copy_of(window, live, &document);
+    crate::saving::flush_work_copies(window, live);
+    let (release, delayed) = mpsc::channel();
+    start(
+        window,
+        live,
+        root,
+        "pulling",
+        true,
+        Reload::Repository,
+        vec![document.clone()],
+        After::Nothing,
+        "delayed-test",
+        move |root, _| {
+            delayed.recv().unwrap();
+            if changes_disk {
+                fs::write(root.join("原稿.md"), "changed on disk\n").unwrap();
+            }
+            result
+        },
+    );
+    if edit_while_waiting {
+        document.text.borrow_mut().push_str("new words\n");
+    }
+    let expected = document.text.borrow().clone();
+    release.send(()).unwrap();
+    settle(window, live);
+    assert_eq!(*document.text.borrow(), expected);
+    assert!(document.text.edited());
+    assert_eq!(document.outside.get(), changes_disk);
+    crate::saving::flush_work_copies(window, live);
+    assert!(crate::saving::restore_tabs(window).iter().any(|(copy, _)| {
+        copy.file.borrow().path() == document.file.borrow().path()
+            && *copy.text.borrow() == expected
+    }));
+}
+
+#[test]
+fn successful_git_preserves_edits_made_after_discard_confirmation() {
+    keeps_discarded_revision_when_git_cannot_discard_it(
+        "git-delayed-success",
+        Ok(String::new()),
+        true,
+        true,
+    );
+}
+
+#[test]
+fn failed_git_preserves_edits_made_after_discard_confirmation() {
+    keeps_discarded_revision_when_git_cannot_discard_it(
+        "git-delayed-failure",
+        Err(GitError::Failed("test failure".into())),
+        true,
+        true,
+    );
+}
+
+#[test]
+fn cancelled_git_preserves_edits_made_after_discard_confirmation() {
+    keeps_discarded_revision_when_git_cannot_discard_it(
+        "git-delayed-cancel",
+        Err(GitError::Cancelled),
+        true,
+        false,
+    );
+}
+
+#[test]
+fn failed_git_preflight_preserves_the_existing_draft_and_recovery() {
+    keeps_discarded_revision_when_git_cannot_discard_it(
+        "git-preflight-failure",
+        Err(GitError::Failed("preflight failed".into())),
+        false,
+        false,
+    );
 }
 
 #[test]

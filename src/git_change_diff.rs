@@ -24,6 +24,11 @@ pub(crate) struct Preview {
     pub patch: Option<Arc<crate::git_hunks::Patch>>,
 }
 
+struct SideText {
+    text: String,
+    symlink: bool,
+}
+
 impl Preview {
     pub fn open(&self, window: &AppWindow) {
         match &self.text {
@@ -76,20 +81,69 @@ pub(crate) fn read(target: &Target) -> Preview {
 }
 
 pub(crate) fn read_commits(root: &Path, left: &str, right: &str, change: &Change) -> Preview {
-    let before = if change.kind == Kind::Added {
-        Ok(None)
-    } else {
-        blob(root, left, change.from.as_deref().unwrap_or(&change.path))
+    read_commit(root, Some(left), right, change)
+}
+
+pub(crate) fn read_commit(
+    root: &Path,
+    parent: Option<&str>,
+    right: &str,
+    change: &Change,
+) -> Preview {
+    let before = match parent {
+        Some(left) if change.kind != Kind::Added => {
+            tree_blob(root, left, change.from.as_deref().unwrap_or(&change.path))
+        }
+        _ => Ok(None),
     };
     let after = if change.kind == Kind::Deleted {
         Ok(None)
     } else {
-        blob(root, right, &change.path)
+        tree_blob(root, right, &change.path)
     };
     preview(
         change,
-        &left.chars().take(7).collect::<String>(),
+        &parent.unwrap_or("—").chars().take(7).collect::<String>(),
         &right.chars().take(7).collect::<String>(),
+        before,
+        after,
+    )
+}
+
+pub(crate) fn read_commit_working(root: &Path, sha: &str, change: &Change) -> Preview {
+    let before = if change.kind == Kind::Deleted {
+        Ok(None)
+    } else {
+        tree_blob(root, sha, &change.path)
+    };
+    let path = root.join(&change.path);
+    let after = match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+        Ok(entry)
+            if entry.is_symlink()
+                || crate::workspace_boundary::existing_file_allowed(
+                    &[root.to_path_buf()],
+                    &path,
+                ) =>
+        {
+            working_text(&path).map(Some)
+        }
+        Ok(_) => Err(pick(
+            "作業ツリー内のファイルを読み取れません",
+            "Cannot read this file within the working tree",
+        )
+        .to_owned()),
+    };
+    // Both sides use the name in the selected commit, including after a rename.
+    let same_path = Change {
+        from: None,
+        ..change.clone()
+    };
+    preview(
+        &same_path,
+        &sha.chars().take(7).collect::<String>(),
+        pick("作業ツリー", "Working Tree"),
         before,
         after,
     )
@@ -99,8 +153,8 @@ fn preview(
     change: &Change,
     left_source: &str,
     right_source: &str,
-    left: Result<Option<String>, String>,
-    right: Result<Option<String>, String>,
+    left: Result<Option<SideText>, String>,
+    right: Result<Option<SideText>, String>,
 ) -> Preview {
     let path = &change.path;
     let old_path = change.from.as_deref().unwrap_or(path);
@@ -114,34 +168,57 @@ fn preview(
         left_label: format!("{left_name} · {old_path}"),
         right_label: format!("{right_name} · {path}"),
         text: left.and_then(|left| {
-            right.map(|right| (left.unwrap_or_default(), right.unwrap_or_default()))
+            right.map(|right| {
+                (
+                    left.map_or_else(String::new, |side| side.text),
+                    right.map_or_else(String::new, |side| side.text),
+                )
+            })
         }),
         patch: None,
     }
 }
 
-fn side_name(source: &str, text: &Result<Option<String>, String>) -> String {
+fn side_name(source: &str, text: &Result<Option<SideText>, String>) -> String {
     match text {
         Ok(None) => say!("{source}（なし）", "{source} (absent)"),
-        Ok(Some(text)) if text.is_empty() => say!("{source}（空）", "{source} (empty)"),
+        Ok(Some(side)) if side.symlink => say!("{source}（リンク）", "{source} (link)"),
+        Ok(Some(side)) if side.text.is_empty() => say!("{source}（空）", "{source} (empty)"),
         _ => source.to_owned(),
     }
 }
 
-fn blob(root: &Path, revision: &str, path: &str) -> Result<Option<String>, String> {
-    let bytes = git::change_blob(root, revision, path).map_err(|error| error.to_string())?;
-    decode_result(file_io::decode(&bytes, MAX_DOCUMENT_CHARACTERS).map(|(text, _)| text)).map(Some)
+fn tree_blob(root: &Path, revision: &str, path: &str) -> Result<Option<SideText>, String> {
+    let symlink =
+        git::tree_entry_is_symlink(root, revision, path).map_err(|error| error.to_string())?;
+    blob(root, revision, path).map(|side| side.map(|side| SideText { symlink, ..side }))
 }
 
-fn working_text(path: &Path) -> Result<String, String> {
-    // A Git symlink stores its target name, not the contents of the target.
-    let read = || -> Result<String, LoadError> {
-        if fs::symlink_metadata(path)?.is_symlink() {
-            return Ok(fs::read_link(path)?.to_string_lossy().into_owned());
-        }
-        file_io::read(path, MAX_DOCUMENT_CHARACTERS).map(|file| file.text)
-    };
-    decode_result(read())
+fn blob(root: &Path, revision: &str, path: &str) -> Result<Option<SideText>, String> {
+    let bytes = git::change_blob(root, revision, path).map_err(|error| error.to_string())?;
+    decode_result(file_io::decode(&bytes, MAX_DOCUMENT_CHARACTERS).map(|(text, _)| text)).map(
+        |text| {
+            Some(SideText {
+                text,
+                symlink: false,
+            })
+        },
+    )
+}
+
+fn working_text(path: &Path) -> Result<SideText, String> {
+    let symlink = fs::symlink_metadata(path)
+        .map_err(|error| error.to_string())?
+        .is_symlink();
+    if symlink {
+        let target = fs::read_link(path).map_err(|error| error.to_string())?;
+        return Ok(SideText {
+            text: target.to_string_lossy().into_owned(),
+            symlink,
+        });
+    }
+    decode_result(file_io::read(path, MAX_DOCUMENT_CHARACTERS).map(|file| file.text))
+        .map(|text| SideText { text, symlink })
 }
 
 fn decode_result(text: Result<String, LoadError>) -> Result<String, String> {
@@ -240,5 +317,27 @@ mod tests {
         });
         assert!(preview.right_label.contains(pick("なし", "absent")));
         assert_eq!(preview.text.unwrap(), ("本文\n".into(), String::new()));
+    }
+
+    #[test]
+    fn commit_preview_distinguishes_link_blobs_from_file_text() {
+        let root = scratch_directory("git-commit-link-diff");
+        let Some(()) = repository(&root) else { return };
+        fs::write(root.join("link-name"), "original.md").unwrap();
+        git::commit(&root, "regular file", true, false).unwrap();
+        let first = git::head_sha(&root).unwrap();
+        let blob = git::resolve(&root, "HEAD:link-name").unwrap();
+        let cache_entry = format!("120000,{blob},link-name");
+        git_ok(&root, &["update-index", "--cacheinfo", &cache_entry]);
+        git::commit(&root, "link", false, false).unwrap();
+        let head = git::head_sha(&root).unwrap();
+        let detail = git::detail(&root, &head).unwrap();
+        let preview = read_commit(&root, Some(&first), &head, &detail.files[0]);
+        assert!(!preview.left_label.contains(pick("（リンク）", "(link)")));
+        assert!(preview.right_label.contains(pick("（リンク）", "(link)")));
+        assert_eq!(
+            preview.text.unwrap(),
+            ("original.md".into(), "original.md".into())
+        );
     }
 }

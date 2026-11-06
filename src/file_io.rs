@@ -107,6 +107,20 @@ pub struct TextForm {
     pub mixed_newlines: bool,
 }
 
+/// Resolve aliases while the target exists. For a missing target, resolve
+/// its parent and keep the filename's exact case: a Windows directory can
+/// distinguish case, so the spelling alone does not establish an alias.
+pub fn document_path_identity(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        absolute
+            .parent()
+            .zip(absolute.file_name())
+            .and_then(|(parent, name)| parent.canonicalize().ok().map(|parent| parent.join(name)))
+            .unwrap_or(absolute)
+    })
+}
+
 /// Enough of a file's identity to notice another program has written it.
 ///
 /// Length as well as time because a same-second write of the same length is
@@ -608,15 +622,14 @@ fn with_newlines(text: &str, newline: Newline) -> Cow<'_, str> {
 /// 5.1 forbids leaving management files there, not writing the file 8.2 asks
 /// for.
 ///
-/// The serial keeps two saves of the same file from meeting. It is per
-/// process, which is as far as this needs to reach: the case it guards is this
-/// editor saving twice, not two editors saving at once.
+/// The process ID and serial keep simultaneous writes from sharing a file.
 fn temporary_path(path: &Path) -> PathBuf {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
     let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
     let name = path.file_name().and_then(OsStr::to_str);
     let name = name.unwrap_or("save");
-    let temporary = format!(".{name}.{serial}.{TEMPORARY_SUFFIX}");
+    let process = std::process::id();
+    let temporary = format!(".{name}.{process}.{serial}.{TEMPORARY_SUFFIX}");
     path.with_file_name(temporary)
 }
 
@@ -625,8 +638,7 @@ fn temporary_path(path: &Path) -> PathBuf {
 /// `sync_all` and not just a flush: the point of the temporary file is that
 /// the target is only replaced once the new contents exist, and buffered
 /// contents do not exist.
-fn write_all_to(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = fs::File::create(path)?;
+fn write_all_to(mut file: fs::File, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -636,8 +648,20 @@ fn write_all_to(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// The whole point is the order. If any step fails, the temporary file goes
 /// and the original is untouched.
 pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<FileStamp> {
-    let temporary = temporary_path(path);
-    if let Err(error) = write_all_to(&temporary, bytes) {
+    let (temporary, file) = loop {
+        let temporary = temporary_path(path);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => break (temporary, file),
+            // A prior run with a reused PID may have left a temporary file.
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    };
+    if let Err(error) = write_all_to(file, bytes) {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }

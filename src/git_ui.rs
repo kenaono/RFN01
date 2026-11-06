@@ -63,14 +63,36 @@ struct Job {
     root: PathBuf,
     /// 終わったら読み直すTABの範囲。
     reload: Reload,
-    /// 書き手が「破棄して続ける」を選んだ文書。終わったら必ず読み直す。
-    discarded: Vec<Rc<OpenDocument>>,
+    /// 成功時に破棄してよい文書と、その時点で確認された版。
+    discarded: Vec<DiscardedDocument>,
     /// 通ったときにすること（Commitならメッセージ欄を空にする）。
     after: After,
     /// 通ったら Undo の記録に足すもの（RFN01-67 PR 2b）。
     record: Option<Recording>,
     /// Undo（`false`）・Redo（`true`）そのもの。通ったら記録を反対の山へ移す。
     history: Option<bool>,
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+struct DiscardedDocument {
+    document: std::rc::Weak<OpenDocument>,
+    path: PathBuf,
+    revision: u64,
+}
+
+impl DiscardedDocument {
+    fn capture(document: &Rc<OpenDocument>) -> Option<Self> {
+        Some(Self {
+            document: Rc::downgrade(document),
+            path: document.file.borrow().path()?.to_path_buf(),
+            revision: document.text.revision(),
+        })
+    }
 }
 
 struct DiffRead {
@@ -156,10 +178,10 @@ pub(crate) enum Action {
         resolution: git::Resolution,
     },
     StashApply {
-        name: String,
+        stash: Stash,
         pop: bool,
     },
-    StashDrop(String),
+    StashDrop(Stash),
     Commit {
         message: String,
         all: bool,
@@ -275,7 +297,9 @@ pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
 /// A nested linked worktree has a .git file, and owns its own open documents.
 fn inside_worktree(path: &Path, root: &Path) -> bool {
     inside(path, root)
-        && !path.ancestors().skip(1)
+        && !path
+            .ancestors()
+            .skip(1)
             .take_while(|parent| !same_path(parent, root))
             .any(|parent| parent.join(".git").exists())
 }
@@ -328,7 +352,9 @@ fn root_of(pane: &Pane) -> Option<PathBuf> {
 
 fn preferred_folder(window: &AppWindow, live: &Live, folders: &[PathBuf]) -> Option<PathBuf> {
     let chosen = chosen_folder();
-    if let Some(chosen) = chosen.filter(|chosen| folders.iter().any(|folder| same_path(folder, chosen))) {
+    if let Some(chosen) =
+        chosen.filter(|chosen| folders.iter().any(|folder| same_path(folder, chosen)))
+    {
         return Some(chosen);
     }
     let active = live.active(window);
@@ -370,7 +396,11 @@ pub fn refresh_soon(window: &AppWindow, live: &Live) {
 }
 
 /// Resolve the captured folder and synchronize Git Changes with the graph.
-pub(crate) fn prepare_repository(window: &AppWindow, live: &Live, folder: Option<&Path>) -> Result<PathBuf, String> {
+pub(crate) fn prepare_repository(
+    window: &AppWindow,
+    live: &Live,
+    folder: Option<&Path>,
+) -> Result<PathBuf, String> {
     let Some(folder) = folder else {
         return Err(say!(
             "Workspaceを開くと、その登録フォルダのGitを操作できます",
@@ -378,16 +408,25 @@ pub(crate) fn prepare_repository(window: &AppWindow, live: &Live, folder: Option
         ));
     };
     let folders = workspace_folders(live);
-    if !folders.iter().any(|registered| same_path(registered, folder)) {
-        return Err(pick("操作対象が変わりました。選び直してください", "The target changed. Please choose again").into());
+    if !folders
+        .iter()
+        .any(|registered| same_path(registered, folder))
+    {
+        return Err(pick(
+            "操作対象が変わりました。選び直してください",
+            "The target changed. Please choose again",
+        )
+        .into());
     }
     let root = match git::repository_root(folder) {
         Ok(Some(root)) => root,
-        Ok(None) => return Err(say!(
-            "{}はGitで管理されていません",
-            "{} is not a Git repository",
-            folder.display()
-        )),
+        Ok(None) => {
+            return Err(say!(
+                "{}はGitで管理されていません",
+                "{} is not a Git repository",
+                folder.display()
+            ));
+        }
         Err(error) => return Err(error.to_string()),
     };
     PANE.with(|pane| pane.borrow_mut().folders = folders);
@@ -600,7 +639,7 @@ fn finish(window: &AppWindow, live: &Live, job: Job, result: Result<String, GitE
     live.cache
         .borrow_mut()
         .log_diag("spec.git", &format!("done {outcome}"));
-    reload_documents(window, live, &job);
+    reload_documents(window, live, &job, result.is_ok());
     if result.is_ok() {
         settle_history(&job);
     }
@@ -649,30 +688,45 @@ pub(crate) fn notice(window: &AppWindow, live: &Live, text: String) {
     );
 }
 
-/// 操作のあと、開いているTABを読み直す：破棄すると答えたものは必ず、それ以外は
-/// **未保存の変更が無く、ファイルが変わったものだけ**。
-fn reload_documents(window: &AppWindow, live: &Live, job: &Job) {
-    for document in &job.discarded {
-        crate::saving::reload_document(window, live, document);
-    }
+/// 破棄の同意は、その時点の文書に限る。失敗や中止でも作業ツリーが変わることがある。
+fn reload_documents(window: &AppWindow, live: &Live, job: &Job, succeeded: bool) {
     let in_scope = |path: &Path| match &job.reload {
         Reload::None => false,
         Reload::Repository => inside_worktree(path, &job.root),
         Reload::Files(files) => files.iter().any(|file| key(file) == key(path)),
     };
     for document in crate::open_documents(live) {
-        if job.discarded.iter().any(|d| Rc::ptr_eq(d, &document)) || document.text.edited() {
-            continue;
-        }
         let path = document.file.borrow().path().map(Path::to_path_buf);
         let Some(path) = path else {
             continue;
         };
+        if let Some(discarded) = job
+            .discarded
+            .iter()
+            .find(|discarded| discarded.document.ptr_eq(&Rc::downgrade(&document)))
+        {
+            if succeeded && path == discarded.path && document.text.revision() == discarded.revision
+            {
+                crate::saving::reload_document(window, live, &document);
+            } else if document.text.edited() {
+                crate::saving::write_work_copy_of(window, live, &document);
+            }
+            continue;
+        }
+        if document.text.edited() {
+            if in_scope(&path) {
+                crate::saving::write_work_copy_of(window, live, &document);
+            }
+            continue;
+        }
         let changed =
             document.file.borrow().external_change() == crate::buffer::ExternalChange::Modified;
         if changed && in_scope(&path) {
             crate::saving::reload_document(window, live, &document);
         }
+    }
+    if !matches!(job.reload, Reload::None) {
+        crate::saving::check_external_change(window, live);
     }
 }
 
@@ -879,7 +933,10 @@ fn start(
             cancel: cancel.clone(),
             root: root.clone(),
             reload,
-            discarded,
+            discarded: discarded
+                .iter()
+                .filter_map(DiscardedDocument::capture)
+                .collect(),
             after,
             record: None,
             history: None,
@@ -958,10 +1015,15 @@ fn request(window: &AppWindow, live: &Live, pending: Pending) {
     }
     if matches!(&pending.action, Action::ResolveMerge { .. }) {
         if !edited_in_scope(live, &pending).is_empty() {
-            notice(window, live, pick(
-                "対象に未保存の文書があります。保存してからやり直してください。",
-                "Save the affected open documents before resolving the merge.",
-            ).to_owned());
+            notice(
+                window,
+                live,
+                pick(
+                    "対象に未保存の文書があります。保存してからやり直してください。",
+                    "Save the affected open documents before resolving the merge.",
+                )
+                .to_owned(),
+            );
             return;
         }
     } else if merge_snapshot().is_some_and(|(root, _)| root == pending.root) {
@@ -975,12 +1037,14 @@ fn request(window: &AppWindow, live: &Live, pending: Pending) {
             Action::Commit { .. } => (pick("Amendする", "Amend"), -1),
             Action::StashDrop(_) => (pick("Dropする", "Drop"), 0),
             Action::Merge { .. } => (pick("Mergeする", "Merge"), -1),
-            Action::ResolveMerge { resolution: git::Resolution::Abort, .. } => {
-                (pick("Mergeを中止", "Abort Merge"), 0)
-            }
-            Action::ResolveMerge { resolution: git::Resolution::Delete(_), .. } => {
-                (pick("削除してStage", "Delete and Stage"), 0)
-            }
+            Action::ResolveMerge {
+                resolution: git::Resolution::Abort,
+                ..
+            } => (pick("Mergeを中止", "Abort Merge"), 0),
+            Action::ResolveMerge {
+                resolution: git::Resolution::Delete(_),
+                ..
+            } => (pick("削除してStage", "Delete and Stage"), 0),
             Action::Reset { hard: true, .. } => {
                 (pick("Resetして変更を消す", "Reset and Delete Changes"), 0)
             }
@@ -1056,18 +1120,27 @@ fn confirmation(pending: &Pending) -> Option<String> {
             }
             Some(text)
         }
-        Action::StashDrop(name) => Some(say!(
-            "{name}を捨てますか？\n\n元に戻せません。",
-            "Drop {name}?\n\nThis cannot be undone."
+        Action::StashDrop(stash) => Some(say!(
+            "{} ({})を捨てますか？\n\n元に戻せません。",
+            "Drop {} ({})?\n\nThis cannot be undone.",
+            stash.name,
+            stash.message
         )),
-        Action::ResolveMerge { resolution: git::Resolution::Abort, .. } => {
+        Action::ResolveMerge {
+            resolution: git::Resolution::Abort,
+            ..
+        } => {
             let root = pending.root.display();
             Some(say!(
                 "{root} のMergeを中止しますか？\n\nGitがMerge前の状態への復元を試みます。衝突の解消のために保存・Stageした変更も失われます。",
                 "Abort the merge in {root}?\n\nGit will try to restore the pre-merge state. Saved and staged conflict resolutions will be discarded."
             ))
         }
-        Action::ResolveMerge { path: Some(path), resolution: git::Resolution::Delete(_), .. } => Some(say!(
+        Action::ResolveMerge {
+            path: Some(path),
+            resolution: git::Resolution::Delete(_),
+            ..
+        } => Some(say!(
             "{path} の削除を採用しますか？\n\n現在の作業ファイルを削除し、削除をStageします。",
             "Accept deletion of {path}?\n\nThis removes the current working file and stages the deletion."
         )),
@@ -1105,8 +1178,8 @@ fn confirmation(pending: &Pending) -> Option<String> {
                     "{short}へResetして、Commitしていない変更を消しますか？\n\n消した変更は元に戻せません。",
                     "Reset to {short} and delete the uncommitted changes?\n\nDeleted changes cannot be restored."
                 ) + &say!(
-                    "まだGitが知らない新しいファイルは残ります。",
-                    " New files that Git does not track yet are kept."
+                    "未追跡のファイルと衝突する場合は中止します。",
+                    " The reset stops if it would overwrite an untracked path."
                 )
             } else {
                 say!("{short}へResetしますか？\n\n", "Reset to {short}?\n\n")
@@ -1145,7 +1218,9 @@ fn edited_in_scope(live: &Live, pending: &Pending) -> Vec<Rc<OpenDocument>> {
             .flat_map(|c| std::iter::once(&c.path).chain(c.from.as_ref()))
             .map(|p| pending.root.join(p))
             .collect(),
-        Action::ResolveMerge { path: Some(path), .. } => vec![pending.root.join(path)],
+        Action::ResolveMerge {
+            path: Some(path), ..
+        } => vec![pending.root.join(path)],
         _ => Vec::new(),
     };
     crate::open_documents(live)
@@ -1246,13 +1321,6 @@ pub fn branch_named(
 
 /// 確かめ終わった操作を走らせる。`discarded`は破棄すると答えた文書。
 fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<OpenDocument>>) {
-    // 破棄：退避も捨てる。中身は操作のあとで読み直す（`reload_documents`）。
-    for document in &discarded {
-        crate::saving::discard_work_copy(
-            live,
-            &crate::saving::work_identity(&document.file.borrow()),
-        );
-    }
     let Pending { root, action, .. } = pending;
     if let Action::History { redo, .. } = action {
         run_history(window, live, root, redo, discarded);
@@ -1308,27 +1376,44 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
                 Ok(pick("Syncしました", "Synced").to_owned())
             },
         ),
-        Action::ResolveMerge { state, path, resolution } => {
-            let reload = if matches!(resolution, git::Resolution::Delete(_) | git::Resolution::Abort) {
+        Action::ResolveMerge {
+            state,
+            path,
+            resolution,
+        } => {
+            let reload = if matches!(
+                resolution,
+                git::Resolution::Delete(_) | git::Resolution::Abort
+            ) {
                 Reload::Repository
             } else {
                 Reload::None
             };
             start(
-                window, live, root, "", false, reload, discarded, After::Nothing,
+                window,
+                live,
+                root,
+                "",
+                false,
+                reload,
+                discarded,
+                After::Nothing,
                 "merge-resolution",
                 move |root, _| {
                     git::resolve_merge(root, &state, path.as_deref(), resolution)?;
                     Ok(match resolution {
-                        git::Resolution::Stage | git::Resolution::Delete(_) =>
-                            pick("解消結果をStageしました", "Staged the resolution"),
+                        git::Resolution::Stage | git::Resolution::Delete(_) => {
+                            pick("解消結果をStageしました", "Staged the resolution")
+                        }
                         git::Resolution::Continue => pick("Mergeを完了しました", "Merge completed"),
                         git::Resolution::Abort => pick("Mergeを中止しました", "Merge aborted"),
-                    }.to_owned())
+                    }
+                    .to_owned())
                 },
             );
         }
-        Action::StashApply { name, pop } => {
+        Action::StashApply { stash, pop } => {
+            let name = &stash.name;
             let told = if pop {
                 say!("{name}をPopしました", "Popped {name}")
             } else {
@@ -1344,10 +1429,11 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
                 discarded,
                 After::Nothing,
                 "stash-apply",
-                move |root, _| git::stash_apply(root, &name, pop).map(|()| told),
+                move |root, _| git::stash_apply(root, &stash, pop).map(|()| told),
             );
         }
-        Action::StashDrop(name) => {
+        Action::StashDrop(stash) => {
+            let name = &stash.name;
             let told = say!("{name}をDropしました", "Dropped {name}");
             start(
                 window,
@@ -1359,7 +1445,7 @@ fn run(window: &AppWindow, live: &Live, pending: Pending, discarded: Vec<Rc<Open
                 discarded,
                 After::Nothing,
                 "stash-drop",
-                move |root, _| git::stash_drop(root, &name).map(|()| told),
+                move |root, _| git::stash_drop(root, &stash).map(|()| told),
             );
         }
         Action::Commit {
@@ -1622,14 +1708,12 @@ fn recording(root: &Path, action: &Action) -> Option<Recording> {
                 stash: None,
             },
         ),
-        Action::StashApply { name, pop: true } => {
-            let message = git::stashes(root)
-                .ok()?
-                .into_iter()
-                .find(|s| &s.name == name)?
-                .message;
-            (format!("Pop {name}"), HistoryKind::Pop { message })
-        }
+        Action::StashApply { stash, pop: true } => (
+            format!("Pop {}", stash.name),
+            HistoryKind::Pop {
+                message: stash.message.clone(),
+            },
+        ),
         Action::BranchAt { name, .. } => (
             format!("New Branch {name}"),
             HistoryKind::NewBranch { name: name.clone() },
@@ -1830,7 +1914,10 @@ fn choose_folder(window: &AppWindow, live: &Live, folder: PathBuf) -> bool {
         }
         if let Some(current) = pane.chosen.as_ref().map(|path| key(path)) {
             let kept = pane.kept_message.take();
-            pane.drafts.insert(current, (window.get_git_message(), window.get_git_amend(), kept));
+            pane.drafts.insert(
+                current,
+                (window.get_git_message(), window.get_git_amend(), kept),
+            );
         }
         let (message, amend, kept) = pane.drafts.remove(&key(&folder)).unwrap_or_default();
         window.set_git_message(message);
@@ -1871,9 +1958,15 @@ pub(crate) fn create_worktree(
     head: String,
 ) {
     start(
-        window, live, root,
+        window,
+        live,
+        root,
         pick("Worktreeを作成しています…", "Creating worktree…"),
-        false, Reload::None, Vec::new(), After::Nothing, "worktree-add",
+        false,
+        Reload::None,
+        Vec::new(),
+        After::Nothing,
+        "worktree-add",
         move |root, _| {
             git::add_worktree(root, &parent, &folder, &branch, &head)?;
             Ok(pick("Worktreeを作成しました", "Created worktree").to_owned())
@@ -2188,11 +2281,11 @@ fn row_menu(window: &AppWindow, live: &Live, index: usize, action: i32) {
             window,
             live,
             Action::StashApply {
-                name: stash.name,
+                stash,
                 pop: action == 1,
             },
         ),
-        (Some((None, None, Some(stash))), 2) => act(window, live, Action::StashDrop(stash.name)),
+        (Some((None, None, Some(stash))), 2) => act(window, live, Action::StashDrop(stash)),
         _ => {}
     }
 }

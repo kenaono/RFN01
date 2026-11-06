@@ -15,9 +15,11 @@ pub(crate) enum Command {
     Tree(crate::tree_actions::Action),
     PanelAction(crate::panel_actions::Action),
     NewFile,
-    /// RFN01-88: 新規文書をテンプレートから（名前で）。
-    NewFromTemplate(String),
-    NewTerminal(i32),
+    ApplyTemplate {
+        path: PathBuf,
+        new_document: bool,
+    },
+    NewTerminal(Option<u64>),
     Open,
     Folder,
     Recent(std::path::PathBuf),
@@ -83,7 +85,7 @@ pub(crate) enum Command {
     ReadAloud,
     Terminal(i32),
     Panel(i32),
-    Shell(i32),
+    Shell(u64),
     ZoomSet(i32),
     /// 書式のツールバー・パレットを出す／しまう（2026-09-23）。
     Toolbar,
@@ -1049,11 +1051,11 @@ pub(crate) struct Target {
     document: Rc<OpenDocument>,
     identity: Option<Rc<()>>,
     session: Option<Rc<RefCell<TerminalSession>>>,
-    shells: Vec<TerminalShell>,
     spot: TerminalSpot,
     field: i32,
     tree: Option<crate::tree_actions::Target>,
     panel_context: Option<crate::panel_actions::Context>,
+    repository: Option<Rc<()>>,
 }
 impl Target {
     fn capture(window: &AppWindow, live: &Live) -> Self {
@@ -1064,7 +1066,7 @@ impl Target {
     ///
     /// **メニューから開いたのではない**ので、字を入れていた欄の持ち主はいない
     /// ——`field`は0（欄ではない）から始める。
-    fn for_shortcut(window: &AppWindow, live: &Live) -> Self {
+    pub(crate) fn for_shortcut(window: &AppWindow, live: &Live) -> Self {
         Self::with_field(window, live, 0)
     }
     fn with_field(window: &AppWindow, live: &Live, field: i32) -> Self {
@@ -1106,11 +1108,11 @@ impl Target {
             document: live.states.document(id),
             identity,
             session,
-            shells: configured_shells(window),
             spot,
             field,
             tree: None,
             panel_context: None,
+            repository: git_repo_ui::overlay_identity(window),
         }
     }
     fn with_tree(mut self, tree: crate::tree_actions::Target) -> Self {
@@ -1119,11 +1121,14 @@ impl Target {
     }
 
     pub(crate) fn for_tree(window: &AppWindow, live: &Live) -> Self {
-        Self::with_field(window, live, 0).with_tree(crate::tree_actions::Target::capture(window, live))
+        Self::with_field(window, live, 0)
+            .with_tree(crate::tree_actions::Target::capture(window, live))
     }
 
-    pub(crate) fn for_panels(window: &AppWindow, live: &Live) -> Self {
-        Self::for_tree(window, live).with_panel_context(window, live)
+    pub(crate) fn for_palette(window: &AppWindow, live: &Live, id: PaneId) -> Self {
+        Self::for_pane(window, live, id)
+            .with_tree(crate::tree_actions::Target::capture(window, live))
+            .with_panel_context(window, live)
     }
 
     pub(crate) fn for_surface(window: &AppWindow, live: &Live) -> Self {
@@ -1150,7 +1155,6 @@ impl Target {
                         .as_ref()
                         .is_some_and(|identity| Rc::ptr_eq(identity, &tab.identity))
                 }))
-            && self.shells == configured_shells(window)
             && self.session.as_ref().is_none_or(|session| {
                 live.cache
                     .borrow_mut()
@@ -1203,8 +1207,7 @@ pub fn install(window: &AppWindow, live: &Live) {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        if window.get_question_open() || window.get_print_active() || window.get_diff_active()
-        {
+        if window.get_question_open() || window.get_print_active() || window.get_diff_active() {
             return;
         }
         if window.get_title_menu_open() {
@@ -1356,7 +1359,7 @@ fn menu_action_plain(action: MenuAction) -> Command {
         MenuAction::Duplicate => Command::Duplicate,
         MenuAction::CopyPath => Command::CopyPath,
         MenuAction::NewFile => Command::NewFile,
-        MenuAction::NewTerminal => Command::NewTerminal(-1),
+        MenuAction::NewTerminal => Command::NewTerminal(None),
         MenuAction::ToggleDirection => Command::DirectionToggle,
         MenuAction::TogglePreview => Command::Preview,
         MenuAction::ToggleViewer => Command::Viewer,
@@ -1623,14 +1626,21 @@ impl<'a> Scene<'a> {
             (self.text, self.editable, self.main, self.path, self.field);
         let panel = t.id.is_panel();
         match command {
-            Command::PanelAction(action) => crate::panel_actions::enabled(window, self.t.panel_context.as_ref(), *action, text, self.screen.settings),
+            Command::PanelAction(action) => crate::panel_actions::enabled(
+                window,
+                self.t.panel_context.as_ref(),
+                *action,
+                text,
+                self.screen.settings,
+            ),
             Command::Tree(action) => {
-                t.tree.as_ref().is_some_and(|tree| tree.enabled(window, self.live, *action))
+                t.tree
+                    .as_ref()
+                    .is_some_and(|tree| tree.enabled(window, self.live, *action))
                     && (*action != crate::tree_actions::Action::RevealDocument
                         || t.document.file.borrow().path().is_some())
             }
             Command::NewFile
-            | Command::NewFromTemplate(_)
             | Command::NewTerminal(_)
             | Command::Open
             | Command::Folder
@@ -1696,6 +1706,9 @@ impl<'a> Scene<'a> {
             },
             Command::Word(_) => main,
             Command::Insert(shape) => self.insert_state(*shape).0,
+            Command::ApplyTemplate { new_document, .. } => {
+                *new_document || (editable && !self.live.states.of(t.id).borrow().rectangular)
+            }
             Command::List(0, i) => {
                 editable
                     && document::BULLET_MARKS
@@ -1718,6 +1731,7 @@ impl<'a> Scene<'a> {
             Command::Focus(side) => {
                 self.neighbour(*side) || (*side == 3 && t.parent.screen(window).below_kind != 0)
             }
+            Command::Navigate(false) if window.get_git_repo_active() => t.repository.is_some(),
             Command::Navigate(forward) => text && self.can_navigate(*forward),
             Command::Below => !self.screen.settings,
             Command::Above => panel || matches!(t.spot, TerminalSpot::Below),
@@ -1846,18 +1860,21 @@ fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<
                     documents.push(scene.row(
                         &template.name,
                         &template.name,
-                        Command::NewFromTemplate(template.name.clone()),
+                        Command::ApplyTemplate {
+                            path: template.path,
+                            new_document: true,
+                        },
                         false,
                     ));
                 }
                 root.push(Item::child("新規文書", "New File", documents));
             }
             let mut shells = Vec::new();
-            for (i, shell) in configured_shells(window).iter().enumerate() {
+            for shell in offered_shells(window) {
                 shells.push(scene.row(
                     &shell.name,
                     &shell.name,
-                    Command::NewTerminal(i as i32),
+                    Command::NewTerminal(Some(shell.id)),
                     false,
                 ));
             }
@@ -1872,11 +1889,13 @@ fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<
             }
             root.push(Item::child("最近のフォルダ", "Recent Folders", recent));
             act!(Command::Workspaces);
-            act!(Command::PanelAction(crate::panel_actions::Action::Repositories(
-                crate::git_catalog_ui::Action::Show
-            )));
+            act!(Command::PanelAction(
+                crate::panel_actions::Action::Repositories(crate::git_catalog_ui::Action::Show)
+            ));
             // RFN01-67: 全ブランチのグラフ（Git Changes で選んでいるリポジトリ）。
-            act!(Command::PanelAction(crate::panel_actions::Action::GitRepositoryOpen));
+            act!(Command::PanelAction(
+                crate::panel_actions::Action::GitRepositoryOpen
+            ));
             root.push(Item::Sep);
             act!(Command::Save(false));
             act!(Command::Save(true));
@@ -2151,11 +2170,11 @@ fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<
                     act!(Command::Panel(8));
                 }
                 let mut shells = Vec::new();
-                for (i, shell) in configured_shells(window).iter().enumerate() {
+                for shell in offered_shells(window) {
                     shells.push(scene.row(
                         &shell.name,
                         &shell.name,
-                        Command::Shell(i as i32),
+                        Command::Shell(shell.id),
                         false,
                     ));
                 }
@@ -2456,6 +2475,7 @@ pub(crate) fn key_command(id: usize) -> Option<Command> {
 }
 
 /// その操作が、`pane`を対象にいま実行できるか。
+#[cfg(test)]
 pub(crate) fn allowed_for(
     window: &AppWindow,
     live: &Live,
@@ -2472,11 +2492,30 @@ pub(crate) fn allowed_for(
 /// を確かめてから実行する——灰色にした・並べなかったことに頼らない（開いてから押すまでに場面が
 /// 変わることがある）。断ったときは`name`で知らせる（その時の状態だけの操作は黙る）。
 pub(crate) fn run(window: &AppWindow, live: &Live, t: &Target, command: Command, name: &str) {
+    let updated;
+    let t = if window_command(&command) && !t.valid(window, live) {
+        updated = Target::for_shortcut(window, live);
+        &updated
+    } else {
+        t
+    };
     let valid = match &command {
-        Command::PanelAction(action) => t.valid(window, live) && t.panel_context.as_ref().is_some_and(|context| context.valid(window, live, *action)),
-        Command::Tree(action) => t.tree.as_ref().is_some_and(|tree| tree.valid(window, live))
-            && (*action != crate::tree_actions::Action::RevealDocument || t.valid(window, live)),
-        _ => t.valid(window, live),
+        Command::PanelAction(action) => {
+            t.valid(window, live)
+                && t.panel_context
+                    .as_ref()
+                    .is_some_and(|context| context.valid(window, live, *action))
+        }
+        Command::Tree(action) => {
+            t.tree.as_ref().is_some_and(|tree| tree.valid(window, live))
+                && (*action != crate::tree_actions::Action::RevealDocument || t.valid(window, live))
+        }
+        Command::Navigate(false) if t.repository.is_some() || window.get_git_repo_active() => t
+            .repository
+            .as_ref()
+            .zip(git_repo_ui::overlay_identity(window).as_ref())
+            .is_some_and(|(target, current)| Rc::ptr_eq(target, current)),
+        _ => window_command(&command) || t.valid(window, live),
     };
     if !valid {
         window.tell(
@@ -2497,20 +2536,39 @@ pub(crate) fn run(window: &AppWindow, live: &Live, t: &Target, command: Command,
     execute(window, live, t, command);
 }
 
-/// RFN01-66: キー（割り当ての一覧のid）から。対象は`pane`。
-pub(crate) fn run_key(window: &AppWindow, live: &Live, pane: PaneId, id: usize, name: &str) {
+fn window_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Folder
+            | Command::Recent(_)
+            | Command::RecentPicker
+            | Command::Workspaces
+            | Command::SaveAll
+            | Command::Exit
+            | Command::Help(0 | 2)
+            | Command::FolderFind
+            | Command::FolderReplace
+            | Command::Sidebar(_)
+            | Command::Toolbar
+            | Command::Palette
+            | Command::Draft
+            | Command::ShowLeftTab(_)
+            | Command::ToggleLeftPane
+            | Command::ExplorePane
+            | Command::OpenSettings
+            | Command::CommandPalette(_)
+    )
+}
+
+/// キー（割り当ての一覧のid）から。対象は押下時に捕まえたもの。
+pub(crate) fn run_key(window: &AppWindow, live: &Live, target: &Target, id: usize, name: &str) {
     if let Some(command) = key_command(id) {
-        run(
-            window,
-            live,
-            &Target::of(window, live, pane, 0),
-            command,
-            name,
-        );
+        run(window, live, target, command, name);
     }
 }
 
 /// キーで押した操作を実行できるか。
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Allowed {
     Yes,
@@ -2519,6 +2577,7 @@ pub(crate) enum Allowed {
     /// いまの状態では何も起きない。知らせない（戻す履歴が無い、隣のPaneが無い、など）。
     Quiet,
 }
+#[cfg(test)]
 impl Allowed {
     fn from(enabled: bool, quiet: bool) -> Self {
         match (enabled, quiet) {
@@ -2544,10 +2603,10 @@ fn quiet(command: &Command) -> bool {
             | Command::SpellingStep(_)
             | Command::Tree(
                 crate::tree_actions::Action::Previous
-                | crate::tree_actions::Action::Next
-                | crate::tree_actions::Action::Activate
-                | crate::tree_actions::Action::Left
-                | crate::tree_actions::Action::Right
+                    | crate::tree_actions::Action::Next
+                    | crate::tree_actions::Action::Activate
+                    | crate::tree_actions::Action::Left
+                    | crate::tree_actions::Action::Right
             )
     )
 }
@@ -2594,17 +2653,28 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
     let p = t.id.index();
     let parent = t.parent.index();
     match command {
-        Command::PanelAction(action) => crate::panel_actions::execute(window, live, t.panel_context.as_ref(), action),
+        Command::PanelAction(action) => {
+            crate::panel_actions::execute(window, live, t.panel_context.as_ref(), action)
+        }
         Command::Tree(action) => {
             if let Some(tree) = &t.tree {
                 crate::tree_actions::execute(window, live, tree, t.id, action);
             }
         }
         Command::NewFile => window.invoke_pane_new_file(p),
-        Command::NewFromTemplate(name) => crate::new_from_template(window, live, t.id, &name),
-        // RFN01-114: -1は既定のシェル（キーは特定のシェルを指さない、書き手の合意 2026-09-21）。
-        Command::NewTerminal(i) => window
-            .invoke_pane_new_terminal(parent, if i < 0 { window.get_default_shell() } else { i }),
+        Command::ApplyTemplate { path, new_document } => {
+            if new_document {
+                crate::create_from_template(window, live, t.parent, &path);
+            } else {
+                crate::insert_template(window, live, t.id, &path);
+            }
+        }
+        Command::NewTerminal(None) => window.invoke_pane_new_terminal(parent),
+        Command::NewTerminal(Some(profile_id)) => {
+            if let Some(shell) = selected_shell(window, profile_id) {
+                open_terminal(window, live, t.parent, shell);
+            }
+        }
         Command::Open => {
             if t.id.is_panel() {
                 terminal_panels::action(window, live, t.parent, 11, 0)
@@ -2613,7 +2683,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
             }
         }
         Command::Folder => window.invoke_work_folder_requested(),
-        Command::Recent(path) => open_work_folder(window, live, &path),
+        Command::Recent(path) => go_to_remembered_folder(window, live, &path),
         Command::Workspaces => window.invoke_workspace_manager_requested(),
         Command::Save(false) => window.invoke_save_requested(),
         Command::Save(true) => window.invoke_save_as_requested(),
@@ -2704,7 +2774,7 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::OpenSettings => window.invoke_settings_requested(),
         Command::CommandPalette(commands) => crate::command_palette::open(window, live, commands),
         Command::CloseStripTab => terminal_panels::action(window, live, t.parent, 2, 0),
-        Command::TemplatePicker => crate::command_palette::open_templates(window, live, t.id),
+        Command::TemplatePicker => crate::command_palette::open_templates(window, live, t, true),
         Command::RecentPicker => {
             crate::command_palette::open_list(window, live, crate::command_palette::List::Recent)
         }
@@ -2725,6 +2795,9 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::Kill(n) => window.invoke_pane_kill(p, n),
         Command::Word(n) => set_word_mode_of(window, live, t.id, n),
         Command::List(n, mark) => window.invoke_pane_list_edit(p, n, mark),
+        Command::Insert(InsertShape::Template) => {
+            crate::command_palette::open_templates(window, live, t, false)
+        }
         Command::Insert(shape) => insert_in_pane(window, live, t.id, shape),
         Command::Direction(vertical) => {
             if t.id.vertical(window) != vertical {
@@ -2798,11 +2871,11 @@ fn execute(window: &AppWindow, live: &Live, t: &Target, command: Command) {
         Command::ReadAloud => crate::read_aloud::toggle(window, live, t.id),
         Command::Terminal(n) => terminal_workflow::action(window, live, t.parent, t.spot, n),
         Command::Panel(n) => terminal_panels::action(window, live, t.parent, n, 0),
-        Command::Shell(n) => {
+        Command::Shell(profile_id) => {
             if matches!(t.spot, TerminalSpot::Below) {
-                terminal_panels::action(window, live, t.parent, 12, n)
+                terminal_panels::switch_profile(window, live, t.parent, profile_id);
             } else {
-                window.invoke_pane_switch_shell(parent, n)
+                window.invoke_pane_switch_shell(parent, profile_id.to_string().into());
             }
         }
     }
@@ -2816,6 +2889,7 @@ fn takes_keyboard(command: &Command) -> bool {
             | Command::Tree(_)
             | Command::PanelAction(_)
             | Command::TemplatePicker
+            | Command::Insert(InsertShape::Template)
             | Command::RecentPicker
             | Command::WordModePicker
             | Command::ShellPicker
@@ -3444,7 +3518,12 @@ mod tests {
         let seen = saves.clone();
         window.on_save_requested(move || seen.set(seen.get() + 1));
         assert_eq!(key(save), Allowed::Tell, "設定のTABは保存できない");
-        crate::shortcuts::run_command(window, live, pane, save as i32);
+        crate::shortcuts::run_command(
+            window,
+            live,
+            &Target::for_pane(window, live, pane),
+            save as i32,
+        );
         assert_eq!(saves.get(), 0);
         assert!(
             window.get_render_status().contains("使えません"),
@@ -3455,6 +3534,91 @@ mod tests {
             Some(false),
             "メニューでも灰色"
         );
+    }
+
+    #[test]
+    fn a_delayed_key_refuses_to_close_a_tab_that_replaced_its_target() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        crate::shortcuts::wire(window, live);
+        assert!(window.invoke_shortcut_key("w".into(), true, false, false));
+        crate::new_file_tab(window, live, PaneId::FIRST);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(live.tabs.borrow().of(PaneId::FIRST).tabs.len(), 2);
+        assert!(
+            window
+                .get_render_status()
+                .contains("操作対象が変わりました")
+        );
+    }
+
+    #[test]
+    fn fixed_and_reassigned_keys_are_delivered_with_exact_modifiers() {
+        use slint::platform::{Key, WindowEvent, update_timers_and_animations};
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        install(window, live);
+        crate::shortcuts::wire(window, live);
+        window.show().unwrap();
+        crate::new_file_tab(window, live, PaneId::FIRST);
+        window.set_focus_generation(window.get_focus_generation() + 1);
+        update_timers_and_animations();
+        let send = |modifiers: &[Key], text: SharedString| {
+            for key in modifiers {
+                window.window().dispatch_event(WindowEvent::KeyPressed {
+                    text: (*key).into(),
+                });
+            }
+            window
+                .window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            window
+                .window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+            for key in modifiers.iter().rev() {
+                window.window().dispatch_event(WindowEvent::KeyReleased {
+                    text: (*key).into(),
+                });
+            }
+            update_timers_and_animations();
+        };
+        send(&[Key::Control, Key::Shift], "w".into());
+        assert_eq!(live.tabs.borrow().of(PaneId::FIRST).tabs.len(), 2);
+        window.set_shortcut_bindings("file.save=Ctrl+F10;v=5".into());
+        let saves = Rc::new(Cell::new(0));
+        let seen = saves.clone();
+        window.on_save_requested(move || seen.set(seen.get() + 1));
+        send(&[Key::Control], Key::F10.into());
+        assert_eq!(saves.get(), 1);
+        assert!(!window.get_title_menu_visible());
+        send(&[], Key::F10.into());
+        assert!(window.get_title_menu_visible());
+        window.invoke_title_menu_dismissed();
+        window.set_shortcut_bindings("file.save=Ctrl+0;v=5".into());
+        send(&[Key::Control], "0".into());
+        assert_eq!(saves.get(), 1);
+    }
+
+    #[test]
+    fn a_recent_folder_removed_after_the_menu_opened_is_forgotten() {
+        let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        let here = app_data::app_directory().unwrap();
+        let missing = here.join("recent folder");
+        std::fs::create_dir(&missing).unwrap();
+        live.folder.borrow_mut().root = Some(here.clone());
+        remember_folder(live, &missing);
+        let target = Target::for_shortcut(window, live);
+        std::fs::remove_dir(&missing).unwrap();
+        run(
+            window,
+            live,
+            &target,
+            Command::Recent(missing),
+            "最近のフォルダ",
+        );
+        assert_eq!(live.folder.borrow().root.as_ref(), Some(&here));
+        assert!(live.recent_folders.borrow().is_empty());
     }
 
     /// タイトルバーのメニューで、その操作の行が押せるか（行が無ければ`None`）。

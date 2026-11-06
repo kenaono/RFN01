@@ -154,7 +154,11 @@ export component TitleMenuBar inherits Rectangle {
         width: 0px;
         height: 0px;
         key-pressed(event) => {
-            if event.text == Key.Escape || event.text == Key.F10 { root.dismissed(); return accept; }
+            if event.text == Key.Escape || (event.text == Key.F10
+                && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift) {
+                root.dismissed();
+                return accept;
+            }
             if event.text == Key.LeftArrow { root.selected = mod(root.selected + 6, 7); return accept; }
             if event.text == Key.RightArrow { root.selected = mod(root.selected + 1, 7); return accept; }
             if event.text == Key.DownArrow || event.text == Key.Return || event.text == " " {

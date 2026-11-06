@@ -84,6 +84,8 @@ pub struct FileHits {
 pub struct SearchOutcome {
     pub generation: u64,
     pub needle: String,
+    pub rules: find::Rules,
+    pub roots: Vec<PathBuf>,
     pub files: Vec<FileHits>,
     /// Lines matched in all, which is what the status bar counts.
     pub total: usize,
@@ -133,6 +135,8 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
         return Some(SearchOutcome {
             generation: job.generation,
             needle: job.needle.clone(),
+            rules: job.rules,
+            roots: job.roots.clone(),
             files: Vec::new(),
             total: 0,
             ms: started.elapsed().as_secs_f64() * 1000.0,
@@ -179,10 +183,44 @@ pub fn search(job: &SearchJob, stop: &mut dyn Superseded) -> Option<SearchOutcom
     Some(SearchOutcome {
         generation: job.generation,
         needle: job.needle.clone(),
+        rules: job.rules,
+        roots: job.roots.clone(),
         files,
         total,
         ms: started.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+/// Recheck the query against the current document when opening a displayed hit.
+pub(crate) fn locate_hit(
+    text: &str,
+    needle: &str,
+    rules: find::Rules,
+    at: usize,
+) -> Option<(usize, usize)> {
+    let (tag_keys, words) = tags::split_query(needle);
+    if tag_keys.is_empty() {
+        return find::Search::new(needle, rules).ok()?.next(text, at, true);
+    }
+    let found = tags::tags_in(text);
+    if !tag_keys
+        .iter()
+        .all(|query| found.iter().any(|tag| tags::matches(&tag.name, query)))
+    {
+        return None;
+    }
+    if !words.is_empty() {
+        return find::Search::new(&words, rules).ok()?.next(text, at, true);
+    }
+    let mut hits = found
+        .iter()
+        .filter(|tag| tag_keys.iter().any(|query| tags::matches(&tag.name, query)));
+    let first = hits.next()?;
+    let tag = std::iter::once(first)
+        .chain(hits)
+        .find(|tag| tag.at + tag.len > at)
+        .unwrap_or(first);
+    Some((tag.at, tag.at + tag.len))
 }
 
 /// `tag:`の検索の、1つの文書の当たり。**タグをすべて持つ文書だけ**が当たる。

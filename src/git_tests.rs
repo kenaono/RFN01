@@ -1,5 +1,5 @@
 //! RFN01-67: `git.rs`の試験。**本物のGitで、一時フォルダに本物のリポジトリを作って**確かめる。
-//! Gitの無いPCでは、リポジトリを作れないので何もせずに通す（`git_version`の試験と同じ）。
+//! Git が見つからないときだけ fixture を省略する。起動できた Git の初期化失敗はテスト失敗。
 use super::*;
 use std::cell::RefCell;
 
@@ -41,8 +41,17 @@ pub(crate) fn git_ok(folder: &Path, arguments: &[&str]) {
 
 /// 名前とメールを入れたリポジトリ。Gitが無ければ`None`。
 pub(crate) fn repository(folder: &Path) -> Option<()> {
-    if !run(folder, &["init", "-q", "-b", "main"], None).ok()?.ok {
-        return None;
+    match run(folder, &["init", "-q", "-b", "main"], None) {
+        Err(GitError::Missing) => {
+            eprintln!("Git fixture skipped: git executable not found");
+            return None;
+        }
+        Err(error) => panic!("cannot launch Git for fixture at {folder:?}: {error}"),
+        Ok(output) => assert!(
+            output.ok,
+            "git init failed at {folder:?}: {}",
+            output.stderr
+        ),
     }
     git_ok(folder, &["config", "user.name", "t"]);
     git_ok(folder, &["config", "user.email", "t@t"]);
@@ -64,6 +73,150 @@ fn read(folder: &Path, name: &str) -> String {
 fn a_machine_without_git_says_so() {
     let error = without_git(|| status(&std::env::temp_dir()).err());
     assert_eq!(error, Some(GitError::Missing));
+}
+
+#[test]
+fn fixture_skips_missing_git_but_reports_failed_init() {
+    let scratch = Scratch::new("fixture-init");
+    assert_eq!(without_git(|| repository(&scratch.0)), None);
+    let file = scratch.0.join("not-a-directory");
+    std::fs::write(&file, "fixture").unwrap();
+    if repository(&scratch.0).is_some() {
+        let failed = std::panic::catch_unwind(|| repository(&file));
+        assert!(
+            failed.is_err(),
+            "an available Git failed to initialize the fixture"
+        );
+    }
+}
+
+#[cfg(windows)]
+fn pipe_owner_command(marker: &Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--ignored",
+            "--exact",
+            "git::tests::git_pipe_owner_fixture",
+            "--nocapture",
+        ])
+        .env("RFN_GIT_TEST_PIPE_OWNER", marker);
+    command
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "child process fixture"]
+fn git_pipe_owner_fixture() {
+    let Some(marker) = std::env::var_os("RFN_GIT_TEST_PIPE_OWNER") else {
+        return;
+    };
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "git::tests::git_pipe_writer_fixture",
+            "--nocapture",
+        ])
+        .spawn()
+        .unwrap();
+    std::fs::write(marker, child.id().to_string()).unwrap();
+    if std::env::var_os("RFN_GIT_TEST_PIPE_CANCEL").is_some() {
+        child.wait().unwrap();
+    }
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "child process fixture"]
+fn git_pipe_writer_fixture() {
+    if std::env::var_os("RFN_GIT_TEST_PIPE_OWNER").is_some() {
+        println!("holding inherited stdout");
+        std::thread::sleep(Duration::from_secs(20));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn git_parent_exit_releases_inherited_pipes() {
+    let scratch = Scratch::new("pipe-parent-exit");
+    let marker = scratch.0.join("helper");
+    let command = pipe_owner_command(&marker);
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || send.send(run_command(command, None, None)).unwrap());
+    let output = receive
+        .recv_timeout(Duration::from_secs(5))
+        .expect("pipe cleanup stalled")
+        .unwrap();
+    assert!(output.ok, "test pipe owner failed: {}", output.stderr);
+    assert!(marker.is_file(), "the pipe-holding helper was started");
+}
+
+#[cfg(windows)]
+#[test]
+fn git_cancel_stops_the_parent_and_pipe_holder() {
+    let scratch = Scratch::new("pipe-cancel");
+    let marker = scratch.0.join("helper");
+    let mut command = pipe_owner_command(&marker);
+    command.env("RFN_GIT_TEST_PIPE_CANCEL", "1");
+    let cancel = Cancel::default();
+    let worker_cancel = cancel.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        send.send(run_command(command, None, Some(&worker_cancel)))
+            .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !marker.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    cancel.cancel();
+    assert!(marker.is_file(), "the pipe-holding helper was started");
+    assert!(matches!(
+        receive.recv_timeout(Duration::from_secs(5)),
+        Ok(Err(GitError::Cancelled))
+    ));
+}
+
+#[test]
+fn hard_reset_refuses_overlaps_with_untracked_and_ignored_paths() {
+    let scratch = Scratch::new("reset-untracked");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    for (target, local, ignored) in [
+        ("note.md", "note.md", false),
+        ("note.md", "note.md/local.txt", false),
+        ("folder/target.md", "folder", false),
+        ("note.md", "note.md", true),
+    ] {
+        let target_path = root.join(target);
+        std::fs::create_dir_all(target_path.parent().unwrap()).unwrap();
+        write(root, target, "tracked\n");
+        git_ok(root, &["add", "--", target]);
+        git_ok(root, &["commit", "-qm", "tracked"]);
+        let wanted = head_sha(root).unwrap();
+        git_ok(root, &["rm", "-q", "--", target]);
+        git_ok(root, &["commit", "-qm", "removed"]);
+        let head = head_sha(root).unwrap();
+        let local_path = root.join(local);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        if ignored {
+            write(root, ".git/info/exclude", "/note.md\n");
+        }
+        write(root, local, "untracked\n");
+        assert!(matches!(
+            reset(root, &wanted, true),
+            Err(GitError::Failed(_))
+        ));
+        assert_eq!(head_sha(root), Some(head));
+        assert_eq!(read(root, local), "untracked\n");
+        std::fs::remove_file(&local_path).unwrap();
+        if local_path.parent() != Some(root.as_path()) {
+            std::fs::remove_dir(local_path.parent().unwrap()).unwrap();
+        }
+    }
 }
 
 #[test]
@@ -203,20 +356,17 @@ fn a_conflicting_stash_is_undone_and_kept() {
     write(root, "a.md", "3\n");
     // 変更があるうちは取り出さない。
     assert!(matches!(
-        stash_apply(root, "stash@{0}", true),
+        stash_apply(root, &list[0], true),
         Err(GitError::Failed(_))
     ));
     commit(root, "3", true, false).unwrap();
-    assert_eq!(
-        stash_apply(root, "stash@{0}", true),
-        Err(GitError::Conflict)
-    );
+    assert_eq!(stash_apply(root, &list[0], true), Err(GitError::Conflict));
     assert_eq!(read(root, "a.md"), "3\n");
     assert!(!root.join("extra.md").exists());
     let clean = status(root).unwrap();
     assert!(clean.staged.is_empty() && clean.changes.is_empty());
     assert_eq!(stashes(root).unwrap().len(), 1);
-    stash_drop(root, "stash@{0}").unwrap();
+    stash_drop(root, &list[0]).unwrap();
     assert!(stashes(root).unwrap().is_empty());
 }
 
@@ -231,9 +381,52 @@ fn a_stash_pops_back_into_a_clean_tree() {
     commit(root, "1", true, false).unwrap();
     write(root, "a.md", "2\n");
     stash_all(root, "").unwrap();
-    stash_apply(root, "stash@{0}", true).unwrap();
+    stash_apply(root, &stashes(root).unwrap()[0], true).unwrap();
     assert_eq!(read(root, "a.md"), "2\n");
     assert!(stashes(root).unwrap().is_empty());
+}
+
+#[test]
+fn a_new_stash_does_not_become_the_target_of_an_older_drop() {
+    let scratch = Scratch::new("stash-confirmation");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    write(root, "a.md", "selected\n");
+    stash_all(root, "selected").unwrap();
+    let selected = stashes(root).unwrap().remove(0);
+    write(root, "a.md", "new entry\n");
+    stash_all(root, "new entry").unwrap();
+    let before = stashes(root).unwrap();
+    assert!(stash_drop(root, &selected).is_err());
+    assert!(stash_apply(root, &selected, true).is_err());
+    assert_eq!(stashes(root).unwrap(), before);
+    assert_eq!(read(root, "a.md"), "base\n");
+}
+
+#[test]
+fn a_stash_removed_after_apply_is_not_replaced_as_the_drop_target() {
+    let scratch = Scratch::new("stash-after-apply");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    write(root, "a.md", "older\n");
+    stash_all(root, "older").unwrap();
+    write(root, "a.md", "selected\n");
+    stash_all(root, "selected").unwrap();
+    let selected = stashes(root).unwrap().remove(0);
+    stash_apply(root, &selected, false).unwrap();
+    git_ok(root, &["stash", "drop", "-q", "stash@{0}"]);
+    let before = stashes(root).unwrap();
+    assert!(stash_drop(root, &selected).is_err());
+    assert_eq!(stashes(root).unwrap(), before);
+    assert_eq!(read(root, "a.md"), "selected\n");
 }
 
 #[test]
@@ -475,10 +668,21 @@ fn merge_resolution_reads_index_versions_and_continues_with_the_staged_result() 
     let stopped = merge_state(root).unwrap().unwrap();
     assert_eq!(stopped.head, head);
     assert_eq!(stopped.incoming, [incoming.clone()]);
-    let conflict = stopped.conflicts.iter().find(|file| file.path == text).unwrap();
-    for (version, expected) in conflict.versions.iter().zip(["base\n", "ours\n", "theirs\n"]) {
+    let conflict = stopped
+        .conflicts
+        .iter()
+        .find(|file| file.path == text)
+        .unwrap();
+    for (version, expected) in conflict
+        .versions
+        .iter()
+        .zip(["base\n", "ours\n", "theirs\n"])
+    {
         let actual = conflict_blob(root, version.as_ref().unwrap()).unwrap();
-        assert_eq!(std::str::from_utf8(&actual).unwrap().replace("\r\n", "\n"), expected);
+        assert_eq!(
+            std::str::from_utf8(&actual).unwrap().replace("\r\n", "\n"),
+            expected
+        );
     }
     assert!(resolve_merge(root, &stopped, None, Resolution::Continue).is_err());
     assert!(resolve_merge(root, &stopped, Some(text), Resolution::Stage).is_err());
@@ -495,7 +699,13 @@ fn merge_resolution_reads_index_versions_and_continues_with_the_staged_result() 
     let stale = worktree_stamp(&path);
     write(root, deleted, "an externally edited version\n");
     assert!(resolve_merge(root, &state, Some(deleted), Resolution::Delete(stale)).is_err());
-    resolve_merge(root, &state, Some(deleted), Resolution::Delete(worktree_stamp(&path))).unwrap();
+    resolve_merge(
+        root,
+        &state,
+        Some(deleted),
+        Resolution::Delete(worktree_stamp(&path)),
+    )
+    .unwrap();
     assert!(!path.exists());
 
     let ready = merge_state(root).unwrap().unwrap();
@@ -563,7 +773,10 @@ fn linked_worktrees_share_commits_but_keep_their_own_indexes_and_heads() {
     let trees = worktrees(&root).unwrap();
     assert_eq!(trees.len(), 2);
     assert_eq!(trees[1].branch.as_deref(), Some("draft"));
-    assert_eq!(check_worktree(&root, &linked).unwrap(), linked.canonicalize().unwrap());
+    assert_eq!(
+        check_worktree(&root, &linked).unwrap(),
+        linked.canonicalize().unwrap()
+    );
     assert!(add_worktree(&root, &scratch.0, folder, "another", &head).is_err());
 
     write(&root, "note.md", "main edits\n");

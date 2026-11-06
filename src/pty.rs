@@ -99,6 +99,41 @@ impl Drop for OwnedHandle {
     }
 }
 
+/// The backing allocation stays in place until the initialized list is deleted.
+struct ProcessAttributes {
+    list: LPPROC_THREAD_ATTRIBUTE_LIST,
+    _storage: Vec<usize>,
+}
+
+impl ProcessAttributes {
+    fn new() -> windows::core::Result<Self> {
+        let mut room = 0;
+        // The sizing call reports insufficient buffer by design.
+        let sizing = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut room) };
+        if room == 0 {
+            sizing?;
+            return Err(windows::core::Error::from(
+                windows::Win32::Foundation::E_FAIL,
+            ));
+        }
+        let mut storage = vec![0_usize; room.div_ceil(size_of::<usize>())];
+        let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
+        #[cfg(test)]
+        startup_fault(StartupStep::Initialize)?;
+        unsafe { InitializeProcThreadAttributeList(Some(list), 1, None, &mut room) }?;
+        Ok(Self {
+            list,
+            _storage: storage,
+        })
+    }
+}
+
+impl Drop for ProcessAttributes {
+    fn drop(&mut self) {
+        unsafe { DeleteProcThreadAttributeList(self.list) };
+    }
+}
+
 /// A shell running under a pseudo console.
 #[derive(Debug)]
 pub struct Pty {
@@ -150,27 +185,34 @@ impl Pty {
         environment: Option<&[u16]>,
     ) -> windows::core::Result<Self> {
         unsafe {
+            #[cfg(test)]
+            startup_fault(StartupStep::InputPipe)?;
             let (input_read, input_write) = pipe()?;
+            #[cfg(test)]
+            startup_fault(StartupStep::OutputPipe)?;
             let (output_read, output_write) = pipe()?;
             let size = COORD {
                 X: columns.max(1) as i16,
                 Y: rows.max(1) as i16,
             };
             let flags = u32::from(inherit_cursor);
+            #[cfg(test)]
+            startup_fault(StartupStep::Console)?;
             let console = CreatePseudoConsole(size, input_read.raw(), output_write.raw(), flags)?;
+            let mut pty = Self {
+                console,
+                writer: Some(input_write),
+                reader: Some(output_read),
+                process: None,
+            };
             drop(input_read);
             drop(output_write);
 
-            // The attribute list has to outlive `CreateProcessW`, so it is a
-            // buffer here rather than a temporary: the startup info holds a
-            // pointer into it.
-            let mut room = 0_usize;
-            let _ = InitializeProcThreadAttributeList(None, 1, None, &mut room);
-            let mut attributes = vec![0_u8; room];
-            let list = LPPROC_THREAD_ATTRIBUTE_LIST(attributes.as_mut_ptr() as *mut c_void);
-            InitializeProcThreadAttributeList(Some(list), 1, None, &mut room)?;
+            let attributes = ProcessAttributes::new()?;
+            #[cfg(test)]
+            startup_fault(StartupStep::Update)?;
             UpdateProcThreadAttribute(
-                list,
+                attributes.list,
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
                 // **The handle itself, not a pointer to it.** Nearly every
@@ -202,13 +244,15 @@ impl Pty {
                     hStdError: HANDLE::default(),
                     ..Default::default()
                 },
-                lpAttributeList: list,
+                lpAttributeList: attributes.list,
             };
             let directory: Option<Vec<u16>> =
                 directory.map(|p| p.as_os_str().encode_wide().chain(Some(0)).collect());
             let mut line = wide(command);
             let mut spawned = PROCESS_INFORMATION::default();
-            let started = CreateProcessW(
+            #[cfg(test)]
+            startup_fault(StartupStep::Process)?;
+            CreateProcessW(
                 None,
                 Some(PWSTR(line.as_mut_ptr())),
                 None,
@@ -223,25 +267,10 @@ impl Pty {
                     }),
                 &startup.StartupInfo,
                 &mut spawned,
-            );
-            DeleteProcThreadAttributeList(list);
-            if let Err(error) = started {
-                ClosePseudoConsole(console);
-                return Err(error);
-            }
-            // The thread handle is nothing to us: what says the shell is still
-            // there is the process. **Our end of the output moves into the
-            // struct rather than being copied**: an `OwnedHandle` closes what
-            // it holds, so a second one made from the same number would close
-            // the reader on the way out of this function and every read would
-            // see end-of-file.
-            let _ = CloseHandle(spawned.hThread);
-            Ok(Self {
-                console,
-                writer: Some(input_write),
-                reader: Some(output_read),
-                process: Some(OwnedHandle(spawned.hProcess)),
-            })
+            )?;
+            let _thread = OwnedHandle(spawned.hThread);
+            pty.process = Some(OwnedHandle(spawned.hProcess));
+            Ok(pty)
         }
     }
 
@@ -288,12 +317,40 @@ impl Pty {
 }
 
 impl Drop for Pty {
-    /// **The console goes first.** Closing it is what tells the shell its
-    /// screen has gone, and the shell exits; closing our pipe ends first would
-    /// leave it writing into nothing.
     fn drop(&mut self) {
+        // If a worker has not taken the output pipe, close it before closing
+        // the console. Older Windows versions can wait for its output to drain.
+        drop(self.reader.take());
+        drop(self.writer.take());
         unsafe { ClosePseudoConsole(self.console) };
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupStep {
+    InputPipe,
+    OutputPipe,
+    Console,
+    Initialize,
+    Update,
+    Process,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STARTUP_FAULT: std::cell::Cell<Option<StartupStep>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn startup_fault(step: StartupStep) -> windows::core::Result<()> {
+    if STARTUP_FAULT.get() == Some(step) {
+        STARTUP_FAULT.set(None);
+        return Err(windows::core::Error::from(
+            windows::Win32::Foundation::E_FAIL,
+        ));
+    }
+    Ok(())
 }
 
 /// Both ends of one pipe. Neither is inheritable: the console duplicates what
@@ -318,6 +375,51 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "starts real ConPTY consoles and counts process-wide handles; run alone"]
+    fn conpty_startup_failures_release_handles() {
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+        let count = || {
+            let mut count = 0;
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }.unwrap();
+            count
+        };
+        let command = "cmd.exe /d /q /c exit";
+        let exercise = || {
+            for step in [
+                StartupStep::InputPipe,
+                StartupStep::OutputPipe,
+                StartupStep::Console,
+                StartupStep::Initialize,
+                StartupStep::Update,
+                StartupStep::Process,
+            ] {
+                STARTUP_FAULT.set(Some(step));
+                assert!(Pty::open(command, 80, 24).is_err(), "{step:?}");
+                assert_eq!(STARTUP_FAULT.get(), None, "did not reach {step:?}");
+            }
+            assert!(Pty::open("rfnedit-nonexistent-shell-182.exe", 80, 24).is_err());
+            drop(Pty::open(command, 80, 24).unwrap());
+        };
+        // Warm both Win32 success and error paths before counting. The
+        // console host can finish asynchronously on current Windows versions.
+        exercise();
+        std::thread::sleep(Duration::from_millis(100));
+        let before = count();
+        for _ in 0..8 {
+            exercise();
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while count() > before && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            count() <= before,
+            "handles before {before}, after {}",
+            count()
+        );
+    }
 
     /// ConPTYの経路そのものを、窓を作らずに端から端まで通す。
     ///

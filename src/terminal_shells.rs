@@ -1,5 +1,6 @@
 //! Shell profiles: editable launch settings; existing processes are unchanged.
 use super::*;
+use std::collections::{HashMap, HashSet};
 
 /// `--quiet` emits one registered name per line. Some WSL versions use
 /// UTF-16LE when stdout is redirected, even without a BOM.
@@ -27,29 +28,23 @@ fn distribution_names(bytes: &[u8]) -> Vec<String> {
 }
 
 fn installed_distributions() -> Vec<String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-
     if !on_path("wsl.exe") {
         return Vec::new();
     }
-    Command::new("wsl.exe")
-        .args(["--list", "--quiet"])
-        .creation_flags(0x0800_0000)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map_or_else(Vec::new, |output| distribution_names(&output.stdout))
+    let mut command = std::process::Command::new("wsl.exe");
+    command.args(["--list", "--quiet"]);
+    wsl_output(command).map_or_else(Vec::new, |output| distribution_names(&output))
 }
 
 pub(crate) fn discover_distributions(window: &AppWindow) {
+    if window.get_wsl_discovery_running() {
+        return;
+    }
+    window.set_wsl_discovery_running(true);
     let weak = window.as_weak();
     std::thread::spawn(move || {
         let names = installed_distributions();
         let _ = weak.upgrade_in_event_loop(move |window| {
-            let previous = shell_at(&window, window.get_default_shell()).name;
             window.set_wsl_distributions(ModelRc::new(VecModel::from(
                 names
                     .into_iter()
@@ -57,14 +52,37 @@ pub(crate) fn discover_distributions(window: &AppWindow) {
                     .collect::<Vec<_>>(),
             )));
             window.set_wsl_discovery_complete(true);
+            window.set_wsl_discovery_running(false);
             publish_shells(&window);
-            let default = offered_shells(&window)
-                .iter()
-                .position(|shell| shell.name == previous)
-                .unwrap_or_default();
-            window.set_default_shell(default as i32);
         });
     });
+}
+
+pub(crate) fn unavailable_reason(
+    window: &AppWindow,
+    shell: &TerminalShell,
+) -> Option<&'static str> {
+    if !on_path(shell.program()) {
+        return Some(pick("実行ファイルが見つかりません", "Executable not found"));
+    }
+    if window.get_wsl_discovery_complete()
+        && let Some(distribution) = wsl_distribution(&shell.command)
+    {
+        let installed = window.get_wsl_distributions();
+        let available = match distribution {
+            Some(name) => installed
+                .iter()
+                .any(|installed| installed.eq_ignore_ascii_case(&name)),
+            None => installed.row_count() > 0,
+        };
+        if !available {
+            return Some(pick(
+                "WSL ディストリビューションを利用できません",
+                "WSL distribution unavailable",
+            ));
+        }
+    }
+    None
 }
 
 pub(crate) fn command_parts(command: &str) -> (&str, &str) {
@@ -145,93 +163,151 @@ fn wsl_distribution_value(args: &str) -> Option<&str> {
     None
 }
 
-/// RFN01-100: what WSL said a Linux path is, or that it is still being asked.
-#[derive(Clone, Debug, PartialEq)]
-enum Lookup {
-    Asking,
-    Known(Option<PathBuf>),
+const WSL_LOOKUP_WORKERS: usize = 4;
+const WSL_LOOKUP_ENTRIES: usize = 128;
+type LookupKey = (Option<String>, String);
+
+#[derive(Default)]
+struct Lookups {
+    known: HashMap<LookupKey, (Instant, Option<PathBuf>)>,
+    hovering: HashSet<LookupKey>,
+    workers: usize,
 }
 
-type Lookups = std::sync::Mutex<std::collections::HashMap<(Option<String>, String), Lookup>>;
+impl Lookups {
+    fn remember(&mut self, key: LookupKey, answer: Option<PathBuf>, now: Instant) {
+        self.known.retain(|_, (expires, _)| *expires > now);
+        if self.known.len() >= WSL_LOOKUP_ENTRIES
+            && let Some(oldest) = self
+                .known
+                .iter()
+                .min_by_key(|(_, (expires, _))| *expires)
+                .map(|(key, _)| key.clone())
+        {
+            self.known.remove(&oldest);
+        }
+        let ttl = if answer.is_some() {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(250)
+        };
+        self.known.insert(key, (now + ttl, answer));
+    }
+}
 
-fn lookups() -> &'static Lookups {
-    static LOOKUPS: std::sync::OnceLock<Lookups> = std::sync::OnceLock::new();
+fn lookups() -> &'static std::sync::Mutex<Lookups> {
+    static LOOKUPS: std::sync::OnceLock<std::sync::Mutex<Lookups>> = std::sync::OnceLock::new();
     LOOKUPS.get_or_init(Default::default)
 }
 
-/// RFN01-100（書き手と合意 2026-11-04）: a Linux path in WSL — `~/Dev/x`,
-/// `/home/ken/novel` — as the Windows file it is, **following symbolic
-/// links**. Only a file on a Windows drive (under `/mnt`) has an answer: one
-/// that is really inside WSL (`\\wsl.localhost\…`) is not opened (書き手：
-/// 「あくまで、Windowsに共有されているmnt配下のみ」).
-///
-/// Each path is asked once and remembered. With `wait` false the first ask
-/// happens on a thread of its own, and `None` comes back at once; `answered`
-/// runs when the answer is in, so the pointer's question can be asked again.
-pub(crate) fn wsl_windows_path(
+struct LookupSlot(Option<LookupKey>);
+
+impl Drop for LookupSlot {
+    fn drop(&mut self) {
+        let mut state = lookups().lock().unwrap();
+        state.workers -= 1;
+        if let Some(key) = &self.0 {
+            state.hovering.remove(key);
+        }
+    }
+}
+
+/// Hover can use a recent conversion. Leave one worker slot for clicks.
+pub(crate) fn cached_wsl_windows_path(
     distribution: Option<&str>,
     linux: &str,
-    wait: bool,
     answered: impl FnOnce() + Send + 'static,
 ) -> Option<PathBuf> {
-    let key = (distribution.map(str::to_owned), linux.to_owned());
-    let known = lookups().lock().ok()?.get(&key).cloned();
-    match known {
-        Some(Lookup::Known(answer)) => return answer,
-        Some(Lookup::Asking) if !wait => return None,
-        _ => {}
+    let key = (distribution.map(str::to_ascii_lowercase), linux.to_owned());
+    let mut state = lookups().lock().unwrap();
+    if let Some((expires, answer)) = state.known.get(&key)
+        && *expires > Instant::now()
+    {
+        return answer.clone();
     }
-    if wait {
-        let answer = ask_wsl(key.0.as_deref(), &key.1);
-        if let Ok(mut table) = lookups().lock() {
-            table.insert(key, Lookup::Known(answer.clone()));
-        }
-        return answer;
+    if state.workers >= WSL_LOOKUP_WORKERS - 1 || !state.hovering.insert(key.clone()) {
+        return None;
     }
-    if let Ok(mut table) = lookups().lock() {
-        table.insert(key.clone(), Lookup::Asking);
-    }
+    state.workers += 1;
+    drop(state);
+    let slot = LookupSlot(Some(key.clone()));
+    let distribution = distribution.map(str::to_owned);
     let _ = std::thread::Builder::new()
         .name("rfnedit-wslpath".to_owned())
         .spawn(move || {
-            let answer = ask_wsl(key.0.as_deref(), &key.1);
-            if let Ok(mut table) = lookups().lock() {
-                table.insert(key, Lookup::Known(answer));
-            }
+            let answer = ask_wsl(distribution.as_deref(), &key.1);
+            lookups()
+                .lock()
+                .unwrap()
+                .remember(key, answer, Instant::now());
+            drop(slot);
             answered();
         });
     None
 }
 
+pub(crate) fn start_fresh_wsl_lookup(resolve: impl FnOnce() + Send + 'static) -> bool {
+    let mut state = lookups().lock().unwrap();
+    if state.workers >= WSL_LOOKUP_WORKERS {
+        return false;
+    }
+    state.workers += 1;
+    drop(state);
+    let slot = LookupSlot(None);
+    std::thread::Builder::new()
+        .name("rfnedit-wslopen".to_owned())
+        .spawn(move || {
+            resolve();
+            drop(slot);
+        })
+        .is_ok()
+}
+
 /// Ask WSL once: `~` as the home, links followed (`realpath -m`), then the
 /// Windows name (`wslpath -w`). About 0.08s while WSL is running.
-fn ask_wsl(distribution: Option<&str>, linux: &str) -> Option<PathBuf> {
+pub(crate) fn ask_wsl(distribution: Option<&str>, linux: &str) -> Option<PathBuf> {
     let mut command = std::process::Command::new("wsl.exe");
     if let Some(name) = distribution {
         command.args(["-d", name]);
     }
+    command.args([
+        "-e",
+        "sh",
+        "-c",
+        r#"p="$1"; case "$p" in "~") p="$HOME";; "~/"*) p="$HOME/${p#"~/"}";; esac; wslpath -w "$(realpath -m -- "$p")""#,
+        "sh",
+        linux,
+    ]);
+    let output = wsl_output(command)?;
+    windows_drive_path(String::from_utf8_lossy(&output).trim())
+}
+
+fn wsl_output(mut command: std::process::Command) -> Option<Vec<u8>> {
     command
-        .args([
-            "-e",
-            "sh",
-            "-c",
-            r#"p="$1"; case "$p" in "~") p="$HOME";; "~/"*) p="$HOME/${p#"~/"}";; esac; wslpath -w "$(realpath -m -- "$p")""#,
-            "sh",
-            linux,
-        ])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         // コンソールの窓を一瞬でも出さない（git.rsと同じ）。
         command.creation_flags(0x0800_0000);
     }
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
-    windows_drive_path(String::from_utf8_lossy(&output.stdout).trim())
+    let output = child.wait_with_output().ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
 /// `D:\…` only — not `\\wsl.localhost\…` nor anything else.
@@ -264,7 +340,15 @@ pub(crate) fn with_start_folder(shell: &TerminalShell, workspace: Option<&Path>)
     started.directory = match workspace {
         Some(folder) => folder.to_string_lossy().into_owned(),
         None if is_wsl(shell) => "~".to_owned(),
-        None => std::env::var("USERPROFILE").unwrap_or_default(),
+        None => std::env::var("USERPROFILE")
+            .ok()
+            .filter(|profile| !profile.trim().is_empty())
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|dir| dir.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default(),
     };
     started
 }
@@ -408,21 +492,29 @@ pub(crate) fn wsl_shell_environment(shell: &TerminalShell) -> Option<Vec<u16>> {
     Some(block)
 }
 
-fn publish(window: &AppWindow, index: usize) {
-    let shells = configured_shells(window);
-    let default_id = shell_at(window, window.get_default_shell()).id;
+pub(crate) fn publish_profile_names(window: &AppWindow) {
+    let default_id = default_shell_id(window);
     window.set_shell_profile_names(ModelRc::new(VecModel::from(
-        shells
-            .iter()
-            .map(|s| {
-                SharedString::from(if s.id == default_id {
-                    format!("{} ({})", s.name, pick("既定", "Default"))
-                } else {
-                    s.name.clone()
-                })
+        configured_shells(window)
+            .into_iter()
+            .map(|shell| {
+                let mut label = shell.name.clone();
+                if shell.id == default_id {
+                    label.push_str(&format!(" ({})", pick("既定", "Default")));
+                }
+                if let Some(reason) = unavailable_reason(window, &shell) {
+                    label.push_str(&format!(" ({reason})"));
+                }
+                SharedString::from(label)
             })
             .collect::<Vec<_>>(),
     )));
+}
+
+fn publish(window: &AppWindow, index: usize) {
+    publish_profile_names(window);
+    let shells = configured_shells(window);
+    let default_id = default_shell_id(window);
     let index = index.min(shells.len().saturating_sub(1));
     window.set_shell_profile_index(index as i32);
     window.set_shell_profile_default(shells.get(index).is_some_and(|s| s.id == default_id));
@@ -451,14 +543,14 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
         .unwrap_or(shells.len())
         .min(shells.len());
     let editing_saved = index < shells.len();
-    let old_default = shell_at(window, window.get_default_shell()).id;
-    // 書き手の報告 2026-09-24（引数を変えてもApplyできない）：押された操作と、どのプロファイルに
-    // 効いたかを残す。手元の試験では再現しなかったので、実際の実行の記録で確かめる。
+    let old_default = default_shell_id(window);
+    // RFN01-169: 入力値には秘密情報が含まれる場合がある。操作と ID だけを記録する。
     live.cache.borrow_mut().log_diag(
         "spec.shell",
         &format!(
-            "profile action={what} at={at} index={index} count={}",
-            shells.len()
+            "profile action={what} at={at} id={:?} count={}",
+            shells.get(index).map(|shell| shell.id),
+            shells.len(),
         ),
     );
     match what {
@@ -471,10 +563,6 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
             let exe = window.get_shell_profile_executable().trim().to_owned();
             let args = window.get_shell_profile_arguments().trim().to_owned();
             let directory = window.get_shell_profile_directory().trim().to_owned();
-            live.cache.borrow_mut().log_diag(
-                "spec.shell",
-                &format!("profile apply name={name:?} exe={exe:?} args={args:?} dir={directory:?}"),
-            );
             if name.is_empty()
                 || exe.is_empty()
                 || name.contains(['|', '\r', '\n', '\t'])
@@ -597,10 +685,13 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
         old_default
     };
     hold_shells(window, &shells);
+    let wanted = if shells.iter().any(|shell| shell.id == wanted) {
+        wanted.to_string()
+    } else {
+        String::new()
+    };
+    window.set_default_shell_id(wanted.into());
     publish_shells(window);
-    if let Some(index) = offered_shells(window).iter().position(|s| s.id == wanted) {
-        window.set_default_shell(index as i32);
-    }
     publish(window, index);
     save_settings(window, &live.cache);
     live.cache.borrow_mut().log_diag(
@@ -610,7 +701,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, what: i32, at: i32) {
 }
 
 pub(crate) fn open_in(window: &AppWindow, live: &Live, directory: PathBuf) {
-    let mut shell = shell_at(window, window.get_default_shell());
+    let mut shell = default_shell(window);
     shell.directory = directory.to_string_lossy().into_owned();
     open_terminal(window, live, focused_pane(window), shell);
 }
@@ -754,22 +845,16 @@ mod tests {
                 .success()
         );
         let system = format!("{link}/System32");
-        let answer = wsl_windows_path(None, &system, true, || {});
+        let answer = ask_wsl(None, &system);
         assert_eq!(
             answer.map(|p| p.to_string_lossy().to_ascii_lowercase()),
             Some("c:\\windows\\system32".to_owned())
         );
-        assert_eq!(
-            wsl_windows_path(None, "~", true, || {}),
-            None,
-            "the home is WSL's own"
-        );
-        // Asked again, it is remembered (and answered without waiting).
-        assert!(wsl_windows_path(None, &system, false, || {}).is_some());
+        assert_eq!(ask_wsl(None, "~"), None, "the home is WSL's own");
         // Not asked yet and not waited for: nothing now, the answer arrives.
         let (told, heard) = std::sync::mpsc::channel();
         assert_eq!(
-            wsl_windows_path(None, &link, false, move || {
+            cached_wsl_windows_path(None, &link, move || {
                 let _ = told.send(());
             }),
             None
@@ -777,7 +862,49 @@ mod tests {
         heard
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
-        assert!(wsl_windows_path(None, &link, false, || {}).is_some());
+        assert!(cached_wsl_windows_path(None, &link, || {}).is_some());
+        assert!(
+            Command::new("wsl.exe")
+                .args(["-e", "ln", "-sfn", "--", "/mnt/c/Windows/System32", &link])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (told, heard) = std::sync::mpsc::channel();
+        assert!(start_fresh_wsl_lookup(move || {
+            told.send(ask_wsl(None, &link)).unwrap();
+        }));
+        let now = heard.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            now.map(|path| path.to_string_lossy().to_ascii_lowercase()),
+            Some("c:\\windows\\system32".into())
+        );
+    }
+
+    #[test]
+    fn wsl_hover_cache_bounds_size_and_expires_per_distribution() {
+        let mut cache = Lookups::default();
+        let now = Instant::now();
+        let failed = (Some("ubuntu".to_owned()), "/same".to_owned());
+        let worked = (Some("debian".to_owned()), "/same".to_owned());
+        let path = PathBuf::from("D:\\Debian");
+        cache.remember(failed.clone(), None, now);
+        cache.remember(worked.clone(), Some(path.clone()), now);
+        assert_eq!(cache.known[&failed].1, None);
+        assert_eq!(cache.known[&worked].1, Some(path.clone()));
+        cache.remember(
+            (None, "/same".into()),
+            None,
+            now + Duration::from_millis(300),
+        );
+        assert!(!cache.known.contains_key(&failed));
+        assert!(cache.known.contains_key(&worked));
+        for index in 0..WSL_LOOKUP_ENTRIES {
+            cache.remember((None, format!("/{index}")), Some(path.clone()), now);
+        }
+        assert_eq!(cache.known.len(), WSL_LOOKUP_ENTRIES);
+        cache.remember((None, "/again".into()), None, now + Duration::from_secs(3));
+        assert_eq!(cache.known.len(), 1);
     }
 
     #[test]

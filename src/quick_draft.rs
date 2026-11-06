@@ -200,7 +200,7 @@ pub struct Editor {
     pub tabs: Box<dyn Fn(&str) -> TabList>,
     /// Put this text into the tab at that place in the list, and say what to
     /// remember that tab as.
-    pub paste: Box<dyn Fn(usize, &str) -> String>,
+    pub paste: Box<dyn Fn(usize, &str) -> Option<String>>,
 }
 
 /// The editor's open tabs, as the draft window needs them.
@@ -270,7 +270,9 @@ fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, editor: Edito
     window.on_copy_and_close(move || {
         if let Some(window) = weak.upgrade() {
             let target = aimed.borrow().clone();
-            retire(&window, &kept, &target);
+            if !retire(&window, &kept, &target) {
+                return;
+            }
             let _ = window.hide();
         }
         held_here.borrow_mut().open = None;
@@ -284,8 +286,9 @@ fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, editor: Edito
             return;
         };
         let target = aimed.borrow().clone();
-        retire(&window, &kept, &target);
-        window.set_notice("Cleared".into());
+        if retire(&window, &kept, &target) {
+            window.set_notice("Cleared".into());
+        }
     });
 
     // 要件 12.4: the list, as it is at the moment it is wanted.
@@ -308,10 +311,11 @@ fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, editor: Edito
         let Some(window) = weak.upgrade() else {
             return;
         };
-        let at = show_tabs(&window, &asking, &aimed);
+        let at = window.get_tab_target();
         if at < 0 {
             // **The tab it was aimed at has been closed.** Rather than pick
             // another one for the writer, show them the list.
+            show_tabs(&window, &asking, &aimed);
             window.invoke_show_tabs();
             return;
         }
@@ -327,14 +331,10 @@ fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, editor: Edito
         let Some(window) = weak.upgrade() else {
             return;
         };
-        send(
-            &window,
-            &asking,
-            &held_here,
-            &kept,
-            &aimed,
-            at.max(0) as usize,
-        );
+        let Ok(at) = usize::try_from(at) else {
+            return;
+        };
+        send(&window, &asking, &held_here, &kept, &aimed, at);
     });
 
     let weak = window.as_weak();
@@ -351,7 +351,9 @@ fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, editor: Edito
         // must not be a way to lose another, and the list is where a draft goes
         // when it leaves the window.
         let target = aimed.borrow().clone();
-        retire(&window, &kept, &target);
+        if !archive(&window, &kept, &target) {
+            return;
+        }
         window.set_text(SharedString::from(entry.as_str()));
         window.invoke_take_focus();
         store(&window, &target);
@@ -368,7 +370,9 @@ fn wire(held: &Rc<RefCell<QuickDraftWindow>>, window: &QuickDraft, editor: Edito
     window.window().on_close_requested(move || {
         if let Some(window) = weak.upgrade() {
             let target = aimed.borrow().clone();
-            retire(&window, &kept, &target);
+            if !retire(&window, &kept, &target) {
+                return CloseRequestResponse::KeepWindowShown;
+            }
         }
         held_here.borrow_mut().open = None;
         CloseRequestResponse::HideWindow
@@ -392,16 +396,31 @@ fn send(
     if text.is_empty() {
         return;
     }
-    let named = (editor.paste)(at, &text);
+    // Keep the draft recoverable before touching the recipient. A history
+    // error here would otherwise make a retry paste the same text twice.
+    if !archive(window, history, &target.borrow()) {
+        return;
+    }
+    let Some(named) = (editor.paste)(at, &text) else {
+        window.set_notice(
+            crate::say!(
+                "貼り付け先を編集できません。貼り付け先を選び直してください",
+                "Cannot edit that tab. Choose the destination again"
+            )
+            .into(),
+        );
+        return;
+    };
     *target.borrow_mut() = named.clone();
-    retire(window, history, &named);
+    window.set_text(SharedString::new());
+    store(window, &named);
     let _ = window.hide();
     held.borrow_mut().open = None;
 }
 
 /// Put the editor's tabs in front of the window, and say where in them the
 /// draft is aimed.
-fn show_tabs(window: &QuickDraft, editor: &Rc<Editor>, target: &Rc<RefCell<String>>) -> i32 {
+fn show_tabs(window: &QuickDraft, editor: &Rc<Editor>, target: &Rc<RefCell<String>>) {
     let aimed = target.borrow().clone();
     let list = (editor.tabs)(&aimed);
     let rows = list
@@ -412,22 +431,53 @@ fn show_tabs(window: &QuickDraft, editor: &Rc<Editor>, target: &Rc<RefCell<Strin
     window.set_tabs(ModelRc::new(VecModel::from(rows)));
     window.set_tab_target(list.target);
     window.set_target_name(SharedString::from(list.target_name));
-    list.target
 }
 
 /// Put what the window holds into the history, and leave the window empty.
-fn retire(window: &QuickDraft, history: &Rc<RefCell<Vec<String>>>, target: &str) {
-    let text = window.get_text().to_string();
-    {
-        let mut kept = history.borrow_mut();
-        app_data::remember_draft(&mut kept, &text);
-        if let Some(directory) = directory() {
-            let _ = app_data::write_history(&directory, &kept);
-        }
-        show_history(window, &kept);
+fn retire(window: &QuickDraft, history: &Rc<RefCell<Vec<String>>>, target: &str) -> bool {
+    if !archive(window, history, target) {
+        return false;
     }
     window.set_text(SharedString::new());
     store(window, target);
+    true
+}
+
+fn archive(window: &QuickDraft, history: &Rc<RefCell<Vec<String>>>, target: &str) -> bool {
+    let text = window.get_text();
+    let mut kept = history.borrow_mut();
+    if !archive_draft(&mut kept, &text, |entries| {
+        directory().is_some_and(|dir| app_data::write_history(&dir, entries).is_ok())
+    }) {
+        store(window, target);
+        window.set_notice(
+            crate::say!(
+                "履歴を保存できませんでした。下書きは保持しました",
+                "Could not save the history. The draft was kept"
+            )
+            .into(),
+        );
+        return false;
+    }
+    show_history(window, &kept);
+    true
+}
+
+fn archive_draft(
+    kept: &mut Vec<String>,
+    text: &str,
+    write: impl FnOnce(&[String]) -> bool,
+) -> bool {
+    if text.trim().is_empty() {
+        return true;
+    }
+    let mut next = kept.clone();
+    app_data::remember_draft(&mut next, text);
+    if !write(&next) {
+        return false;
+    }
+    *kept = next;
+    true
 }
 
 /// The line each kept draft is shown by.
@@ -459,7 +509,7 @@ fn label_of(entry: &str) -> String {
 /// How much of a kept draft's first line a row shows.
 const LABEL_CHARS: usize = 34;
 
-/// Write what the window holds, place and all./// Write what the window holds, place and all.
+/// Write what the window holds, place and all.
 fn store(window: &QuickDraft, target: &str) {
     let Some(directory) = directory() else {
         return;
@@ -507,7 +557,22 @@ fn floor_char_boundary(text: &str, byte: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::label_of;
+    use super::{archive_draft, label_of};
+
+    #[test]
+    fn history_changes_only_after_a_successful_write() {
+        let mut history = vec!["以前の下書き".to_owned()];
+        assert!(!archive_draft(&mut history, "現在の下書き", |_| {
+            false
+        }));
+        assert_eq!(history, ["以前の下書き"]);
+        assert!(archive_draft(
+            &mut history,
+            "現在の下書き",
+            |entries| { entries == ["現在の下書き", "以前の下書き"] }
+        ));
+        assert_eq!(history, ["現在の下書き", "以前の下書き"]);
+    }
 
     /// A row says what the draft was, which is its first line — and whether
     /// there is more of it than the row is showing.

@@ -74,10 +74,9 @@ export component EditorSurface inherits Rectangle {
     in property <[string]> spell-suggestions;
     callback spelling-at(float, float);
     callback spelling-chosen(int);
-    in property <[string]> terminal-shells;
-    in property <int> default-shell;
+    in property <string> default-shell-name;
     callback new-file-requested();
-    callback new-terminal-requested(int);
+    callback new-terminal-requested();
     /// RFN01-88（書き手の決定 2026-11-04）: the Workspace's templates, each a
     /// way to start the untitled document from — by name.
     in property <[string]> template-names;
@@ -201,7 +200,6 @@ export component EditorSurface inherits Rectangle {
     callback save-as-requested();
     callback zoom-stepped(int);
     callback zoom-reset-requested();
-    callback close-active-tab();
     callback find-requested(bool);
     callback goto-requested(bool);
     callback reopen-closed-requested();
@@ -790,7 +788,9 @@ export component EditorSurface inherits Rectangle {
                                     root.table-picker-dismissed();
                                     if event.text == Key.Escape { return accept; }
                                 }
-                                if self.preedit-text == "" && root.menu-key(event.text) { return accept; }
+                                if self.preedit-text == ""
+                                    && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift
+                                    && root.menu-key(event.text) { return accept; }
                                 if root.embedded-panel && event.modifiers.control && event.text == Key.Return { root.below-sent(); return accept; }
                                 if root.embedded-panel && event.modifiers.control && event.modifiers.alt && event.text == Key.UpArrow { root.below-left(); return accept; }
                                 if root.link-popup-open && !root.terminal && !root.settings && !root.commit-just-finished && self.preedit-text == "" && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift {
@@ -884,7 +884,7 @@ export component EditorSurface inherits Rectangle {
                                             root.zoom-stepped(-1);
                                             return accept;
                                         }
-                                        if event.text == "0" {
+                                        if event.text == "0" && !event.modifiers.shift {
                                             root.zoom-reset-requested();
                                             return accept;
                                         }
@@ -1013,22 +1013,6 @@ export component EditorSurface inherits Rectangle {
                                             root.save-requested();
                                         }
                                         accept
-                                    // 追加要件 2026-09-09: **メニューが言って
-                                    // いたことを、いま受ける。**ペインの`⋮`も
-                                    // タブのメニューも「Close Tab / Ctrl+W」と
-                                    // 出していたのに、その鍵を受ける行がどこにも
-                                    // 無かった——書いてあるのに効かないのは、
-                                    // 働いていない状態が画面に出ていないのと
-                                    // 同じことである（単語チェックモード要件
-                                    // 2.1.1）。**端末は上で先に返している**ので
-                                    // ここには来ない：Ctrl+Wはシェルでは
-                                    // 「直前の語を消す」で、そちらの意味を
-                                    // 奪ってはいけない。
-                                    } else if event.modifiers.control
-                                        && (event.text == "w" || event.text == "W" || event.text == "\u{17}") {
-                                        root.focus-trace("ctrl-w-dispatch");
-                                        root.close-active-tab();
-                                        accept
                                     } else if event.modifiers.control
                                         && (event.text == "f" || event.text == "F" || event.text == "\u{6}") {
                                         root.find-requested(false);
@@ -1072,7 +1056,7 @@ export component EditorSurface inherits Rectangle {
                                     // E1: **本文に戻ってもF3で次／前へ。**帯は
                                     // 開いていなくてよい——最後に探した語は
                                     // `find-needle`に残っている。
-                                    } else if event.text == Key.F3 {
+                                    } else if event.text == Key.F3 && !event.modifiers.control && !event.modifiers.alt {
                                         root.find-again(!root.shift-held(event.modifiers.shift));
                                         accept
                                     } else if event.modifiers.control
@@ -1114,7 +1098,7 @@ export component EditorSurface inherits Rectangle {
                                         && (event.text == "-" || event.text == "_") {
                                         root.zoom-stepped(-1);
                                         accept
-                                    } else if event.modifiers.control && event.text == "0" {
+                                    } else if event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift && event.text == "0" {
                                         root.zoom-reset-requested();
                                         accept
                                     // 要件 11.3. **Before the plain Tab row
@@ -2332,9 +2316,9 @@ export component EditorSurface inherits Rectangle {
                                 }
                                 LinkRow {
                                     title: @tr("New Terminal");
-                                    hint: root.terminal-shells[root.default-shell];
+                                    hint: root.default-shell-name;
                                     clicked => {
-                                        root.new-terminal-requested(root.default-shell);
+                                        root.new-terminal-requested();
                                     }
                                 }
                                 LinkRow {

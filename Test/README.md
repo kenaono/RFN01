@@ -12,7 +12,9 @@ cargo test --locked --offline --manifest-path Test/wsl/Cargo.toml --target-dir t
 
 ## Windows でアプリ全体の Cargo テストを実行する
 
-`cargo test --locked --offline` を基本とする。並列度はリポジトリ設定の4本を使う。
+`run_check.bat` はスクリプトがあるチェックアウトで Git の有無、書式、ビルド、通常テストを順に確認する。最初に失敗したコマンドの終了コードを返し、同じフォルダの `check_output.txt` にコミット、実行範囲、結果を残す。個別実行対象の一覧は記録する。
+
+通常テストだけを実行するときは `cargo test --locked --offline` を使う。並列度はリポジトリ設定の4本を使う。Git が PATH にない場合はスクリプトが失敗する。直接 Cargo を呼び出した場合に限り、Git が見つからなければ Git の fixture を省略する。Git の初期化やジャンクションの作成が失敗したときは、対象パスとエラーを確認する。権限不足が原因のケースは、必要な権限がある環境で実行して別に結果を記録する。
 
 | 領域 | 要件定義の参照先 | 自動テストで区別すること |
 | --- | --- | --- |

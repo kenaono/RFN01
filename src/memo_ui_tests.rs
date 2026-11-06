@@ -128,13 +128,21 @@ fn file_tree_keeps_focus_through_file_open_and_confirmation() {
     let click = |x, y| {
         let position = slint::LogicalPosition::new(x, y);
         let button = PointerEventButton::Left;
-        window.window().dispatch_event(WindowEvent::PointerPressed { position, button });
-        window.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
         settle();
     };
     let press = |key: Key| {
-        window.window().dispatch_event(WindowEvent::KeyPressed { text: key.into() });
-        window.window().dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        window
+            .window()
+            .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        window
+            .window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
         settle();
     };
 
@@ -145,20 +153,30 @@ fn file_tree_keeps_focus_through_file_open_and_confirmation() {
     press(Key::DownArrow);
     assert_eq!(live.folder.borrow().selected.as_ref(), Some(&first));
     press(Key::Return);
-    assert_eq!(live.active(window).file.borrow().path(), Some(first.as_path()));
+    assert_eq!(
+        live.active(window).file.borrow().path(),
+        Some(first.as_path())
+    );
     assert!(untitled.text.borrow().is_empty());
     assert!(window.get_tree_focused());
 
     click(100.0, 131.0);
     assert_eq!(live.folder.borrow().selected.as_ref(), Some(&second));
-    assert_eq!(live.active(window).file.borrow().path(), Some(second.as_path()));
+    assert_eq!(
+        live.active(window).file.borrow().path(),
+        Some(second.as_path())
+    );
     assert!(window.get_tree_focused());
     press(Key::F2);
-    assert!(matches!(&*live.pending.borrow(), Some(Question::RenameEntry(path)) if *path == second));
+    assert!(
+        matches!(&*live.pending.borrow(), Some(Question::RenameEntry(path)) if *path == second)
+    );
     press(Key::Escape);
     assert!(window.get_tree_focused());
     press(Key::Delete);
-    assert!(matches!(&*live.pending.borrow(), Some(Question::DeleteEntry(path)) if *path == second));
+    assert!(
+        matches!(&*live.pending.borrow(), Some(Question::DeleteEntry(path)) if *path == second)
+    );
     press(Key::Escape);
     assert!(window.get_tree_focused());
     press(Key::Escape);
@@ -219,7 +237,11 @@ fn explorer_menu_blocks_refresh_until_dismissed() {
     let command = Rc::new(Cell::new(-1));
     let received = command.clone();
     window.set_tree_context_items(ModelRc::new(VecModel::from(vec![
-        TreeMenuItem { title: "New File…".into(), enabled: true, ..Default::default() };
+        TreeMenuItem {
+            title: "New File…".into(),
+            enabled: true,
+            ..Default::default()
+        };
         8
     ])));
     window.on_tree_context_command(move |value| received.set(value));
@@ -364,6 +386,11 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let path = directory.join("explorer-target.md");
     std::fs::write(&path, "Explorer destination").unwrap();
     *live.tree_paths.borrow_mut() = vec![path.clone()];
+    window.set_left_rows(ModelRc::new(VecModel::from(vec![LeftRow {
+        name: "explorer-target.md".into(),
+        parent: -1,
+        ..Default::default()
+    }])));
     activate_tree_row(&window, &live, 0);
     assert_eq!(
         live.states.document(right).file.borrow().path(),
@@ -419,7 +446,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
     let restored = saving::restore_tabs(&window);
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].0.text.borrow().as_str(), "終了直前の本文");
-    let (tabs, _) = session::open_session(&window, Some(stored), restored);
+    let (tabs, _) = session::open_session(&window, Some(stored), restored, None);
     assert_eq!(tabs.of(id).tabs.len(), 1);
     assert_eq!(
         tabs.of(id).tabs[0].document.text.borrow().as_str(),
@@ -757,7 +784,7 @@ fn memo_close_cancel_discard_empty_and_restart_keep_their_promises() {
         expanded: live.folder.borrow().expanded.clone(),
         displayed_paths: live.tree_paths.borrow().clone(),
     };
-    let mut watcher = tree_watch::Watcher::new().unwrap();
+    let mut watcher = tree_watch::Watcher::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let rows = loop {
         if let Some(rows) = watcher.poll(&request) {

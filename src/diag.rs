@@ -945,12 +945,16 @@ mod tests {
         const CHILD: &str = "RFNEDIT_TEST_PANIC_LOG_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "diag::tests::a_panic_is_written_to_this_run_s_log"])
+                .args([
+                    "--exact",
+                    "diag::tests::a_panic_is_written_to_this_run_s_log",
+                ])
                 .env(CHILD, "1")
                 .output()
                 .expect("start the isolated panic test");
             assert!(
-                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
                 "{}\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
@@ -961,7 +965,10 @@ mod tests {
         let dir = Directory::new();
         let mut log = DiagLog::default();
         log.start_in(&dir.0, Config::default());
-        let path = log.path().expect("the temporary log is writable").to_owned();
+        let path = log
+            .path()
+            .expect("the temporary log is writable")
+            .to_owned();
         log.write("session", "kind=ordinary");
 
         let restore = std::panic::take_hook();

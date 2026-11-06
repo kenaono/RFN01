@@ -123,6 +123,13 @@ impl Line {
         }
     }
 
+    fn resize(&mut self, columns: usize) {
+        if self.cells.get(columns).is_some_and(|cell| cell.trailing) {
+            self.cells[columns - 1].text = '\u{FFFD}';
+        }
+        self.cells.resize(columns, Cell::blank(Attrs::default()));
+    }
+
     /// The row as a reader sees it, without the trailing blanks.
     pub fn text(&self) -> String {
         let mut out = String::new();
@@ -895,6 +902,13 @@ impl Screen {
             // can hold more than one `char`, it joins nothing and is skipped.
             return;
         }
+        // If a glyph cannot fit on even an empty line, use a one-cell
+        // replacement. Wrapping alone cannot make room for it.
+        let (text, width) = if width > self.columns {
+            ('\u{FFFD}', 1)
+        } else {
+            (text, width)
+        };
         if self.cursor.pending_wrap || self.cursor.column + width > self.columns {
             self.wrap_line();
         }
@@ -1306,7 +1320,7 @@ impl Screen {
             capture.repainting = true;
         }
         for line in &mut self.lines {
-            line.cells.resize(columns, Cell::blank(Attrs::default()));
+            line.resize(columns);
         }
         while self.lines.len() > rows {
             if self.cursor.row + 1 >= self.lines.len() {
@@ -1335,7 +1349,7 @@ impl Screen {
         }
         if let Some(stowed) = &mut self.stowed {
             for line in stowed.iter_mut() {
-                line.cells.resize(columns, Cell::blank(Attrs::default()));
+                line.resize(columns);
             }
             stowed.resize(rows, Line::blank(columns, Attrs::default()));
         }
@@ -2771,6 +2785,34 @@ mod tests {
             "x",
             "the orphaned half would shift the whole row"
         );
+    }
+
+    #[test]
+    fn one_column_replaces_wide_characters_without_losing_following_input() {
+        let mut it = terminal(1, 3);
+        for mode in [b"".as_slice(), b"\x1b[?1049h".as_slice()] {
+            it.feed(mode);
+            it.feed("漢\u{0301}A".as_bytes());
+            assert_eq!(it.screen.row_text(0), "\u{FFFD}");
+            assert_eq!(it.screen.row_text(1), "A");
+            assert!(!it.screen.line(0).unwrap().cells[0].trailing);
+        }
+    }
+
+    #[test]
+    fn shrinking_both_terminal_screens_removes_truncated_wide_pairs() {
+        let mut it = terminal(2, 3);
+        it.feed("漢\x1b[?1049h字".as_bytes());
+        it.screen.resize(1, 3);
+        assert_eq!(it.screen.row_text(0), "\u{FFFD}");
+        it.feed("\r漢\u{0301}A".as_bytes());
+        assert_eq!(it.screen.row_text(0), "\u{FFFD}");
+        assert_eq!(it.screen.row_text(1), "A");
+        it.feed("\x1b[?1049l".as_bytes());
+        assert_eq!(it.screen.row_text(0), "\u{FFFD}");
+        it.feed("\r漢\u{0301}B".as_bytes());
+        assert_eq!(it.screen.row_text(0), "\u{FFFD}");
+        assert_eq!(it.screen.row_text(1), "B");
     }
 
     #[test]

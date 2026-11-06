@@ -14,7 +14,7 @@
 //! 含めて、**最大化・最小化していない最後の姿**を覚える。
 
 use std::cell::Cell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, PhysicalPosition, PhysicalSize};
@@ -44,6 +44,7 @@ pub fn open_session(
     window: &AppWindow,
     session: Option<app_data::Session>,
     restored: Vec<(Rc<OpenDocument>, EditorState)>,
+    workspace_roots: Option<&[PathBuf]>,
 ) -> (Tabs, Layout) {
     let Some(session) = session else {
         return open_without_session(window, restored);
@@ -76,7 +77,15 @@ pub fn open_session(
         .collect();
     for (position, stored) in session.panes.iter().enumerate() {
         let id = PaneId::from_index(position as i32).min(last);
-        for tab in &stored.tabs {
+        let index = id.index() as usize;
+        let mut active = None;
+        let mut previous = None;
+        for (original, tab) in stored.tabs.iter().enumerate() {
+            if let (Some(roots), Some(origin)) = (workspace_roots, &tab.origin)
+                && !crate::workspace_boundary::existing_file_allowed(roots, origin)
+            {
+                continue;
+            }
             // A shell's tab carries an empty untitled stand-in, which no work
             // copy holds; it is made again rather than looked for.
             let document = if tab.shell.is_some() {
@@ -91,6 +100,11 @@ pub fn open_session(
             };
             if !placed.iter().any(|held| Rc::ptr_eq(held, &document)) {
                 placed.push(document.clone());
+            }
+            if original >= stored.active {
+                active.get_or_insert(strips[index].tabs.len());
+            } else {
+                previous = Some(strips[index].tabs.len());
             }
             let caret = tab.caret;
             strips[id.index() as usize].tabs.push(PaneTab {
@@ -125,7 +139,7 @@ pub fn open_session(
                 // RFN01-97: **the shell this tab was, waiting to be shown** —
                 // it starts the first time it is drawn, with what it printed
                 // last time above it.
-                terminal: tab.shell.as_ref().map(waiting_shell),
+                terminal: tab.shell.as_ref().map(|shell| waiting_shell(window, shell)),
                 // The strip opens itself when the tab does; its shells, too,
                 // wait to be drawn (RFN01-97).
                 below: TabBelow {
@@ -157,7 +171,7 @@ pub fn open_session(
                     entries.push(crate::terminal_panels::restored_entry(
                         window,
                         number,
-                        waiting_shell(stored),
+                        waiting_shell(window, stored),
                     ));
                 }
                 if let Some(restored) = strip.tabs.last_mut() {
@@ -169,7 +183,9 @@ pub fn open_session(
             }
         }
         let strip = &mut strips[id.index() as usize];
-        strip.active = stored.active.min(strip.tabs.len().saturating_sub(1));
+        if let Some(at) = active.or(previous) {
+            strip.active = at;
+        }
         strip.paper = from_stored(&stored.paper);
     }
 
@@ -251,7 +267,7 @@ pub fn document_for(
     let names = |document: &Rc<OpenDocument>| {
         let file = document.file.borrow();
         match (&tab.origin, file.path()) {
-            (Some(origin), Some(path)) => origin == path,
+            (Some(origin), Some(_)) => file.is_at(origin),
             (None, None) => file.untitled_number() == tab.untitled,
             _ => false,
         }
@@ -266,7 +282,11 @@ pub fn document_for(
     }
     // Nothing unsaved, so the file itself is what it was.
     let origin = tab.origin.as_ref()?;
-    match DocumentFile::open(origin, MAX_DOCUMENT_CHARACTERS) {
+    let loaded = match tab.encoding {
+        Some(encoding) => DocumentFile::open_as(origin, MAX_DOCUMENT_CHARACTERS, encoding),
+        None => DocumentFile::open(origin, MAX_DOCUMENT_CHARACTERS),
+    };
+    match loaded {
         Ok((file, text)) => Some(OpenDocument::new(file, text, window.as_weak())),
         Err(_) => None,
     }
@@ -337,7 +357,8 @@ pub fn open_without_session(
 
 /// What is on screen, in the form the session keeps it (要件 8.5).
 pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
-    let keep_output = window.get_terminal_restore_output();
+    let keep_output =
+        window.get_terminal_restore_output() && window.get_terminal_history_limit() > 0;
     let tabs = live.tabs.borrow();
     let panes = PaneId::all(window)
         .iter()
@@ -388,7 +409,7 @@ pub fn capture_session(window: &AppWindow, live: &Live) -> app_data::Session {
         // 最大化のまま終了しただけで覚えていた大きさが消え、次の起動は既定の小さな
         // 大きさで出る（そして「元の大きさに戻す」と、いよいよ小さくなる）。
         place: window_place(window).or_else(|| {
-            app_data::read_session(&app_data::app_directory()?).and_then(|old| old.place)
+            app_data::read_session(&app_data::session_directory()?).and_then(|old| old.place)
         }),
         maximized: window.window().is_maximized(),
         focused: {
@@ -545,10 +566,15 @@ fn output_name(shell: &TerminalSession) -> String {
 fn session_shell(shell: &TerminalSession, keep_output: bool) -> Option<app_data::SessionShell> {
     let profile = shell.profile()?;
     Some(app_data::SessionShell {
+        profile_id: profile.id,
         name: profile.name.clone(),
         command: profile.command.clone(),
         directory: profile.directory.clone(),
-        output: keep_output.then(|| output_name(shell)),
+        launch_directory: shell
+            .launch_directory()
+            .filter(|directory| *directory != profile.directory)
+            .map(str::to_owned),
+        output: keep_output.then(|| shell.saved_output.clone()).flatten(),
         title: shell.given_title(),
     })
 }
@@ -577,55 +603,132 @@ fn below_shells(tab: &PaneTab) -> Vec<Rc<std::cell::RefCell<TerminalSession>>> {
     shells
 }
 
-/// RFN01-97: write what every remembered shell printed, and take away the
-/// files of shells that are gone. **Only when the editor closes** — the
-/// session itself is written far more often, and this can be megabytes.
+/// Save the active shells before they are discarded. Keep the last
+/// successful file reference if a write fails.
 pub fn write_terminal_outputs(window: &AppWindow, live: &Live) {
     let Some(directory) = app_data::app_directory() else {
         return;
     };
-    let mut outputs = Vec::new();
-    if window.get_terminal_restore_output() {
-        let when = crate::timestamp::format("yyyy-MM-dd HH:mm", crate::timestamp::now());
-        let limit = window.get_terminal_history_limit().max(0) as usize;
-        let tabs = live.tabs.borrow();
-        for tab in tabs.panes.iter().flat_map(|strip| &strip.tabs) {
-            if !remembered(tab) {
+    let limit = window.get_terminal_history_limit().max(0) as usize;
+    if !window.get_terminal_restore_output() || limit == 0 {
+        return;
+    }
+    let when = crate::timestamp::format("yyyy-MM-dd HH:mm", crate::timestamp::now());
+    let mut seen = std::collections::HashSet::new();
+    let tabs = live.tabs.borrow();
+    for tab in tabs
+        .panes
+        .iter()
+        .flat_map(|strip| &strip.tabs)
+        .filter(|tab| remembered(tab))
+    {
+        for shell in tab.terminal.iter().cloned().chain(below_shells(tab)) {
+            let mut shell = shell.borrow_mut();
+            if shell.profile().is_none() || !seen.insert(shell.number()) {
                 continue;
             }
-            for shell in tab.terminal.iter().cloned().chain(below_shells(tab)) {
-                let shell = shell.borrow();
-                if shell.profile().is_some() {
-                    outputs.push((output_name(&shell), when.clone(), shell.output_lines(limit)));
+            shell.drain();
+            let name = output_name(&shell);
+            match app_data::write_terminal_output(
+                &directory,
+                &name,
+                &when,
+                &shell.output_lines(limit),
+            ) {
+                Ok(()) => shell.saved_output = Some(name),
+                Err(error) => {
+                    live.cache.borrow_mut().log_diag(
+                        "session",
+                        &format!("terminal output save failed error={error}"),
+                    );
+                    use crate::StatusBar as _;
+                    window.tell(
+                        crate::pick(
+                            "Terminal の履歴を保存できませんでした",
+                            "Could not save Terminal history",
+                        )
+                        .into(),
+                    );
                 }
             }
         }
     }
-    if let Err(error) = app_data::replace_terminal_outputs(&directory, &outputs) {
+}
+
+pub fn prune_terminal_outputs(window: &AppWindow, live: &Live) {
+    let Some(directory) = app_data::app_directory() else {
+        return;
+    };
+    let mut retained = std::collections::HashSet::new();
+    if window.get_terminal_restore_output() && window.get_terminal_history_limit() > 0 {
+        let mut retain = |session: app_data::Session| {
+            for tab in session.panes.into_iter().flat_map(|pane| pane.tabs) {
+                retained.extend(
+                    tab.shell
+                        .into_iter()
+                        .chain(tab.below_shells)
+                        .filter_map(|shell| shell.output),
+                );
+            }
+        };
+        // A missing or unreadable reference file is safer to preserve.
+        let Some(current) = app_data::read_session(&directory) else {
+            return;
+        };
+        retain(current);
+        retain(capture_session(window, live));
+        if let Some(runtime) = &live.folder.borrow().workspace {
+            let runtime = runtime.borrow();
+            if runtime.read_error().is_some() {
+                return;
+            }
+            for workspace in runtime.registry().workspaces() {
+                match app_data::read_workspace_tabs_checked(&directory, workspace.id) {
+                    Ok(Some(session)) => retain(session),
+                    Ok(None) => {}
+                    Err(error) => {
+                        live.cache.borrow_mut().log_diag(
+                            "session",
+                            &format!("terminal history cleanup deferred error={error}"),
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    if let Err(error) = app_data::prune_terminal_outputs(&directory, &retained) {
         live.cache.borrow_mut().log_diag(
             "session",
-            &format!("terminal output save failed error={error}"),
+            &format!("terminal history cleanup failed error={error}"),
         );
     }
 }
 
 /// RFN01-97: a shell from the session, waiting to be started when it is
 /// first shown, with what it had printed.
-fn waiting_shell(stored: &app_data::SessionShell) -> Rc<std::cell::RefCell<TerminalSession>> {
+fn waiting_shell(
+    window: &AppWindow,
+    stored: &app_data::SessionShell,
+) -> Rc<std::cell::RefCell<TerminalSession>> {
     let shell = crate::TerminalShell {
-        id: 0,
+        id: stored.profile_id,
         name: stored.name.clone(),
         command: stored.command.clone(),
         directory: stored.directory.clone(),
     };
-    let folder = crate::terminal_shells::windows_folder(&shell.directory);
-    let (when, lines) = stored
-        .output
-        .as_deref()
+    let limit = window.get_terminal_history_limit().max(0) as usize;
+    let saved_output = (window.get_terminal_restore_output() && limit > 0)
+        .then(|| stored.output.as_deref())
+        .flatten()
+        .filter(|name| app_data::is_output_name(name));
+    let (when, mut lines) = saved_output
         .zip(app_data::app_directory())
         .and_then(|(name, directory)| app_data::read_terminal_output(&directory, name))
         .unwrap_or_default();
-    let mut waiting = TerminalSession::waiting(shell, folder, lines, when);
+    lines.drain(..lines.len().saturating_sub(limit));
+    let mut waiting = TerminalSession::waiting(shell, stored.launch_directory.clone(), lines, when);
+    waiting.saved_output = saved_output.map(str::to_owned);
     waiting.set_restored_title(stored.title.clone());
     Rc::new(std::cell::RefCell::new(waiting))
 }
@@ -653,6 +756,7 @@ pub fn session_tab(tab: &PaneTab, keep_output: bool) -> app_data::SessionTab {
         // このタブの単語チェックモードを固定 ID で保存する（要件 7.9）。
         word_mode: tab.word_mode,
         origin: file.path().map(Path::to_path_buf),
+        encoding: file.chosen_encoding(),
         untitled: file.untitled_number(),
         vertical: tab.view.vertical,
         preview: tab.view.preview,
@@ -693,7 +797,7 @@ fn from_stored(paper: &app_data::Paper) -> crate::Paper {
 /// arrangement, not a document, so there is nothing to be gained by working out
 /// what changed.
 pub fn write_session(window: &AppWindow, live: &Live) {
-    let Some(directory) = app_data::app_directory() else {
+    let Some(directory) = app_data::session_directory() else {
         return;
     };
     let session = capture_session(window, live);
@@ -728,7 +832,7 @@ pub fn write_session(window: &AppWindow, live: &Live) {
 /// RFN01-106: この並びを、使っているWorkspaceのものとして書く。Workspaceを使っていなければ
 /// 何もしない（Explorerの並びは覚えない、書き手の判断 2026-11-05）。
 pub fn remember_workspace_tabs(live: &Live, session: &app_data::Session) {
-    let Some(directory) = app_data::app_directory() else {
+    let Some(directory) = app_data::session_directory() else {
         return;
     };
     let active = live

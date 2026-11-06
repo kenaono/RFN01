@@ -29,7 +29,7 @@ use crate::i18n::pick;
 use crate::inline_diff;
 use crate::{
     AppWindow, GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitHunkLine, GitHunkRow,
-    GitLine, GitRef, GitRow, GitSearchRow, Live, MAX_DOCUMENT_CHARACTERS, Opening, StatusBar, say,
+    GitLine, GitRef, GitRow, GitSearchRow, Live, Opening, StatusBar, say,
 };
 
 /// 1度に読む Commit の数（「Show more」で同じだけ足す）。
@@ -97,9 +97,33 @@ enum Side {
 
 /// 右の列の差分（PR 2b）が何を比べているか。
 enum DiffShown {
-    Commit(CommitDiff),
-    Wip(Preview),
-    Range(Preview),
+    Commit(CommitDiff, CachedDiff),
+    Wip(CachedDiff),
+    Range(CachedDiff),
+}
+
+impl DiffShown {
+    fn cached(&self) -> &CachedDiff {
+        match self {
+            Self::Commit(_, cached) | Self::Wip(cached) | Self::Range(cached) => cached,
+        }
+    }
+}
+
+struct CachedDiff {
+    preview: Preview,
+    unified: Option<inline_diff::Unified>,
+}
+
+impl CachedDiff {
+    fn new(preview: Preview) -> Self {
+        let unified = preview
+            .text
+            .as_ref()
+            .ok()
+            .map(|(left, right)| inline_diff::unified(left, right, 3));
+        Self { preview, unified }
+    }
 }
 
 #[derive(Clone)]
@@ -153,12 +177,14 @@ struct SearchResults {
 enum Lookup {
     Search(SearchResults),
     Commit(git::Detail),
+    SelectedCommit(git::Detail),
     Range(RangeComparison),
-    File(Preview),
+    File(DiffShown),
 }
 
 #[derive(Default)]
 struct Repo {
+    overlay_identity: Rc<()>,
     root: Option<PathBuf>,
     count: usize,
     data: Option<Data>,
@@ -249,9 +275,13 @@ impl ActionTarget {
         if self.root != current.root {
             return false;
         }
-        let same_diff = || self.diff.as_ref().zip(current.diff.as_ref())
-            .is_some_and(|(left, right)| Rc::ptr_eq(left, right))
-            && self.block_mode == current.block_mode;
+        let same_diff = || {
+            self.diff
+                .as_ref()
+                .zip(current.diff.as_ref())
+                .is_some_and(|(left, right)| Rc::ptr_eq(left, right))
+                && self.block_mode == current.block_mode
+        };
         let same_point = || self.from_menu || self.point == current.point;
         match action {
             OpenComparison | ReviewBlocks => same_diff(),
@@ -264,7 +294,7 @@ impl ActionTarget {
 
     fn patch(&self) -> Option<&Arc<crate::git_hunks::Patch>> {
         match self.diff.as_deref() {
-            Some(DiffShown::Wip(preview)) => preview.patch.as_ref(),
+            Some(DiffShown::Wip(cached)) => cached.preview.patch.as_ref(),
             _ => None,
         }
     }
@@ -272,17 +302,25 @@ impl ActionTarget {
     pub(crate) fn enabled(&self, window: &AppWindow, action: RepoAction) -> bool {
         use RepoAction::*;
         match action {
-            OpenComparison => window.get_git_repo_detail_mode() == 3
-                && window.get_git_repo_diff_note().is_empty()
-                && self.diff.is_some() && !self.block_mode,
-            ReviewBlocks => window.get_git_repo_hunks_available()
-                && !self.block_mode && !window.get_git_busy(),
-            StageBlock | UnstageBlock => self.block_mode && !window.get_git_busy()
-                && !window.get_git_merge_active()
-                && git_ui::active_root().as_ref() == Some(&self.root)
-                && self.patch().is_some_and(|patch| {
-                    patch.staged == (action == UnstageBlock) && patch.hunks.get(self.block).is_some()
-                }),
+            OpenComparison => {
+                window.get_git_repo_detail_mode() == 3
+                    && window.get_git_repo_diff_note().is_empty()
+                    && self.diff.is_some()
+                    && !self.block_mode
+            }
+            ReviewBlocks => {
+                window.get_git_repo_hunks_available() && !self.block_mode && !window.get_git_busy()
+            }
+            StageBlock | UnstageBlock => {
+                self.block_mode
+                    && !window.get_git_busy()
+                    && !window.get_git_merge_active()
+                    && git_ui::active_root().as_ref() == Some(&self.root)
+                    && self.patch().is_some_and(|patch| {
+                        patch.staged == (action == UnstageBlock)
+                            && patch.hunks.get(self.block).is_some()
+                    })
+            }
             OpenSearch => !self.search_open,
             CloseSearch => self.search_open,
             SetBase => self.point.is_some(),
@@ -314,9 +352,19 @@ pub(crate) fn root() -> Option<PathBuf> {
     REPO.with(|repo| repo.borrow().root.clone())
 }
 
+pub(crate) fn overlay_identity(window: &AppWindow) -> Option<Rc<()>> {
+    window
+        .get_git_repo_active()
+        .then(|| REPO.with(|repo| repo.borrow().overlay_identity.clone()))
+}
+
 /// File の「Git Repository…」と、Git Changes の見出しの釦。
 pub fn open(window: &AppWindow, live: &Live) {
-    open_folder(window, live, git_ui::repository_folder(window, live).as_deref());
+    open_folder(
+        window,
+        live,
+        git_ui::repository_folder(window, live).as_deref(),
+    );
 }
 
 pub(crate) fn open_folder(window: &AppWindow, live: &Live, folder: Option<&Path>) {
@@ -339,6 +387,7 @@ pub(crate) fn open_folder(window: &AppWindow, live: &Live, folder: Option<&Path>
             };
         }
         // 開いた直後は何も選ばない（書き手と決めた見本のとおり）。
+        repo.overlay_identity = Rc::new(());
         repo.selected = None;
         repo.detail = None;
         repo.diff = None;
@@ -580,6 +629,13 @@ fn collect_lookup(window: &AppWindow) {
                 true,
             );
         }
+        Ok(Lookup::SelectedCommit(detail)) => REPO.with(|repo| {
+            let mut repo = repo.borrow_mut();
+            if matches!(&repo.selected, Some(Selected::Commit(sha)) if sha == &detail.sha) {
+                repo.detail = Some(detail);
+                publish_detail(window, &repo);
+            }
+        }),
         Ok(Lookup::Range(range)) => {
             git_ui::cancel_change_diff();
             REPO.with(|repo| {
@@ -593,7 +649,15 @@ fn collect_lookup(window: &AppWindow) {
                 publish_detail(window, &repo);
             });
         }
-        Ok(Lookup::File(preview)) => set_diff(window, DiffShown::Range(preview)),
+        Ok(Lookup::File(diff)) => {
+            let current = REPO.with(|repo| match &diff {
+                DiffShown::Commit(source, _) => matches!(&repo.borrow().selected, Some(Selected::Commit(sha)) if sha == &source.sha),
+                _ => true,
+            });
+            if current {
+                set_diff(window, diff);
+            }
+        }
         Err(error) => window.set_git_repo_inspection_note(error.to_string().into()),
     }
 }
@@ -727,7 +791,12 @@ fn render(window: &AppWindow) {
             repo.side.clear();
             return;
         };
-        crate::git_worktree_ui::publish(window, repo.root.as_deref(), data.head.as_deref(), Some(&data.worktrees));
+        crate::git_worktree_ui::publish(
+            window,
+            repo.root.as_deref(),
+            data.head.as_deref(),
+            Some(&data.worktrees),
+        );
         let (rows, shas) = commit_rows(data);
         let selected = repo
             .selected
@@ -953,12 +1022,16 @@ fn refresh_action_bindings(window: &AppWindow) {
 
 fn publish_detail_contents(window: &AppWindow, repo: &Repo) {
     let patch = match repo.diff.as_deref() {
-        Some(DiffShown::Wip(preview)) => preview.patch.as_deref(),
+        Some(DiffShown::Wip(cached)) => cached.preview.patch.as_deref(),
         _ => None,
     };
     window.set_git_repo_hunks_available(patch.is_some());
     window.set_git_repo_hunks_active(repo.block_mode && patch.is_some());
-    window.set_git_repo_hunk_selected(if repo.block_mode { repo.block as i32 } else { -1 });
+    window.set_git_repo_hunk_selected(if repo.block_mode {
+        repo.block as i32
+    } else {
+        -1
+    });
     if let Some(patch) = patch.filter(|_| repo.block_mode) {
         let rows: Vec<_> = patch
             .hunks
@@ -981,9 +1054,9 @@ fn publish_detail_contents(window: &AppWindow, repo: &Repo) {
     } else {
         window.set_git_repo_hunks(ModelRc::default());
     }
-    if let (Some(diff), Some(root)) = (&repo.diff, &repo.root) {
+    if let Some(diff) = &repo.diff {
         if !window.get_git_repo_hunks_active() {
-            publish_diff(window, root, diff.as_ref());
+            publish_diff(window, diff.as_ref());
         }
         return;
     }
@@ -1049,26 +1122,24 @@ fn file_rows(files: &[Change]) -> ModelRc<GitRow> {
 }
 
 /// グラフの行を選ぶ。Commit なら詳細を読む。
-fn select_row(window: &AppWindow, index: usize) {
+fn select_row(window: &AppWindow, live: &Live, index: usize) {
     let target = REPO.with(|repo| {
         let repo = repo.borrow();
-        Some((repo.root.clone()?, repo.rows.get(index)?.clone()))
+        repo.rows.get(index).cloned()
     });
-    let Some((root, sha)) = target else {
+    let Some(sha) = target else {
         return;
     };
-    git_ui::cancel_change_diff();
-    let (selected, detail) = match sha {
-        None => (Selected::Wip, None),
-        Some(sha) => match git::detail(&root, &sha) {
-            Ok(detail) => (Selected::Commit(sha), Some(detail)),
-            Err(error) => {
-                window.tell(error.to_string().into());
-                return;
-            }
-        },
-    };
-    select_detail(window, selected, detail, index as i32, false);
+    let selected = sha.clone().map_or(Selected::Wip, Selected::Commit);
+    select_detail(window, selected, None, index as i32, false);
+    if let Some(sha) = sha {
+        start_lookup(
+            window,
+            live,
+            pick("Commitの詳細を読み込んでいます…", "Reading commit details…"),
+            move |root| git::detail(root, &sha).map(Lookup::SelectedCommit),
+        );
+    }
 }
 
 fn select_detail(
@@ -1183,7 +1254,11 @@ fn capture_branch_menu(window: &AppWindow, live: &Live, index: usize) {
         if let Picked::Local(branch) | Picked::Remote(branch) = &picked {
             target.set_git_branch_target(branch);
         }
-        BranchMenu { root, picked, target }
+        BranchMenu {
+            root,
+            picked,
+            target,
+        }
     });
     BRANCH_MENU.with(|stored| *stored.borrow_mut() = menu);
     refresh_action_bindings(window);
@@ -1207,7 +1282,7 @@ fn current_branch() -> Option<String> {
 }
 
 /// ブランチを押した：グラフでその先端を選び、見える所へ移す。
-fn branch_clicked(window: &AppWindow, index: usize) {
+fn branch_clicked(window: &AppWindow, live: &Live, index: usize) {
     let reference = match side_at(index) {
         Some(Picked::Local(r) | Picked::Remote(r)) => r,
         _ => return,
@@ -1220,7 +1295,7 @@ fn branch_clicked(window: &AppWindow, index: usize) {
     });
     match row {
         Some(row) => {
-            select_row(window, row);
+            select_row(window, live, row);
             window.set_git_repo_scroll_row(row as i32);
             window.set_git_repo_scroll_generation(window.get_git_repo_scroll_generation() + 1);
         }
@@ -1305,13 +1380,15 @@ fn branch_menu(window: &AppWindow, live: &Live, action: i32) {
             force: false,
         },
         (Picked::Stash(s), 0 | 1) => Action::StashApply {
-            name: s.name,
+            stash: s,
             pop: action == 1,
         },
-        (Picked::Stash(s), 2) => Action::StashDrop(s.name),
+        (Picked::Stash(s), 2) => Action::StashDrop(s),
         _ => return,
     };
-    later(window, live, move |window, live| git_ui::act_on(window, live, root, action));
+    later(window, live, move |window, live| {
+        git_ui::act_on(window, live, root, action)
+    });
 }
 
 pub(crate) fn take_branch_target() -> Option<crate::menu_commands::Target> {
@@ -1346,16 +1423,6 @@ fn branch_dropped(window: &AppWindow, live: &Live, from: usize, to: usize) {
     );
 }
 
-fn read_text(bytes: Option<Vec<u8>>) -> String {
-    bytes
-        .and_then(|bytes| {
-            crate::file_io::decode(&bytes, MAX_DOCUMENT_CHARACTERS)
-                .ok()
-                .map(|(text, _)| text)
-        })
-        .unwrap_or_default()
-}
-
 /// 差分の段の幅（px）＝右の列の幅から、行番号・印・余白を引いたもの。右の列は窓の幅に
 /// 合わせて変わるので、画面が幅を知らせてくる（`diff_width_changed`）。字の幅は目安で、
 /// 少し狭めに数えて段からはみ出さないようにする。
@@ -1370,7 +1437,17 @@ fn diff_width_changed(window: &AppWindow, panel: f32) {
     let width = (panel - DIFF_CHROME).max(120.0);
     let old = DIFF_WIDTH.with(|held| held.replace(width));
     if (old - width).abs() >= 1.0 {
-        REPO.with(|repo| publish_detail(window, &repo.borrow()));
+        REPO.with(|repo| {
+            let repo = repo.borrow();
+            if !repo.block_mode
+                && let Some(unified) = repo
+                    .diff
+                    .as_ref()
+                    .and_then(|diff| diff.cached().unified.as_ref())
+            {
+                window.set_git_repo_diff_rows(ModelRc::new(VecModel::from(diff_rows(unified))));
+            }
+        });
     }
 }
 
@@ -1446,84 +1523,20 @@ fn diff_rows(unified: &inline_diff::Unified) -> Vec<GitDiffRow> {
     rows
 }
 
-/// 差分の左右の文と、見出しに出す文。
-fn commit_diff_texts(root: &Path, diff: &CommitDiff) -> Result<(String, String, String), GitError> {
-    let disk = |path: &str| read_text(std::fs::read(root.join(path)).ok());
-    let blob = |sha: &str, path: &str| git::blob_at(root, sha, path).map(read_text);
-    let CommitDiff {
-        sha,
-        parent,
-        change,
-        working,
-    } = diff;
-    let short: String = sha.chars().take(7).collect();
-    if *working {
-        let caption = say!(
-            "Commit {short}（左）と今のファイル（右）",
-            "Commit {short} (left) and the working copy (right)"
-        );
-        return Ok((blob(sha, &change.path)?, disk(&change.path), caption));
-    }
-    let old_path = change.from.as_deref().unwrap_or(&change.path);
-    let before = match parent {
-        Some(parent) => blob(parent, old_path)?,
-        None => String::new(),
+fn publish_diff(window: &AppWindow, diff: &DiffShown) {
+    let source = match diff {
+        DiffShown::Commit(source, _) => Some(source),
+        _ => None,
     };
-    let parent_short: String = parent
-        .as_deref()
-        .map(|p| p.chars().take(7).collect())
-        .unwrap_or_else(|| "—".to_owned());
-    let caption = say!(
-        "親Commit {parent_short}（左）と {short}（右）",
-        "Parent {parent_short} (left) and {short} (right)"
-    );
-    Ok((before, blob(sha, &change.path)?, caption))
-}
-
-fn publish_diff(window: &AppWindow, root: &Path, diff: &DiffShown) {
-    window.set_git_repo_diff_switchable(matches!(diff, DiffShown::Commit(_)));
-    match diff {
-        DiffShown::Commit(commit) => {
-            window.set_git_repo_diff_working(commit.working);
-            let name = &commit.change.path;
-            match commit_diff_texts(root, commit) {
-                Ok((left, right, caption)) => {
-                    publish_diff_rows(window, name, &caption, Ok((&left, &right)));
-                }
-                Err(error) => publish_diff_rows(window, name, "", Err(&error.to_string())),
-            }
-        }
-        DiffShown::Wip(preview) | DiffShown::Range(preview) => {
-            window.set_git_repo_diff_working(false);
-            let text = preview
-                .text
-                .as_ref()
-                .map(|(left, right)| (left.as_str(), right.as_str()));
-            publish_diff_rows(
-                window,
-                &preview.name,
-                &preview.caption,
-                text.map_err(String::as_str),
-            );
-        }
-    }
-}
-
-fn publish_diff_rows(
-    window: &AppWindow,
-    name: &str,
-    caption: &str,
-    text: Result<(&str, &str), &str>,
-) {
-    let (rows, removed, added, note) = match text {
-        Ok((left, right)) => {
-            let unified = inline_diff::unified(left, right, 3);
-            (diff_rows(&unified), unified.removed, unified.added, "")
-        }
-        Err(error) => (Vec::new(), 0, 0, error),
-    };
-    window.set_git_repo_diff_name(name.into());
-    window.set_git_repo_diff_caption(caption.into());
+    window.set_git_repo_diff_switchable(source.is_some());
+    window.set_git_repo_diff_working(source.is_some_and(|source| source.working));
+    let CachedDiff { preview, unified } = diff.cached();
+    let (rows, removed, added) = unified.as_ref().map_or((Vec::new(), 0, 0), |unified| {
+        (diff_rows(unified), unified.removed, unified.added)
+    });
+    let note = preview.text.as_ref().err().map_or("", String::as_str);
+    window.set_git_repo_diff_name(preview.name.as_str().into());
+    window.set_git_repo_diff_caption(preview.caption.as_str().into());
     window.set_git_repo_diff_note(note.into());
     window.set_git_repo_diff_removed(removed as i32);
     window.set_git_repo_diff_added(added as i32);
@@ -1532,7 +1545,7 @@ fn publish_diff_rows(
 }
 
 /// 右の列に差分を出す（Commit の詳細のファイル）。
-fn show_diff(window: &AppWindow, index: usize, working: bool) {
+fn show_diff(window: &AppWindow, live: &Live, index: usize, working: bool) {
     let source = REPO.with(|repo| {
         let repo = repo.borrow();
         let detail = repo.detail.as_ref()?;
@@ -1544,8 +1557,35 @@ fn show_diff(window: &AppWindow, index: usize, working: bool) {
         })
     });
     if let Some(source) = source {
-        set_diff(window, DiffShown::Commit(source));
+        read_commit_diff(window, live, source);
     }
+}
+
+fn read_commit_diff(window: &AppWindow, live: &Live, source: CommitDiff) {
+    start_lookup(
+        window,
+        live,
+        pick(
+            "ファイルの差分を読み込んでいます…",
+            "Reading the file diff…",
+        ),
+        move |root| {
+            let preview = if source.working {
+                crate::git_change_diff::read_commit_working(root, &source.sha, &source.change)
+            } else {
+                crate::git_change_diff::read_commit(
+                    root,
+                    source.parent.as_deref(),
+                    &source.sha,
+                    &source.change,
+                )
+            };
+            Ok(Lookup::File(DiffShown::Commit(
+                source,
+                CachedDiff::new(preview),
+            )))
+        },
+    );
 }
 
 fn open_file_diff(window: &AppWindow, live: &Live, index: usize) {
@@ -1567,13 +1607,12 @@ fn open_file_diff(window: &AppWindow, live: &Live, index: usize) {
                 "Reading the file diff…",
             ),
             move |root| {
-                Ok(Lookup::File(crate::git_change_diff::read_commits(
-                    root, &left, &right, &change,
-                )))
+                let preview = crate::git_change_diff::read_commits(root, &left, &right, &change);
+                Ok(Lookup::File(DiffShown::Range(CachedDiff::new(preview))))
             },
         );
     } else {
-        show_diff(window, index, false);
+        show_diff(window, live, index, false);
     }
 }
 
@@ -1591,6 +1630,8 @@ fn diff_back(window: &AppWindow) {
     git_ui::cancel_change_diff();
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
+        repo.lookup = None;
+        window.set_git_repo_inspection_note("".into());
         if repo.block_mode {
             repo.block_mode = false;
         } else {
@@ -1603,7 +1644,8 @@ fn diff_back(window: &AppWindow) {
 fn open_hunks(window: &AppWindow) {
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
-        if matches!(repo.diff.as_deref(), Some(DiffShown::Wip(preview)) if preview.patch.is_some()) {
+        if matches!(repo.diff.as_deref(), Some(DiffShown::Wip(cached)) if cached.preview.patch.is_some())
+        {
             repo.block_mode = true;
             repo.block = 0;
             publish_detail(window, &repo);
@@ -1617,8 +1659,13 @@ fn select_block(window: &AppWindow, index: i32) {
     };
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
-        if repo.block_mode && let Some(DiffShown::Wip(preview)) = repo.diff.as_deref()
-            && preview.patch.as_ref().is_some_and(|patch| patch.hunks.get(block).is_some())
+        if repo.block_mode
+            && let Some(DiffShown::Wip(cached)) = repo.diff.as_deref()
+            && cached
+                .preview
+                .patch
+                .as_ref()
+                .is_some_and(|patch| patch.hunks.get(block).is_some())
         {
             repo.block = block;
             window.set_git_repo_hunk_selected(index);
@@ -1626,7 +1673,13 @@ fn select_block(window: &AppWindow, index: i32) {
     });
 }
 
-fn apply_block(window: &AppWindow, live: &Live, root: &Path, patch: Arc<crate::git_hunks::Patch>, block: usize) {
+fn apply_block(
+    window: &AppWindow,
+    live: &Live,
+    root: &Path,
+    patch: Arc<crate::git_hunks::Patch>,
+    block: usize,
+) {
     if !git_ui::apply_hunk(window, live, root, patch, block) {
         return;
     }
@@ -1639,42 +1692,25 @@ fn apply_block(window: &AppWindow, live: &Live, root: &Path, patch: Arc<crate::g
 }
 
 /// Previous／Working Copy。
-fn diff_working_chosen(window: &AppWindow, working: bool) {
-    REPO.with(|repo| {
-        let mut repo = repo.borrow_mut();
-        if let Some(DiffShown::Commit(commit)) = repo.diff.as_deref() {
-            let mut commit = commit.clone();
-            commit.working = working;
-            repo.diff = Some(Rc::new(DiffShown::Commit(commit)));
-            publish_detail(window, &repo);
-        }
+fn diff_working_chosen(window: &AppWindow, live: &Live, working: bool) {
+    let source = REPO.with(|repo| match repo.borrow().diff.as_deref() {
+        Some(DiffShown::Commit(source, _)) => Some(CommitDiff {
+            working,
+            ..source.clone()
+        }),
+        _ => None,
     });
+    if let Some(source) = source {
+        read_commit_diff(window, live, source);
+    }
 }
 
 /// 「Open in Comparison」：今までの左右の比較の画面で開く（閉じるとここへ戻る）。
 fn diff_open_full(window: &AppWindow) {
-    REPO.with(|repo| {
-        let repo = repo.borrow();
-        let (Some(root), Some(diff)) = (&repo.root, &repo.diff) else {
-            return;
-        };
-        match diff.as_ref() {
-            DiffShown::Wip(preview) | DiffShown::Range(preview) => preview.open(window),
-            DiffShown::Commit(commit) => match commit_diff_texts(root, commit) {
-                Ok((left, right, caption)) => {
-                    let name = &commit.change.path;
-                    crate::diff_view::show(
-                        window,
-                        format!("{name}（{caption}）"),
-                        left,
-                        name.clone(),
-                        right,
-                    );
-                }
-                Err(error) => window.tell(error.to_string().into()),
-            },
-        }
-    });
+    let diff = REPO.with(|repo| repo.borrow().diff.clone());
+    if let Some(diff) = diff {
+        diff.cached().preview.open(window);
+    }
 }
 
 pub(crate) fn show_wip_diff(window: &AppWindow, root: &Path, preview: Preview) {
@@ -1683,7 +1719,7 @@ pub(crate) fn show_wip_diff(window: &AppWindow, root: &Path, preview: Preview) {
         repo.root.as_deref() == Some(root) && repo.selected == Some(Selected::Wip)
     });
     if window.get_git_repo_active() && selected {
-        set_diff(window, DiffShown::Wip(preview));
+        set_diff(window, DiffShown::Wip(CachedDiff::new(preview)));
     }
 }
 
@@ -1696,8 +1732,8 @@ fn history(window: &AppWindow, live: &Live, redo: bool) {
 /// 詳細のファイルの右クリック：0 Compare with Previous、1 Compare with Working Copy、2 Open。
 fn file_menu(window: &AppWindow, live: &Live, index: usize, action: i32) {
     match action {
-        0 => show_diff(window, index, false),
-        1 => show_diff(window, index, true),
+        0 => show_diff(window, live, index, false),
+        1 => show_diff(window, live, index, true),
         2 => {
             let target = REPO.with(|repo| {
                 let repo = repo.borrow();
@@ -1742,13 +1778,13 @@ fn branch_here(window: &AppWindow, live: &Live) {
 
 /// 上の帯の「Pop」：いちばん新しい Stash。
 fn pop(window: &AppWindow, live: &Live) {
-    let (Some(root), Some(name)) = (
+    let (Some(root), Some(stash)) = (
         root(),
-        REPO.with(|repo| Some(repo.borrow().data.as_ref()?.stashes.first()?.name.clone())),
+        REPO.with(|repo| repo.borrow().data.as_ref()?.stashes.first().cloned()),
     ) else {
         return;
     };
-    git_ui::act_on(window, live, root, Action::StashApply { name, pop: true });
+    git_ui::act_on(window, live, root, Action::StashApply { stash, pop: true });
 }
 
 /// 行の番号を受ける操作は、組み直しを次の回へ回す（`backup_ui`と同じ、6.18）。
@@ -1775,11 +1811,26 @@ pub fn wire(window: &AppWindow, live: &Live) {
             });
         }};
     }
-    on!(on_git_repo_close, |w, _l| close(w));
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_git_repo_close(move || {
+        let Some(window) = weak.upgrade() else { return };
+        let target = crate::menu_commands::Target::for_shortcut(&window, &held);
+        later(&window, &held, move |w, l| {
+            crate::menu_commands::run(
+                w,
+                l,
+                &target,
+                crate::menu_commands::Command::Navigate(false),
+                "",
+            );
+        });
+    });
     on!(on_git_repo_branch_here, |w, l| branch_here(w, l));
     on!(on_git_repo_pop, |w, l| pop(w, l));
-    on!(on_git_repo_commit_selected, |w, _l, index| select_row(
+    on!(on_git_repo_commit_selected, |w, l, index| select_row(
         w,
+        l,
         index.max(0) as usize
     ));
     on!(on_git_repo_commit_menu, |w, l, index, action| commit_menu(
@@ -1789,8 +1840,9 @@ pub fn wire(window: &AppWindow, live: &Live) {
         action
     ));
     on!(on_git_repo_show_more, |w, l| show_more(w, l));
-    on!(on_git_repo_branch_clicked, |w, _l, index| branch_clicked(
+    on!(on_git_repo_branch_clicked, |w, l, index| branch_clicked(
         w,
+        l,
         index.max(0) as usize
     ));
     on!(
@@ -1800,7 +1852,9 @@ pub fn wire(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
     let held = live.clone();
     window.on_git_repo_capture_branch_menu(move |index| {
-        if let Some(window) = weak.upgrade() && let Ok(index) = usize::try_from(index) {
+        if let Some(window) = weak.upgrade()
+            && let Ok(index) = usize::try_from(index)
+        {
             capture_branch_menu(&window, &held, index);
         }
     });
@@ -1835,8 +1889,8 @@ pub fn wire(window: &AppWindow, live: &Live) {
     on!(on_git_repo_undo, |w, l| history(w, l, false));
     on!(on_git_repo_redo, |w, l| history(w, l, true));
     on!(on_git_repo_diff_back, |w, _l| diff_back(w));
-    on!(on_git_repo_diff_working_chosen, |w, _l, working| {
-        diff_working_chosen(w, working)
+    on!(on_git_repo_diff_working_chosen, |w, l, working| {
+        diff_working_chosen(w, l, working)
     });
     let weak = window.as_weak();
     window.on_git_repo_select_hunk(move |index| {

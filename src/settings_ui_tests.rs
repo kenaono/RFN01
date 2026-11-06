@@ -1922,8 +1922,16 @@ fn current_settings_take_effect_and_retired_keys_do_not() {
 
     assert_eq!(terminal_appearance::default_style(window, 0).size, 19);
     assert_eq!(window.get_speech_speed(), 1.25);
-    assert_eq!(numbers.row_data(Setting::BodySize.row_in_sheet()).unwrap(), 22);
-    assert_eq!(numbers.row_data(SHEET_NUMBERS + Setting::BodySize.row_in_sheet()).unwrap(), BASE_FONT_SIZE);
+    assert_eq!(
+        numbers.row_data(Setting::BodySize.row_in_sheet()).unwrap(),
+        22
+    );
+    assert_eq!(
+        numbers
+            .row_data(SHEET_NUMBERS + Setting::BodySize.row_in_sheet())
+            .unwrap(),
+        BASE_FONT_SIZE
+    );
 }
 
 /// RFN01-66（書き手の判断 2026-11-05）: キーの割り当ては設定ファイルにある。作業の記録には
@@ -1957,7 +1965,10 @@ fn key_bindings_live_in_the_settings_file() {
     let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
     reset_settings(&numbers, &palette, &fonts);
     apply_settings(window, &numbers, &palette, &fonts, &written);
-    assert_eq!(window.get_shortcut_bindings().as_str(), "file.open=Ctrl+Alt+O;v=5");
+    assert_eq!(
+        window.get_shortcut_bindings().as_str(),
+        "file.open=Ctrl+Alt+O;v=5"
+    );
 }
 
 #[test]
@@ -2191,6 +2202,7 @@ fn terminal_profile_ids_survive_loading_and_palette_selection_after_reordering()
         "Ubuntu | wsl.exe -d Ubuntu\t/tmp".into()
     )));
     assert!(saved.contains(&("terminal.profile-id.1".into(), wsl_id.to_string())));
+    assert!(saved.contains(&("terminal.default".into(), format!("id:{wsl_id}"))));
     apply_settings(window, &numbers, &palette, &fonts, &saved);
     assert_eq!(configured_shells(window)[1].id, wsl_id);
 

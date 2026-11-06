@@ -65,6 +65,7 @@ pub const DIVIDER: f32 = 9.0;
 /// bound is applied where the ratio is used, so a window that grows gives the
 /// ratio back rather than keeping whatever the clamp made of it.
 pub const MIN_PANE: f32 = 120.0;
+pub const MAX_PANES: usize = 64;
 
 /// The editing area, divided.
 ///
@@ -261,11 +262,18 @@ impl Layout {
     /// one pane instead.
     pub fn decode(text: &str) -> Option<Self> {
         let mut words = text.split_whitespace();
-        let tree = Layout::decode_from(&mut words)?;
+        let mut remaining = MAX_PANES * 2 - 1;
+        let tree = Layout::decode_from(&mut words, &mut remaining, MAX_PANES)?;
         words.next().is_none().then_some(tree)
     }
 
-    fn decode_from<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<Self> {
+    fn decode_from<'a>(
+        words: &mut impl Iterator<Item = &'a str>,
+        remaining: &mut usize,
+        depth_left: usize,
+    ) -> Option<Self> {
+        let depth_left = depth_left.checked_sub(1)?;
+        *remaining = remaining.checked_sub(1)?;
         match words.next()? {
             "P" => Some(Layout::Pane(words.next()?.parse().ok()?)),
             "S" => {
@@ -275,11 +283,14 @@ impl Layout {
                     _ => return None,
                 };
                 let ratio: f32 = words.next()?.parse().ok()?;
+                if !(0.0..=1.0).contains(&ratio) {
+                    return None;
+                }
                 Some(Layout::Divided {
                     split,
-                    ratio: ratio.clamp(0.0, 1.0),
-                    first: Box::new(Layout::decode_from(words)?),
-                    second: Box::new(Layout::decode_from(words)?),
+                    ratio,
+                    first: Box::new(Layout::decode_from(words, remaining, depth_left)?),
+                    second: Box::new(Layout::decode_from(words, remaining, depth_left)?),
                 })
             }
             _ => None,
@@ -687,6 +698,21 @@ mod tests {
         assert_eq!(Layout::decode("P 0 P 1"), None, "two trees, not one");
         assert_eq!(Layout::decode("S x 0.5 P 0 P 1"), None, "no such axis");
         assert_eq!(Layout::decode("P nine"), None);
+    }
+
+    #[test]
+    fn a_layout_is_bounded_during_decode() {
+        let mut layout = Layout::single(0);
+        for pane in 1..MAX_PANES {
+            assert!(layout.divide(pane - 1, Split::SideBySide, pane));
+        }
+        assert_eq!(Layout::decode(&layout.encode()), Some(layout.clone()));
+        assert!(layout.divide(MAX_PANES - 1, Split::Stacked, MAX_PANES));
+        assert_eq!(Layout::decode(&layout.encode()), None);
+        assert_eq!(Layout::decode(&"S h 0.5 ".repeat(10_000)), None);
+        for ratio in ["NaN", "inf", "-0.1", "1.1"] {
+            assert_eq!(Layout::decode(&format!("S h {ratio} P 0 P 1")), None);
+        }
     }
 
     /// An area too small for two whole panes is halved rather than left with a

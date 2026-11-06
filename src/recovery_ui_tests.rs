@@ -2,6 +2,205 @@ use super::*;
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 
 #[test]
+fn settings_import_requeues_a_dirty_document_and_discards_ordinary_copies_on_disable() {
+    let r = Recovery::new();
+    r.flush();
+    let directory = app_data::work_directory().unwrap();
+    let import_autosave = |wanted: bool| {
+        settings_transfer::import(
+            &r.window,
+            &r.live,
+            settings_transfer::Export {
+                settings: vec![(AUTOSAVE_SETTING.into(), u8::from(wanted).to_string())],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        r.flush();
+    };
+    import_autosave(false);
+    assert!(app_data::read_all_in(&directory).is_empty());
+    import_autosave(true);
+    assert_eq!(
+        saving::restore_tabs(&r.window)[0].0.text.borrow().as_str(),
+        "残す本文"
+    );
+}
+
+#[test]
+fn settings_import_reports_each_persistence_failure_and_retains_the_backup() {
+    let r = Recovery::new();
+    let import = |wanted: bool| {
+        settings_transfer::import(
+            &r.window,
+            &r.live,
+            settings_transfer::Export {
+                settings: vec![(AUTOSAVE_SETTING.into(), u8::from(wanted).to_string())],
+                words: Some(app_data::encode_words(&Default::default())),
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    let settings = r.directory.join("settings.rfnsettings");
+    std::fs::create_dir(&settings).unwrap();
+    assert!(import(false).starts_with("settings:"));
+    assert!(r.window.get_autosave());
+    std::fs::remove_dir(&settings).unwrap();
+
+    let words = app_data::words_path(&r.directory);
+    std::fs::create_dir(&words).unwrap();
+    assert!(import(false).starts_with("word sets:"));
+    assert!(!r.window.get_autosave());
+    assert!(
+        app_data::read_settings(&r.directory)
+            .unwrap()
+            .contains(&(AUTOSAVE_SETTING.into(), "0".into()))
+    );
+    let before = std::fs::read_to_string(settings_transfer::backup_path(&r.directory)).unwrap();
+    assert!(
+        settings_transfer::decode_export(&before)
+            .unwrap()
+            .settings
+            .contains(&(AUTOSAVE_SETTING.into(), "1".into()))
+    );
+    std::fs::remove_dir(words).unwrap();
+
+    std::fs::create_dir(r.directory.join("presets.rfnpresets")).unwrap();
+    assert!(import(true).starts_with("presets:"));
+    assert!(r.window.get_autosave());
+}
+
+#[test]
+fn closing_counts_a_recovery_write_that_has_not_answered_then_retries() {
+    use saving::{WorkCopyFlush, settle_work_copies};
+    let mut r = Recovery::new();
+    let (resume, ready) = std::sync::mpsc::channel();
+    r.live.writer = Rc::new(FileWriter::start_paused(ready));
+    assert_eq!(
+        settle_work_copies(&r.window, &r.live, Duration::ZERO),
+        WorkCopyFlush {
+            failed: 0,
+            pending: 1
+        }
+    );
+    resume.send(()).unwrap();
+    assert_eq!(
+        settle_work_copies(&r.window, &r.live, WORK_COPY_SETTLE),
+        WorkCopyFlush::default()
+    );
+}
+
+#[test]
+fn closing_checks_missing_storage_and_failure_without_a_worker() {
+    use saving::{WorkCopyFlush, settle_work_copies};
+    let r = Recovery::new();
+    r.live.writer.finish();
+    let directory = app_data::work_directory().unwrap();
+    app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
+    assert_eq!(
+        settle_work_copies(&r.window, &r.live, Duration::ZERO),
+        WorkCopyFlush {
+            failed: 1,
+            pending: 0
+        }
+    );
+    app_data::TEST_DIRECTORY.with(|held| *held.borrow_mut() = Some(r.directory.clone()));
+    std::fs::write(&directory, "blocks creation of the work directory").unwrap();
+    assert_eq!(
+        settle_work_copies(&r.window, &r.live, Duration::ZERO),
+        WorkCopyFlush {
+            failed: 1,
+            pending: 0
+        }
+    );
+    assert!(r.memo.text.edited());
+    std::fs::remove_file(directory).unwrap();
+    r.flush();
+}
+
+#[test]
+fn session_and_work_copy_keep_explicit_cp932_after_an_outside_change() {
+    let r = Recovery::new();
+    let path = r.directory.join("ambiguous.txt");
+    // The same two bytes mean different characters in UTF-8 and CP932.
+    let bytes = [0xc2, 0xa5];
+    std::fs::write(&path, bytes).unwrap();
+    let (file, selected) =
+        DocumentFile::open_as(&path, MAX_DOCUMENT_CHARACTERS, file_io::Encoding::Cp932).unwrap();
+    assert_ne!(selected, std::str::from_utf8(&bytes).unwrap());
+    let document = OpenDocument::new(file, selected.clone(), r.window.as_weak());
+    r.add(document.clone());
+    let captured = session::capture_session(&r.window, &r.live);
+    let stored = app_data::decode_session(&app_data::encode_session(&captured)).unwrap();
+    let (tabs, _) = session::open_session(&r.window, Some(stored), Vec::new(), None);
+    let from_session = tabs
+        .panes
+        .iter()
+        .flat_map(|strip| &strip.tabs)
+        .find(|tab| tab.document.file.borrow().is_at(&path))
+        .unwrap();
+    assert_eq!(from_session.document.text.borrow().as_str(), selected);
+    assert_eq!(
+        from_session.document.file.borrow().form().encoding,
+        file_io::Encoding::Cp932
+    );
+
+    append(&document, "追記");
+    r.flush();
+    std::fs::write(&path, "outside bytes").unwrap();
+    let restored = saving::restore_tabs(&r.window);
+    let (recovered, _) = restored
+        .iter()
+        .find(|(document, _)| document.file.borrow().is_at(&path))
+        .unwrap();
+    assert!(recovered.outside.get());
+    assert_eq!(recovered.text.borrow().as_str(), format!("{selected}追記"));
+    assert_eq!(
+        recovered.file.borrow().form().encoding,
+        file_io::Encoding::Cp932
+    );
+}
+
+#[test]
+fn opening_another_spelling_shares_the_buffer_and_retains_the_old_recovery_name_until_save() {
+    let r = Recovery::new();
+    let path = r.directory.join("Alias.md");
+    std::fs::write(&path, "saved").unwrap();
+    let directory = app_data::work_directory().unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    let old = directory.join("file-0123456789abcdef.rfnwork");
+    std::fs::write(
+        &old,
+        app_data::encode(&app_data::WorkCopy {
+            origin: Some(path.clone()),
+            stamp: Some(file_io::FileStamp::read(&path).unwrap()),
+            text: "unsaved version".into(),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let (document, _) = saving::restore_tabs(&r.window).pop().unwrap();
+    r.add(document.clone());
+    let alias = r.directory.join("ALIAS.MD").canonicalize().unwrap();
+    assert!(document.file.borrow().is_at(&alias));
+    open_path_in_pane(&r.window, &r.live, r.id, &alias, Opening::Kept);
+    assert!(Rc::ptr_eq(&r.live.active(&r.window), &document));
+    assert!(old.is_file());
+    assert!(saving::write_document_in(
+        &r.window,
+        &r.live,
+        &document,
+        path.clone(),
+        file_io::TextForm::default()
+    ));
+    r.flush();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "unsaved version");
+    assert!(!old.exists());
+}
+
+#[test]
 fn dropped_files_keep_dirty_text_reuse_tabs_and_report_invalid_paths() {
     let r = Recovery::new();
     append(&r.memo, "未保存の追記");

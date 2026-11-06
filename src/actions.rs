@@ -237,7 +237,7 @@ fn build() -> Vec<ActionDef> {
             ),
             "",
             File,
-            C::NewTerminal(-1),
+            C::NewTerminal(None),
         ),
         def(
             "file.new-terminal-pick",
@@ -1036,7 +1036,9 @@ fn build() -> Vec<ActionDef> {
             ),
             "Ctrl+Shift+G",
             Git,
-            C::PanelAction(crate::panel_actions::Action::Repositories(crate::git_catalog_ui::Action::Enter)),
+            C::PanelAction(crate::panel_actions::Action::Repositories(
+                crate::git_catalog_ui::Action::Enter,
+            )),
         ),
         def(
             "view.sidebar.backups",
@@ -1826,80 +1828,324 @@ fn build() -> Vec<ActionDef> {
         });
     }
     {
-        use crate::panel_actions::Action as A;
         use crate::git_repo_ui::RepoAction as G;
         use crate::git_worktree_ui::Action as W;
-        v.extend([
-        ("outline.collapse-all", ("アウトラインをすべて畳む", "Collapse All Outline Headings"), A::OutlineCollapse),
-        ("outline.expand-all", ("アウトラインをすべて展開", "Expand All Outline Headings"), A::OutlineExpand),
-        ("tags.collapse-all", ("タグをすべて畳む", "Collapse All Tags"), A::TagsCollapse),
-        ("tags.expand-all", ("タグをすべて展開", "Expand All Tags"), A::TagsExpand),
-        ("bookmarks.add-current", ("現在のTABをブックマークに追加", "Bookmark Current Tab"), A::BookmarkAdd),
-        ("bookmarks.create-group", ("ブックマークのグループを作成…", "Create Bookmark Group…"), A::BookmarkGroup),
-        ("workspace.attach-folder", ("Workspaceにフォルダを追加…", "Add Folder to Workspace…"), A::WorkspaceAttach),
-        ("workspace.clone-repository", ("WorkspaceにリポジトリをClone…", "Clone Repository into Workspace…"), A::WorkspaceClone),
-        ("workspace.reset-view", ("Workspaceの表示をリセット…", "Reset Workspace View…"), A::WorkspaceReset),
-        ("workspace.leave", ("Workspaceを閉じる", "Close Workspace"), A::WorkspaceLeave),
-        ("git.fetch", ("Git Fetch", "Git Fetch"), A::GitFetch),
-        ("git.pull", ("Git Pull", "Git Pull"), A::GitPull),
-        ("git.push", ("Git Push／Publish", "Git Push or Publish"), A::GitPush),
-        ("git.sync", ("Git Sync", "Git Sync"), A::GitSync),
-        ("git.cancel", ("実行中のGit操作を中止", "Cancel Git Operation"), A::GitCancel),
-        ("git.commit-changes", ("入力したメッセージでCommit", "Commit with Entered Message"), A::GitCommit),
-        ("git.open-comparison", ("比較画面で開く", "Open in Comparison"), A::GitRepo(G::OpenComparison)),
-        ("git.review-blocks", ("Gitの変更ブロックを確認…", "Review Git Blocks…"), A::GitRepo(G::ReviewBlocks)),
-        ("git.stage-block", ("ブロックをStage", "Stage Block"), A::GitRepo(G::StageBlock)),
-        ("git.unstage-block", ("ブロックをUnstage", "Unstage Block"), A::GitRepo(G::UnstageBlock)),
-        ("git.open-history-search", ("履歴検索", "History Search"), A::GitRepo(G::OpenSearch)),
-        ("git.close-history-search", ("コミットグラフに戻る", "Return to Commit Graph"), A::GitRepo(G::CloseSearch)),
-        ("git.set-compare-base", ("比較元に設定", "Set as Base"), A::GitRepo(G::SetBase)),
-        ("git.compare-with-base", ("比較元との差分", "Compare with Base"), A::GitRepo(G::CompareWithBase)),
-        ("git.worktrees", ("Worktree一覧", "Worktrees"), A::GitWorktree(W::Show)),
-        ("git.worktree-back", ("リポジトリに戻る", "Back to Repository"), A::GitWorktree(W::Back)),
-        ("git.worktree-open", ("選択したWorktreeを開く", "Open Selected Worktree"), A::GitWorktree(W::Open)),
-        ("git.worktree-create", ("Worktreeを作成", "Create Worktree"), A::GitWorktree(W::Create)),
-        ("git.repositories", ("リポジトリ一覧…", "Repositories…"), A::Repositories(crate::git_catalog_ui::Action::Show)),
-        ("git.repositories-refresh", ("一覧を更新", "Refresh Repository List"), A::Repositories(crate::git_catalog_ui::Action::Refresh)),
-        ("git.repository-open", ("選択したリポジトリを開く", "Open Selected Repository"), A::Repositories(crate::git_catalog_ui::Action::Open)),
-        ("git.repository-unregister", ("登録解除…", "Remove Registration…"), A::Repositories(crate::git_catalog_ui::Action::Unregister)),
-        ("git.repositories-close", ("リポジトリ一覧を閉じる", "Close Repository List"), A::Repositories(crate::git_catalog_ui::Action::Close)),
-        ("git.merge-resolution", ("Mergeの解消を開く", "Open Merge Resolution"), A::GitMergeOpen),
-        ("git.merge-edit-result", ("解消結果を編集", "Edit Merge Result"), A::GitMergeEdit),
-        ("git.merge-stage-result", ("解消結果をStage", "Stage Merge Result"), A::GitMergeStage),
-        ("git.merge-stage-deletion", ("削除を採用してStage…", "Accept Deletion and Stage…"), A::GitMergeDelete),
-        ("git.merge-continue", ("Mergeを続行", "Continue Merge"), A::GitMergeContinue),
-        ("git.merge-abort", ("Mergeを中止…", "Abort Merge…"), A::GitMergeAbort),
-        ("git.merge-back", ("リポジトリに戻る", "Back to Repository"), A::GitMergeBack),
-        ("comparison.previous", ("前の差分", "Previous Difference"), A::DiffPrevious),
-        ("comparison.next", ("次の差分", "Next Difference"), A::DiffNext),
-        ("comparison.close", ("比較を終える", "End Comparison"), A::DiffClose),
-        ("comparison.keep-left", ("選んだ差分の左側を残す", "Keep Left Side of Selected Difference"), A::DiffKeepLeft),
-        ("comparison.take-right", ("選んだ差分の右側を取る", "Take Right Side of Selected Difference"), A::DiffTakeRight),
-        ("comparison.apply", ("選んだ差分を本文に反映", "Apply Chosen Differences"), A::DiffApply),
-        ("comparison.copy-left", ("比較の左側を全文コピー", "Copy Left Side of Comparison"), A::DiffCopyLeft),
-        ("comparison.copy-right", ("比較の右側を全文コピー", "Copy Right Side of Comparison"), A::DiffCopyRight),
-        ("backups.toggle-all", ("バックアップ履歴をすべて選択／解除", "Toggle All Backup History Checks"), A::BackupSelectAll),
-        ("backups.delete-checked", ("選択したバックアップを削除…", "Delete Checked Backups…"), A::BackupDelete),
-        ("print-preview.previous", ("印刷プレビューの前のページ", "Previous Print Preview Page"), A::PrintPrevious),
-        ("print-preview.next", ("印刷プレビューの次のページ", "Next Print Preview Page"), A::PrintNext),
-        ("print-preview.close", ("印刷プレビューを閉じる", "Close Print Preview"), A::PrintClose),
-        ("print-preview.print", ("プレビューを印刷…", "Print from Preview…"), A::PrintSubmit),
-        ("settings.export-all", ("すべての設定を書き出す…", "Export All Settings…"), A::SettingsExport),
-        ("settings.import-all", ("すべての設定を取り込む…", "Import All Settings…"), A::SettingsImport),
-        ("settings.reset-all", ("すべての設定を既定に戻す…", "Reset All Settings…"), A::SettingsReset),
-        ].map(|(id, title, action)| {
-            let category = match action {
-                A::WorkspaceClone | A::GitFetch | A::GitPull | A::GitPush | A::GitSync
-                | A::GitCancel | A::GitCommit | A::Repositories(_) => Git,
-                A::GitRepo(_) | A::GitWorktree(_) | A::GitMergeBack => Git,
-                action if action.is_merge_resolution() => Git,
-                _ => Surface,
-            };
-            def(id, title, action.description(), "", category, C::PanelAction(action))
-        }));
+        use crate::panel_actions::Action as A;
+        v.extend(
+            [
+                (
+                    "outline.collapse-all",
+                    ("アウトラインをすべて畳む", "Collapse All Outline Headings"),
+                    A::OutlineCollapse,
+                ),
+                (
+                    "outline.expand-all",
+                    ("アウトラインをすべて展開", "Expand All Outline Headings"),
+                    A::OutlineExpand,
+                ),
+                (
+                    "tags.collapse-all",
+                    ("タグをすべて畳む", "Collapse All Tags"),
+                    A::TagsCollapse,
+                ),
+                (
+                    "tags.expand-all",
+                    ("タグをすべて展開", "Expand All Tags"),
+                    A::TagsExpand,
+                ),
+                (
+                    "bookmarks.add-current",
+                    ("現在のTABをブックマークに追加", "Bookmark Current Tab"),
+                    A::BookmarkAdd,
+                ),
+                (
+                    "bookmarks.create-group",
+                    ("ブックマークのグループを作成…", "Create Bookmark Group…"),
+                    A::BookmarkGroup,
+                ),
+                (
+                    "workspace.attach-folder",
+                    ("Workspaceにフォルダを追加…", "Add Folder to Workspace…"),
+                    A::WorkspaceAttach,
+                ),
+                (
+                    "workspace.clone-repository",
+                    (
+                        "WorkspaceにリポジトリをClone…",
+                        "Clone Repository into Workspace…",
+                    ),
+                    A::WorkspaceClone,
+                ),
+                (
+                    "workspace.reset-view",
+                    ("Workspaceの表示をリセット…", "Reset Workspace View…"),
+                    A::WorkspaceReset,
+                ),
+                (
+                    "workspace.leave",
+                    ("Workspaceを閉じる", "Close Workspace"),
+                    A::WorkspaceLeave,
+                ),
+                ("git.fetch", ("Git Fetch", "Git Fetch"), A::GitFetch),
+                ("git.pull", ("Git Pull", "Git Pull"), A::GitPull),
+                (
+                    "git.push",
+                    ("Git Push／Publish", "Git Push or Publish"),
+                    A::GitPush,
+                ),
+                ("git.sync", ("Git Sync", "Git Sync"), A::GitSync),
+                (
+                    "git.cancel",
+                    ("実行中のGit操作を中止", "Cancel Git Operation"),
+                    A::GitCancel,
+                ),
+                (
+                    "git.commit-changes",
+                    ("入力したメッセージでCommit", "Commit with Entered Message"),
+                    A::GitCommit,
+                ),
+                (
+                    "git.open-comparison",
+                    ("比較画面で開く", "Open in Comparison"),
+                    A::GitRepo(G::OpenComparison),
+                ),
+                (
+                    "git.review-blocks",
+                    ("Gitの変更ブロックを確認…", "Review Git Blocks…"),
+                    A::GitRepo(G::ReviewBlocks),
+                ),
+                (
+                    "git.stage-block",
+                    ("ブロックをStage", "Stage Block"),
+                    A::GitRepo(G::StageBlock),
+                ),
+                (
+                    "git.unstage-block",
+                    ("ブロックをUnstage", "Unstage Block"),
+                    A::GitRepo(G::UnstageBlock),
+                ),
+                (
+                    "git.open-history-search",
+                    ("履歴検索", "History Search"),
+                    A::GitRepo(G::OpenSearch),
+                ),
+                (
+                    "git.close-history-search",
+                    ("コミットグラフに戻る", "Return to Commit Graph"),
+                    A::GitRepo(G::CloseSearch),
+                ),
+                (
+                    "git.set-compare-base",
+                    ("比較元に設定", "Set as Base"),
+                    A::GitRepo(G::SetBase),
+                ),
+                (
+                    "git.compare-with-base",
+                    ("比較元との差分", "Compare with Base"),
+                    A::GitRepo(G::CompareWithBase),
+                ),
+                (
+                    "git.worktrees",
+                    ("Worktree一覧", "Worktrees"),
+                    A::GitWorktree(W::Show),
+                ),
+                (
+                    "git.worktree-back",
+                    ("リポジトリに戻る", "Back to Repository"),
+                    A::GitWorktree(W::Back),
+                ),
+                (
+                    "git.worktree-open",
+                    ("選択したWorktreeを開く", "Open Selected Worktree"),
+                    A::GitWorktree(W::Open),
+                ),
+                (
+                    "git.worktree-create",
+                    ("Worktreeを作成", "Create Worktree"),
+                    A::GitWorktree(W::Create),
+                ),
+                (
+                    "git.repositories",
+                    ("リポジトリ一覧…", "Repositories…"),
+                    A::Repositories(crate::git_catalog_ui::Action::Show),
+                ),
+                (
+                    "git.repositories-refresh",
+                    ("一覧を更新", "Refresh Repository List"),
+                    A::Repositories(crate::git_catalog_ui::Action::Refresh),
+                ),
+                (
+                    "git.repository-open",
+                    ("選択したリポジトリを開く", "Open Selected Repository"),
+                    A::Repositories(crate::git_catalog_ui::Action::Open),
+                ),
+                (
+                    "git.repository-unregister",
+                    ("登録解除…", "Remove Registration…"),
+                    A::Repositories(crate::git_catalog_ui::Action::Unregister),
+                ),
+                (
+                    "git.repositories-close",
+                    ("リポジトリ一覧を閉じる", "Close Repository List"),
+                    A::Repositories(crate::git_catalog_ui::Action::Close),
+                ),
+                (
+                    "git.merge-resolution",
+                    ("Mergeの解消を開く", "Open Merge Resolution"),
+                    A::GitMergeOpen,
+                ),
+                (
+                    "git.merge-edit-result",
+                    ("解消結果を編集", "Edit Merge Result"),
+                    A::GitMergeEdit,
+                ),
+                (
+                    "git.merge-stage-result",
+                    ("解消結果をStage", "Stage Merge Result"),
+                    A::GitMergeStage,
+                ),
+                (
+                    "git.merge-stage-deletion",
+                    ("削除を採用してStage…", "Accept Deletion and Stage…"),
+                    A::GitMergeDelete,
+                ),
+                (
+                    "git.merge-continue",
+                    ("Mergeを続行", "Continue Merge"),
+                    A::GitMergeContinue,
+                ),
+                (
+                    "git.merge-abort",
+                    ("Mergeを中止…", "Abort Merge…"),
+                    A::GitMergeAbort,
+                ),
+                (
+                    "git.merge-back",
+                    ("リポジトリに戻る", "Back to Repository"),
+                    A::GitMergeBack,
+                ),
+                (
+                    "comparison.previous",
+                    ("前の差分", "Previous Difference"),
+                    A::DiffPrevious,
+                ),
+                (
+                    "comparison.next",
+                    ("次の差分", "Next Difference"),
+                    A::DiffNext,
+                ),
+                (
+                    "comparison.close",
+                    ("比較を終える", "End Comparison"),
+                    A::DiffClose,
+                ),
+                (
+                    "comparison.keep-left",
+                    (
+                        "選んだ差分の左側を残す",
+                        "Keep Left Side of Selected Difference",
+                    ),
+                    A::DiffKeepLeft,
+                ),
+                (
+                    "comparison.take-right",
+                    (
+                        "選んだ差分の右側を取る",
+                        "Take Right Side of Selected Difference",
+                    ),
+                    A::DiffTakeRight,
+                ),
+                (
+                    "comparison.apply",
+                    ("選んだ差分を本文に反映", "Apply Chosen Differences"),
+                    A::DiffApply,
+                ),
+                (
+                    "comparison.copy-left",
+                    ("比較の左側を全文コピー", "Copy Left Side of Comparison"),
+                    A::DiffCopyLeft,
+                ),
+                (
+                    "comparison.copy-right",
+                    ("比較の右側を全文コピー", "Copy Right Side of Comparison"),
+                    A::DiffCopyRight,
+                ),
+                (
+                    "backups.toggle-all",
+                    (
+                        "バックアップ履歴をすべて選択／解除",
+                        "Toggle All Backup History Checks",
+                    ),
+                    A::BackupSelectAll,
+                ),
+                (
+                    "backups.delete-checked",
+                    ("選択したバックアップを削除…", "Delete Checked Backups…"),
+                    A::BackupDelete,
+                ),
+                (
+                    "print-preview.previous",
+                    ("印刷プレビューの前のページ", "Previous Print Preview Page"),
+                    A::PrintPrevious,
+                ),
+                (
+                    "print-preview.next",
+                    ("印刷プレビューの次のページ", "Next Print Preview Page"),
+                    A::PrintNext,
+                ),
+                (
+                    "print-preview.close",
+                    ("印刷プレビューを閉じる", "Close Print Preview"),
+                    A::PrintClose,
+                ),
+                (
+                    "print-preview.print",
+                    ("プレビューを印刷…", "Print from Preview…"),
+                    A::PrintSubmit,
+                ),
+                (
+                    "settings.export-all",
+                    ("すべての設定を書き出す…", "Export All Settings…"),
+                    A::SettingsExport,
+                ),
+                (
+                    "settings.import-all",
+                    ("すべての設定を取り込む…", "Import All Settings…"),
+                    A::SettingsImport,
+                ),
+                (
+                    "settings.reset-all",
+                    ("すべての設定を既定に戻す…", "Reset All Settings…"),
+                    A::SettingsReset,
+                ),
+            ]
+            .map(|(id, title, action)| {
+                let category = match action {
+                    A::WorkspaceClone
+                    | A::GitFetch
+                    | A::GitPull
+                    | A::GitPush
+                    | A::GitSync
+                    | A::GitCancel
+                    | A::GitCommit
+                    | A::Repositories(_) => Git,
+                    A::GitRepo(_) | A::GitWorktree(_) | A::GitMergeBack => Git,
+                    action if action.is_merge_resolution() => Git,
+                    _ => Surface,
+                };
+                def(
+                    id,
+                    title,
+                    action.description(),
+                    "",
+                    category,
+                    C::PanelAction(action),
+                )
+            }),
+        );
     }
-    use crate::tree_actions::Action as A;
     use crate::TreeCommand as T;
+    use crate::tree_actions::Action as A;
     v.extend([
         ("tree.new-file", ("フォルダに新規ファイル…", "New File in Folder…"), ("選んだフォルダ内、または選んだファイルと同じフォルダにファイルを作成します。", "Creates a file inside the selected folder or alongside the selected file."), "", A::Entry(T::NewFile)),
         ("tree.new-folder", ("サブフォルダを作成…", "Create Subfolder…"), ("選んだフォルダ内、または選んだファイルと同じフォルダにサブフォルダを作成します。", "Creates a subfolder inside the selected folder or alongside the selected file."), "", A::Entry(T::NewFolder)),

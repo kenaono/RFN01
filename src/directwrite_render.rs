@@ -4367,7 +4367,11 @@ fn apply_typography(
 ) -> Result<()> {
     let spacing = typography.character_spacing;
     let has_spacing = spacing.abs() > f32::EPSILON;
-    if !has_spacing && runs.is_empty() && typography.decorations[0] & 7 == 0 && !typography.underline {
+    if !has_spacing
+        && runs.is_empty()
+        && typography.decorations[0] & 7 == 0
+        && !typography.underline
+    {
         return Ok(());
     }
     let layout1 = if has_spacing {
