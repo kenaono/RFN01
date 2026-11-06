@@ -690,6 +690,73 @@ fn comparison_pins_branch_tips_and_reads_the_two_committed_versions() {
     assert_eq!(fs::read_to_string(root.join(new)).unwrap(), "uncommitted\n");
 }
 
+#[test]
+fn worktree_creation_and_opening_share_actions_and_isolate_unsaved_documents() {
+    let parent = scratch_directory("repo-worktree-actions");
+    let root = parent.join("source");
+    fs::create_dir_all(&root).unwrap();
+    if repository(&root).is_none() {
+        return;
+    }
+    let (harness, document) = Harness::new(|weak| open_under(&root, "note.md", "base\n", weak));
+    git::commit(&root, "base", true, false).unwrap();
+    let head = git::head_sha(&root).unwrap();
+    let (window, live) = (&harness.window, &harness.live);
+    attach_workspace(live, &root, SaveMode::Recovery);
+    window.set_workspace_active(true);
+    git_ui::wire(window, live);
+    wire(window, live);
+    crate::panel_actions::wire(window, live);
+    open(window, live);
+    settle(window, live);
+    let action = |id: &str| {
+        window.invoke_surface_action(id.into());
+        slint::platform::update_timers_and_animations();
+        settle(window, live);
+    };
+    action("git.worktrees");
+    window.set_git_worktree_parent(parent.to_string_lossy().as_ref().into());
+    window.set_git_worktree_folder("Linked notes".into());
+    window.set_git_worktree_branch("draft".into());
+    action("git.worktree-create");
+    assert_eq!(window.get_git_worktree_rows().row_count(), 2);
+    assert_eq!(git_ui::workspace_folders(live).len(), 1);
+
+    crate::saving::edit(&document, "unsaved in source\n");
+    window.set_git_message("draft message for source".into());
+    window.set_git_worktree_selected(1);
+    action("git.worktree-open");
+    assert_eq!(git_ui::workspace_folders(live).len(), 1);
+    let Question::GitOpenWorktree(request) = take_question(live) else {
+        panic!("expected the registration confirmation");
+    };
+    window.set_question_open(false);
+    crate::git_worktree_ui::open_worktree(window, live, request);
+    settle(window, live);
+    let linked = parent.join("Linked notes");
+    assert!(git_ui::active_root().is_some_and(|root| git_ui::same_path(&root, &linked)));
+    assert_eq!(git_ui::workspace_folders(live).len(), 2);
+    assert!(document.text.edited());
+    assert!(window.get_git_message().is_empty());
+
+    fs::write(linked.join("note.md"), "linked edit\n").unwrap();
+    git_ui::refresh_soon(window, live);
+    settle(window, live);
+    window.set_git_message("commit in linked worktree".into());
+    action("git.commit-changes");
+    assert!(live.pending.borrow().is_none());
+    assert_eq!(git::last_message(&linked).unwrap(), "commit in linked worktree");
+    assert_eq!(git::head_sha(&root).unwrap(), head);
+    assert!(document.text.edited());
+
+    action("git.worktrees");
+    window.set_git_worktree_selected(0);
+    action("git.worktree-open");
+    assert!(git_ui::active_root().is_some_and(|active| git_ui::same_path(&active, &root)));
+    assert_eq!(window.get_git_message(), "draft message for source");
+    assert!(live.pending.borrow().is_none());
+}
+
 /// PR 2b：Undo／Redo。ドラッグで Merge したものを戻し、やり直す。外で動かしたら使えない。
 #[test]
 fn a_merge_is_undone_and_redone_from_the_toolbar() {

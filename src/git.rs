@@ -662,6 +662,8 @@ pub fn fetch(root: &Path, cancel: &Cancel) -> Result<(), GitError> {
 
 mod merge_resolution;
 pub(crate) use merge_resolution::*;
+mod worktrees;
+pub(crate) use worktrees::*;
 
 /// Pull（取り込みはMerge）。衝突時は解消のためにGitの状態を残す。
 pub fn pull(root: &Path, cancel: &Cancel) -> Result<(), GitError> {

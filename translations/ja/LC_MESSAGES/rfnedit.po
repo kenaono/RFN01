@@ -1699,3 +1699,30 @@ msgstr "Mergeを中止…"
 
 msgid "All conflicts are staged. Continue Merge to create the merge commit."
 msgstr "すべての衝突が解消されています。Mergeを続行するとマージコミットを作成します。"
+
+msgid "Worktrees"
+msgstr "Worktree一覧"
+
+msgid "Current Worktree"
+msgstr "現在のWorktree"
+
+msgid "New Worktree"
+msgstr "新しいWorktree"
+
+msgid "Create a new branch from the current commit."
+msgstr "現在のコミットから新しいブランチを作成します。"
+
+msgid "A commit is required to create a worktree."
+msgstr "Worktreeを作成するにはコミットが必要です。"
+
+msgid "Select the parent folder"
+msgstr "作成先の親フォルダを選択"
+
+msgid "New folder name"
+msgstr "新しいフォルダ名"
+
+msgid "New branch name"
+msgstr "新しいブランチ名"
+
+msgid "To add a worktree to this Workspace, select it in the list and open it."
+msgstr "このWorkspaceに追加するには、一覧でWorktreeを選んで開きます。"

@@ -618,6 +618,14 @@ export component GitRepositoryView inherits Rectangle {
                         clicked => { root.action(root.search-action); }
                     }
                 }
+                VerticalLayout {
+                    alignment: center;
+                    TextButton {
+                        title: root.action-title("git.worktrees");
+                        enabled: root.allowed("git.worktrees", false);
+                        clicked => { root.action("git.worktrees"); }
+                    }
+                }
                 Text {
                     text: "Esc";
                     color: Tok.ink-faint;

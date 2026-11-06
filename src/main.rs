@@ -59,6 +59,7 @@ mod git_hunks;
 mod git_merge_ui;
 mod git_repo_ui;
 mod git_ui;
+mod git_worktree_ui;
 mod git_version;
 mod i18n;
 #[cfg(test)]
@@ -13974,6 +13975,7 @@ enum Question {
     GitNewBranch(PathBuf, Option<String>),
     /// RFN01-67: 知らせるだけ（Gitが断った文）。答えで何もしない。
     GitNotice,
+    GitOpenWorktree(git_worktree_ui::OpenWorktree),
     /// RFN01-70: 数えた置換を、本当に行うか。
     FolderReplace(folder_replace::Plan),
 }
@@ -14027,6 +14029,7 @@ impl Question {
             Self::GitConfirm(..) => "GitConfirm",
             Self::GitNewBranch(..) => "GitNewBranch",
             Self::GitNotice => "GitNotice",
+            Self::GitOpenWorktree(..) => "GitOpenWorktree",
             Self::FolderReplace(..) => "FolderReplace",
         }
     }
@@ -14597,6 +14600,7 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             git_ui::unsaved_answered(window, live, pending, choice)
         }
         (Question::GitConfirm(pending), 0) => git_ui::confirmed(window, live, pending),
+        (Question::GitOpenWorktree(request), 0) => git_worktree_ui::open_worktree(window, live, request),
         (Question::GitNewBranch(root, at), 0) => {
             let name = window.get_question_name().trim().to_owned();
             git_ui::branch_named(window, live, root, name, at);

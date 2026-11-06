@@ -545,6 +545,39 @@ fn reset_moves_the_branch_and_knows_what_was_pushed() {
 }
 
 #[test]
+fn linked_worktrees_share_commits_but_keep_their_own_indexes_and_heads() {
+    let scratch = Scratch::new("linked-worktrees");
+    let root = scratch.0.join("source");
+    std::fs::create_dir(&root).unwrap();
+    if repository(&root).is_none() {
+        return;
+    }
+    write(&root, "note.md", "base\n");
+    commit(&root, "base", true, false).unwrap();
+    let head = head_sha(&root).unwrap();
+    let folder = "別 の作業先";
+    let linked = scratch.0.join(folder);
+    assert!(add_worktree(&root, &root, "nested", "nested", &head).is_err());
+    assert!(add_worktree(&root, &scratch.0, folder, "draft", "wrong head").is_err());
+    add_worktree(&root, &scratch.0, folder, "draft", &head).unwrap();
+    let trees = worktrees(&root).unwrap();
+    assert_eq!(trees.len(), 2);
+    assert_eq!(trees[1].branch.as_deref(), Some("draft"));
+    assert_eq!(check_worktree(&root, &linked).unwrap(), linked.canonicalize().unwrap());
+    assert!(add_worktree(&root, &scratch.0, folder, "another", &head).is_err());
+
+    write(&root, "note.md", "main edits\n");
+    write(&linked, "note.md", "draft edits\n");
+    stage(&linked, &["note.md".into()]).unwrap();
+    assert!(status(&root).unwrap().staged.is_empty());
+    assert_eq!(status(&linked).unwrap().staged.len(), 1);
+    commit(&linked, "draft only", false, false).unwrap();
+    assert_eq!(head_sha(&root).as_deref(), Some(head.as_str()));
+    assert_ne!(head_sha(&linked).as_deref(), Some(head.as_str()));
+    assert_eq!(read(&root, "note.md"), "main edits\n");
+}
+
+#[test]
 fn branches_are_made_at_a_commit_deleted_and_checked_out_from_a_remote() {
     let scratch = Scratch::new("branch-ops");
     let remote = scratch.0.join("remote.git");

@@ -70,6 +70,7 @@ struct Data {
     status: Status,
     incoming: HashSet<String>,
     outgoing: HashSet<String>,
+    worktrees: Result<Vec<git::Worktree>, GitError>,
     stashes: Vec<Stash>,
 }
 
@@ -345,6 +346,7 @@ pub fn open(window: &AppWindow, live: &Live) {
         repo.search = None;
     });
     window.set_git_repo_search_open(false);
+    window.set_git_worktrees_open(false);
     window.set_git_repo_inspection_note("".into());
     window.set_git_repo_compare_base("".into());
     publish_search(window, None);
@@ -372,6 +374,7 @@ pub fn close(window: &AppWindow) {
     REPO.with(|repo| repo.borrow_mut().lookup = None);
     window.set_git_repo_active(false);
     window.set_git_merge_open(false);
+    window.set_git_worktrees_open(false);
     crate::restore_editor_focus(window);
 }
 
@@ -436,6 +439,7 @@ fn read(root: &Path, count: usize) -> Result<Data, GitError> {
         stashes: git::stashes(root)?,
         incoming: incoming.into_iter().collect(),
         outgoing: outgoing.into_iter().collect(),
+        worktrees: git::worktrees(root),
         status,
     })
 }
@@ -710,6 +714,7 @@ fn render(window: &AppWindow) {
         };
         window.set_git_repo_note(note.into());
         let Some(data) = repo.data.as_ref() else {
+            crate::git_worktree_ui::publish(window, repo.root.as_deref(), None, None);
             window.set_git_repo_commits(ModelRc::default());
             window.set_git_repo_branches(ModelRc::default());
             window.set_git_repo_more(false);
@@ -718,6 +723,7 @@ fn render(window: &AppWindow) {
             repo.side.clear();
             return;
         };
+        crate::git_worktree_ui::publish(window, repo.root.as_deref(), data.head.as_deref(), Some(&data.worktrees));
         let (rows, shas) = commit_rows(data);
         let selected = repo
             .selected
@@ -1753,6 +1759,7 @@ fn later(window: &AppWindow, live: &Live, body: impl FnOnce(&AppWindow, &Live) +
 
 pub fn wire(window: &AppWindow, live: &Live) {
     crate::git_merge_ui::wire(window);
+    crate::git_worktree_ui::wire(window);
     macro_rules! on {
         ($setter:ident, |$window:ident, $live:ident $(, $arg:ident)*| $body:expr) => {{
             let weak = window.as_weak();

@@ -20,6 +20,7 @@ pub(crate) enum Action {
     GitCancel,
     GitCommit,
     GitRepo(git_repo_ui::RepoAction),
+    GitWorktree(git_worktree_ui::Action),
     GitMergeOpen,
     GitMergeEdit,
     GitMergeStage,
@@ -47,7 +48,7 @@ pub(crate) enum Action {
 
 impl Action {
     pub(crate) fn available_in_git_overlay(self) -> bool {
-        matches!(self, Self::GitRepo(_)) || self.is_merge_resolution()
+        matches!(self, Self::GitRepo(_) | Self::GitWorktree(_)) || self.is_merge_resolution()
     }
 
     pub(crate) fn is_merge_resolution(self) -> bool {
@@ -84,6 +85,10 @@ impl Action {
             GitRepo(CloseSearch) => ("履歴検索からコミットグラフに戻ります。", "Return from history search to the commit graph."),
             GitRepo(SetBase) => ("対象のコミットを二点比較の比較元にします。", "Use the target commit as the comparison base."),
             GitRepo(CompareWithBase) => ("比較元と対象のコミットの差分を表示します。", "Compare the base with the target commit."),
+            GitWorktree(git_worktree_ui::Action::Show) => ("同じリポジトリの作業先を一覧します。", "List the worktrees for this repository."),
+            GitWorktree(git_worktree_ui::Action::Back) => ("Worktreeの一覧からGit Repositoryへ戻ります。", "Return from the worktree list to Git Repository."),
+            GitWorktree(git_worktree_ui::Action::Open) => ("選択した作業先に切り替えます。未登録なら追加を確認します。", "Switch to the selected worktree. Confirm before adding it to the workspace."),
+            GitWorktree(git_worktree_ui::Action::Create) => ("指定したフォルダに新しいブランチのWorktreeを作成します。", "Create a worktree on a new branch in the specified folder."),
             GitMergeOpen => ("進行中のMergeと未解決のファイルを表示します。", "Inspect the in-progress merge and unresolved files."),
             GitMergeEdit => ("選択したファイルの作業版を文書タブで開きます。", "Open the selected working file in an editor tab."),
             GitMergeStage => ("選択したファイルの保存済みの解消結果をStageします。", "Stage the saved resolution for the selected file."),
@@ -126,6 +131,7 @@ pub(crate) struct Context {
     backup_rows: ModelRc<BackupRow>,
     merge: Option<(PathBuf, git::MergeState, Option<git::MergeConflict>)>,
     repo_view: Option<git_repo_ui::ActionTarget>,
+    worktree: Option<git_worktree_ui::Target>,
 }
 
 impl Context {
@@ -149,6 +155,7 @@ impl Context {
             backup_rows: window.get_backup_history_rows(),
             merge: git_merge_ui::target(),
             repo_view: git_repo_ui::ActionTarget::capture(window),
+            worktree: git_worktree_ui::Target::capture(window),
         }
     }
 
@@ -174,6 +181,9 @@ impl Context {
             }
             GitRepo(action) => self.workspace == current.workspace
                 && self.repo_view.as_ref().zip(current.repo_view.as_ref())
+                    .is_some_and(|(target, current)| target.valid(current, action)),
+            GitWorktree(action) => self.workspace == current.workspace
+                && self.worktree.as_ref().zip(current.worktree.as_ref())
                     .is_some_and(|(target, current)| target.valid(current, action)),
             action if action.is_merge_resolution() => {
                 self.workspace == current.workspace && self.merge == current.merge
@@ -239,10 +249,14 @@ pub(crate) fn enabled(window: &AppWindow, context: Option<&Context>, action: Act
                     || window.get_git_staged_count() > 0
                     || window.get_git_change_count() > 0)
         }
-        GitRepo(action) => repository && !window.get_git_merge_open()
+        GitRepo(action) => repository && !window.get_git_merge_open() && !window.get_git_worktrees_open()
             && context.and_then(|context| context.repo_view.as_ref())
                 .is_some_and(|target| target.enabled(window, action)),
-        GitMergeOpen => git && merge_target && !window.get_git_merge_open() && !window.get_git_busy(),
+        GitWorktree(action) => repository && !window.get_git_merge_open()
+            && context.and_then(|context| context.worktree.as_ref())
+                .is_some_and(|target| target.enabled(window, action)),
+        GitMergeOpen => git && merge_target && !window.get_git_merge_open()
+            && !window.get_git_worktrees_open() && !window.get_git_busy(),
         GitMergeEdit => resolver && window.get_git_merge_selected() >= 0 && window.get_git_merge_can_edit(),
         GitMergeStage => resolver && window.get_git_merge_selected() >= 0,
         GitMergeDelete => resolver && window.get_git_merge_selected() >= 0 && window.get_git_merge_can_delete(),
@@ -307,6 +321,11 @@ pub(crate) fn execute(window: &AppWindow, live: &Live, context: Option<&Context>
         Action::GitCommit => git_ui::commit(window, live),
         Action::GitRepo(action) => {
             if let Some(target) = context.and_then(|context| context.repo_view.as_ref()) {
+                target.execute(window, live, action);
+            }
+        }
+        Action::GitWorktree(action) => {
+            if let Some(target) = context.and_then(|context| context.worktree.as_ref()) {
                 target.execute(window, live, action);
             }
         }

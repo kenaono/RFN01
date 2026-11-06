@@ -107,6 +107,7 @@ mod tests {
             include_str!("../ui/git-view.slint"),
             include_str!("../ui/git-repository.slint"),
             include_str!("../ui/git-merge.slint"),
+            include_str!("../ui/git-worktrees.slint"),
         ];
         let mut used = HashSet::new();
         for source in sources {

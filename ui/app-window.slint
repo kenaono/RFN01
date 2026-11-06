@@ -22,6 +22,7 @@ import { DiffView, DiffRow } from "diff-window.slint";
 import { BackupHistoryList, BackupPaneRow, BackupRow, BackupsView } from "backup-view.slint";
 import { GitChangesView, GitRow } from "git-view.slint";
 import { GitMergeView } from "git-merge.slint";
+import { GitWorktreeRow, GitWorktreesView } from "git-worktrees.slint";
 import { GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitHunkLine, GitHunkRow, GitLine, GitRef, GitRepositoryView, GitSearchRow } from "git-repository.slint";
 import { PrintView } from "print-window.slint";
 export { DiffRow } from "diff-window.slint";
@@ -1331,6 +1332,15 @@ export component AppWindow inherits Window {
     callback git-merge-file(int);
     callback git-merge-version-chosen(int);
     callback git-merge-back();
+    in property <bool> git-worktrees-open;
+    in property <[GitWorktreeRow]> git-worktree-rows;
+    in-out property <int> git-worktree-selected: -1;
+    in property <bool> git-worktree-has-head;
+    in property <string> git-worktree-note;
+    in-out property <string> git-worktree-parent;
+    in-out property <string> git-worktree-folder;
+    in-out property <string> git-worktree-branch;
+    callback git-worktree-browse();
     /// 左ペインの Backups の行（`backup_ui::publish_pane`）。
     in property <[BackupPaneRow]> backup-pane-rows;
     callback backup-pane-clicked(int);
@@ -1823,7 +1833,7 @@ export component AppWindow inherits Window {
     // 並びきらない分は末尾の「⋯」にまとめる（`FormatButtons`）。
     if root.format-toolbar-open: Rectangle {
         y: root.title-height;
-        visible: !root.git-merge-open;
+        visible: !root.git-merge-open && !root.git-worktrees-open;
         width: root.width;
         height: 34px;
         background: Tok.chrome;
@@ -1849,7 +1859,7 @@ export component AppWindow inherits Window {
     }
     VerticalBox {
         y: root.chrome-height;
-        visible: !root.git-merge-open;
+        visible: !root.git-merge-open && !root.git-worktrees-open;
         height: root.height - root.chrome-height;
         spacing: 0px;
 
@@ -7025,7 +7035,24 @@ export component AppWindow inherits Window {
             action-title(id) => { return root.git-action-title(id); }
             shortcut(text, control, alt, shift) => { return root.shortcut-key(text, control, alt, shift); }
         }
-        if !root.git-merge-open: GitRepositoryView {
+        if root.git-worktrees-open && !root.git-merge-open: GitWorktreesView {
+            repository: root.git-repo-name;
+            rows: root.git-worktree-rows;
+            note: root.git-worktree-note;
+            busy-text: root.git-busy-text;
+            has-head: root.git-worktree-has-head;
+            focus-generation: root.git-repo-focus-generation;
+            selected <=> root.git-worktree-selected;
+            parent-folder <=> root.git-worktree-parent;
+            folder-name <=> root.git-worktree-folder;
+            branch-name <=> root.git-worktree-branch;
+            browse => { root.git-worktree-browse(); }
+            action(id) => { root.surface-action(id); }
+            allowed(id) => { return root.git-action-allowed(id, false, root.git-repo-action-generation); }
+            action-title(id) => { return root.git-action-title(id); }
+            shortcut(text, control, alt, shift) => { return root.shortcut-key(text, control, alt, shift); }
+        }
+        if !root.git-merge-open && !root.git-worktrees-open: GitRepositoryView {
             repo-name: root.git-repo-name;
             merging: root.git-merge-active;
             action(id) => { root.surface-action(id); }

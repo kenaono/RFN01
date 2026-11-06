@@ -121,6 +121,7 @@ struct Pane {
     generation: u64,
     /// Amend をチェックする前のメッセージ（外したら戻す）。
     kept_message: Option<String>,
+    drafts: std::collections::HashMap<String, (SharedString, bool, Option<String>)>,
 }
 
 thread_local! {
@@ -263,6 +264,18 @@ fn key(path: &Path) -> String {
 fn inside(path: &Path, folder: &Path) -> bool {
     let (path, folder) = (key(path), key(folder));
     path == folder || path.starts_with(&(folder + "\\"))
+}
+
+pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
+    key(left) == key(right)
+}
+
+/// A nested linked worktree has a .git file, and owns its own open documents.
+fn inside_worktree(path: &Path, root: &Path) -> bool {
+    inside(path, root)
+        && !path.ancestors().skip(1)
+            .take_while(|parent| !same_path(parent, root))
+            .any(|parent| parent.join(".git").exists())
 }
 
 /// 使用中の Workspace の登録フォルダ。
@@ -630,7 +643,7 @@ fn reload_documents(window: &AppWindow, live: &Live, job: &Job) {
     }
     let in_scope = |path: &Path| match &job.reload {
         Reload::None => false,
-        Reload::Repository => inside(path, &job.root),
+        Reload::Repository => inside_worktree(path, &job.root),
         Reload::Files(files) => files.iter().any(|file| key(file) == key(path)),
     };
     for document in crate::open_documents(live) {
@@ -1129,7 +1142,7 @@ fn edited_in_scope(live: &Live, pending: &Pending) -> Vec<Rc<OpenDocument>> {
                 return false;
             };
             if files.is_empty() {
-                inside(path, &pending.root)
+                inside_worktree(path, &pending.root)
             } else {
                 files.iter().any(|f| key(f) == key(path))
             }
@@ -1789,14 +1802,25 @@ fn status_now() -> Option<Status> {
 }
 
 fn repo_chosen(window: &AppWindow, live: &Live, index: usize) {
+    if let Some(folder) = PANE.with(|pane| pane.borrow().folders.get(index).cloned()) {
+        choose_folder(window, live, folder);
+    }
+}
+
+fn choose_folder(window: &AppWindow, live: &Live, folder: PathBuf) {
     let changed = PANE.with(|pane| {
         let mut pane = pane.borrow_mut();
-        let Some(folder) = pane.folders.get(index).cloned() else {
-            return false;
-        };
         if pane.chosen.as_ref().is_some_and(|c| key(c) == key(&folder)) {
             return false;
         }
+        if let Some(current) = pane.chosen.as_ref().map(|path| key(path)) {
+            let kept = pane.kept_message.take();
+            pane.drafts.insert(current, (window.get_git_message(), window.get_git_amend(), kept));
+        }
+        let (message, amend, kept) = pane.drafts.remove(&key(&folder)).unwrap_or_default();
+        window.set_git_message(message);
+        window.set_git_amend(amend);
+        pane.kept_message = kept;
         pane.chosen = Some(folder);
         pane.snapshot = None;
         pane.error = None;
@@ -1804,10 +1828,39 @@ fn repo_chosen(window: &AppWindow, live: &Live, index: usize) {
         true
     });
     if changed {
-        window.set_git_amend(false);
         render(window);
         refresh(window, live);
     }
+}
+
+pub(crate) fn select_worktree(window: &AppWindow, live: &Live, root: &Path) {
+    let folders = workspace_folders(live);
+    let Some(folder) = folders.iter().find(|folder| same_path(folder, root)).cloned() else {
+        return;
+    };
+    PANE.with(|pane| pane.borrow_mut().folders = folders);
+    choose_folder(window, live, folder);
+    crate::git_repo_ui::open(window, live);
+}
+
+pub(crate) fn create_worktree(
+    window: &AppWindow,
+    live: &Live,
+    root: PathBuf,
+    parent: PathBuf,
+    folder: String,
+    branch: String,
+    head: String,
+) {
+    start(
+        window, live, root,
+        pick("Worktreeを作成しています…", "Creating worktree…"),
+        false, Reload::None, Vec::new(), After::Nothing, "worktree-add",
+        move |root, _| {
+            git::add_worktree(root, &parent, &folder, &branch, &head)?;
+            Ok(pick("Worktreeを作成しました", "Created worktree").to_owned())
+        },
+    );
 }
 
 fn create_repository(window: &AppWindow, live: &Live) {

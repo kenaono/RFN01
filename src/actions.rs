@@ -1831,6 +1831,7 @@ fn build() -> Vec<ActionDef> {
     {
         use crate::panel_actions::Action as A;
         use crate::git_repo_ui::RepoAction as G;
+        use crate::git_worktree_ui::Action as W;
         v.extend([
         ("outline.collapse-all", ("アウトラインをすべて畳む", "Collapse All Outline Headings"), A::OutlineCollapse),
         ("outline.expand-all", ("アウトラインをすべて展開", "Expand All Outline Headings"), A::OutlineExpand),
@@ -1856,6 +1857,10 @@ fn build() -> Vec<ActionDef> {
         ("git.close-history-search", ("コミットグラフに戻る", "Return to Commit Graph"), A::GitRepo(G::CloseSearch)),
         ("git.set-compare-base", ("比較元に設定", "Set as Base"), A::GitRepo(G::SetBase)),
         ("git.compare-with-base", ("比較元との差分", "Compare with Base"), A::GitRepo(G::CompareWithBase)),
+        ("git.worktrees", ("Worktree一覧", "Worktrees"), A::GitWorktree(W::Show)),
+        ("git.worktree-back", ("リポジトリに戻る", "Back to Repository"), A::GitWorktree(W::Back)),
+        ("git.worktree-open", ("選択したWorktreeを開く", "Open Selected Worktree"), A::GitWorktree(W::Open)),
+        ("git.worktree-create", ("Worktreeを作成", "Create Worktree"), A::GitWorktree(W::Create)),
         ("git.merge-resolution", ("Mergeの解消を開く", "Open Merge Resolution"), A::GitMergeOpen),
         ("git.merge-edit-result", ("解消結果を編集", "Edit Merge Result"), A::GitMergeEdit),
         ("git.merge-stage-result", ("解消結果をStage", "Stage Merge Result"), A::GitMergeStage),
