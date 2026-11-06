@@ -134,6 +134,7 @@ export component GitRepositoryView inherits Rectangle {
     in property <int> detail-mode;
     in property <string> diff-name;
     in property <string> diff-caption;
+    in property <string> diff-note;
     in property <int> diff-removed;
     in property <int> diff-added;
     in property <bool> diff-working;
@@ -620,6 +621,7 @@ export component GitRepositoryView inherits Rectangle {
 
             // 真ん中：グラフ。
             VerticalLayout {
+                min-width: 0px;
                 horizontal-stretch: 1;
                 Rectangle {
                     height: 28px;
@@ -648,6 +650,7 @@ export component GitRepositoryView inherits Rectangle {
                             color: Tok.ink-faint;
                             font-size: 10px;
                             letter-spacing: 0.9px;
+                            overflow: elide;
                             vertical-alignment: center;
                         }
                         Text {
@@ -1086,19 +1089,19 @@ export component GitRepositoryView inherits Rectangle {
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
-                            Text {
+                            if root.diff-note == "": Text {
                                 text: "−" + root.diff-removed;
                                 color: Tok.alert;
                                 font-size: 12px;
                                 vertical-alignment: center;
                             }
-                            Text {
+                            if root.diff-note == "": Text {
                                 text: "+" + root.diff-added;
                                 color: #2e7d32;
                                 font-size: 12px;
                                 vertical-alignment: center;
                             }
-                            VerticalLayout {
+                            if root.diff-note == "": VerticalLayout {
                                 alignment: center;
                                 TextButton {
                                     title: @tr("Open in Comparison");
@@ -1118,9 +1121,10 @@ export component GitRepositoryView inherits Rectangle {
                         vertical-stretch: 1;
                         background: Tok.paper;
                         if root.diff-rows.length == 0: Text {
-                            text: @tr("No differences");
+                            text: root.diff-note == "" ? @tr("No differences") : root.diff-note;
                             color: Tok.ink-faint;
                             font-size: 12px;
+                            wrap: word-wrap;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }

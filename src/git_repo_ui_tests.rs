@@ -394,24 +394,70 @@ fn a_file_shows_an_inline_diff_with_the_changed_characters() {
 }
 
 #[test]
-fn a_wip_file_shows_its_change_from_the_last_commit() {
+fn both_git_changes_surfaces_compare_the_selected_section() {
     let Some((root, harness)) = manuscript("repo-wip-diff") else {
         return;
     };
     let (window, live) = (&harness.window, &harness.live);
-    fs::write(root.join("原稿.md"), "二行目と三行目\n").unwrap();
+    let path = "空白 を含む原稿.md";
+    fs::write(root.join(path), "base\n").unwrap();
+    git::commit(&root, "base", true, false).unwrap();
+    fs::write(root.join(path), "staged\n").unwrap();
+    git::stage(&root, &[path.to_owned()]).unwrap();
+    fs::write(root.join(path), "working\n").unwrap();
+    git_ui::wire(window, live);
+    wire(window, live);
+    window.set_tree_open(true);
+    window.set_left_tab(8);
+    git_ui::publish(window, live);
+    settle(window, live);
+    let rows = window.get_git_rows();
+    let row_for = |kind| {
+        (0..rows.row_count())
+            .find(|&at| {
+                let row = rows.row_data(at).unwrap();
+                row.label == path && row.kind == kind
+            })
+            .unwrap() as i32
+    };
+    window.invoke_git_row_diff(row_for(3));
+    settle(window, live);
+    assert!(window.get_diff_active());
+    assert!(window.get_diff_left_path().contains("HEAD"));
+    assert!(window.get_diff_right_path().contains(path));
+    let compared = window.get_diff_rows().row_data(0).unwrap();
+    assert_eq!(
+        (compared.left.as_str(), compared.right.as_str()),
+        ("base ［改行］", "staged ［改行］")
+    );
+    crate::diff_view::dismiss(window);
+
     open(window, live);
     settle(window, live);
     select_row(window, 0);
     assert_eq!(window.get_git_repo_detail_mode(), 2);
-    let rows = window.get_git_rows();
-    let file = (0..rows.row_count())
-        .position(|at| rows.row_data(at).unwrap().label == "原稿.md")
-        .unwrap();
-    changes_clicked(window, file);
+    window.invoke_git_repo_changes_clicked(row_for(3));
+    settle(window, live);
     assert_eq!(window.get_git_repo_detail_mode(), 3);
     assert!(!window.get_git_repo_diff_switchable());
-    assert_eq!(diff_text(window)[1].2, ["と三行目"]);
+    assert!(window.get_git_repo_diff_caption().contains("HEAD"));
+    assert_eq!(diff_text(window)[1].1, "staged");
+    diff_back(window);
+
+    window.invoke_git_repo_changes_clicked(row_for(4));
+    settle(window, live);
+    assert!(!window.get_git_repo_diff_caption().contains("HEAD"));
+    let lines = diff_text(window);
+    assert_eq!((&*lines[0].1, &*lines[1].1), ("staged", "working"));
+    fs::write(root.join(path), "later\n").unwrap();
+    // The two-pane comparison uses the snapshot already displayed in the inline diff.
+    diff_open_full(window);
+    let compared = window.get_diff_rows().row_data(0).unwrap();
+    assert_eq!(
+        (compared.left.as_str(), compared.right.as_str()),
+        ("staged ［改行］", "working ［改行］")
+    );
+    crate::diff_view::dismiss(window);
     diff_back(window);
     assert_eq!(window.get_git_repo_detail_mode(), 2);
 }

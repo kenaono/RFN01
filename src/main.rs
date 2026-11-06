@@ -51,6 +51,7 @@ mod folder_replace;
 #[cfg(test)]
 mod folder_replace_ui_tests;
 mod git;
+mod git_change_diff;
 mod git_file_history;
 mod git_graph;
 mod git_history;

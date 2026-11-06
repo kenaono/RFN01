@@ -1028,9 +1028,23 @@ pub fn file_log(file: &Path, limit: usize) -> Result<Vec<FileVersion>, GitError>
 
 /// `sha`の版の`path`の中身。その版に無ければ`None`。
 pub fn blob_at(root: &Path, sha: &str, path: &str) -> Result<Option<Vec<u8>>, GitError> {
-    let object = format!("{sha}:{path}");
-    let output = run(root, &["cat-file", "blob", &object], None)?;
+    let output = blob_output(root, sha, path)?;
     Ok(output.ok.then_some(output.stdout))
+}
+
+/// A change row says this blob exists. Report a failed read instead of showing an empty side.
+pub(crate) fn change_blob(root: &Path, revision: &str, path: &str) -> Result<Vec<u8>, GitError> {
+    let output = blob_output(root, revision, path)?;
+    if output.ok {
+        Ok(output.stdout)
+    } else {
+        Err(output.failure())
+    }
+}
+
+fn blob_output(root: &Path, revision: &str, path: &str) -> Result<Output, GitError> {
+    let object = format!("{revision}:{path}");
+    run(root, &["cat-file", "blob", &object], None)
 }
 
 /// 途中で止まった操作（Merge・Revert・Cherry-pick）が残っていれば`--abort`で戻し、衝突と答える。

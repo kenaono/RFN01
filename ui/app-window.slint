@@ -1239,6 +1239,7 @@ export component AppWindow inherits Window {
     callback git-row-clicked(int);
     callback git-row-activated(int);
     callback git-row-staged(int);
+    callback git-row-diff(int);
     callback git-row-menu(int, int);
     callback git-open-repository();
     /// RFN01-67 PR 2a: Git Repository の画面（`git_repo_ui`）。
@@ -1278,6 +1279,7 @@ export component AppWindow inherits Window {
     // PR 2b: 右の列の差分と Undo／Redo。
     in property <string> git-repo-diff-name;
     in property <string> git-repo-diff-caption;
+    in property <string> git-repo-diff-note;
     in property <int> git-repo-diff-removed;
     in property <int> git-repo-diff-added;
     in property <bool> git-repo-diff-working;
@@ -2120,6 +2122,7 @@ export component AppWindow inherits Window {
                         row-clicked(index) => { root.git-row-clicked(index); }
                         row-activated(index) => { root.git-row-activated(index); }
                         row-staged(index) => { root.git-row-staged(index); }
+                        row-diff(index) => { root.git-row-diff(index); }
                         row-menu(index, action) => { root.git-row-menu(index, action); }
                         open-repository => { root.git-open-repository(); }
                     }
@@ -6991,6 +6994,7 @@ export component AppWindow inherits Window {
             focus-generation: root.git-repo-focus-generation;
             diff-name: root.git-repo-diff-name;
             diff-caption: root.git-repo-diff-caption;
+            diff-note: root.git-repo-diff-note;
             diff-removed: root.git-repo-diff-removed;
             diff-added: root.git-repo-diff-added;
             diff-working: root.git-repo-diff-working;

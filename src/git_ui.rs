@@ -20,6 +20,7 @@ use std::time::Duration;
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::git::{self, Cancel, Change, GitError, Kind, Stash, Status};
+use crate::git_change_diff::{self, Preview, Target as DiffTarget};
 use crate::git_history::{self, Entry, Kind as HistoryKind, Point};
 use crate::i18n::pick;
 use crate::open_document::OpenDocument;
@@ -70,6 +71,13 @@ struct Job {
     history: Option<bool>,
 }
 
+struct DiffRead {
+    root: PathBuf,
+    generation: u64,
+    inline: bool,
+    result: Receiver<Preview>,
+}
+
 /// 操作の前に控えておく、Undo の記録の材料。
 struct Recording {
     label: String,
@@ -107,6 +115,7 @@ struct Pane {
     closed: Vec<Section>,
     job: Option<Job>,
     reading: Option<(u64, Receiver<Result<Snapshot, GitError>>)>,
+    diff_reading: Option<DiffRead>,
     /// 読み直しの番号。操作を始めるたびに進め、古い読み直しの結果を捨てる。
     generation: u64,
     /// Amend をチェックする前のメッセージ（外したら戻す）。
@@ -491,12 +500,47 @@ fn collect(window: &AppWindow, live: &Live) {
     if let Some((job, result)) = finished {
         finish(window, live, job, result);
     }
-    let idle = PANE.with(|pane| {
-        let pane = pane.borrow();
-        pane.job.is_none() && pane.reading.is_none()
-    });
-    if idle {
+    collect_diff(window);
+    if idle() {
         POLL.with(Timer::stop);
+    }
+}
+
+fn idle() -> bool {
+    PANE.with(|pane| {
+        let pane = pane.borrow();
+        pane.job.is_none() && pane.reading.is_none() && pane.diff_reading.is_none()
+    })
+}
+
+fn collect_diff(window: &AppWindow) {
+    let read = PANE.with(|pane| {
+        let mut pane = pane.borrow_mut();
+        let request = pane.diff_reading.as_ref()?;
+        match request.result.try_recv() {
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                pane.diff_reading = None;
+                None
+            }
+            Ok(preview) => {
+                let request = pane.diff_reading.take()?;
+                (request.generation == pane.generation
+                    && root_of(&pane).as_ref() == Some(&request.root))
+                .then_some((request, preview))
+            }
+        }
+    });
+    let Some((request, preview)) = read else {
+        return;
+    };
+    if window.get_diff_active() {
+        return;
+    }
+    if request.inline {
+        crate::git_repo_ui::show_wip_diff(window, &request.root, preview);
+    } else if !window.get_git_repo_active() && visible(window) {
+        preview.open(window);
     }
 }
 
@@ -1819,17 +1863,45 @@ fn row(index: usize) -> Option<(Option<Section>, Option<(bool, Change)>, Option<
     })
 }
 
-/// Git Repository の WIP の右の列で行を押した（RFN01-67 PR 2b）：見出しなら開閉し、
-/// ファイルならその変更を返す（右の列に差分を出すのは呼ぶ側）。
-pub(crate) fn clicked_change(window: &AppWindow, index: usize) -> Option<Change> {
-    match row(index)? {
-        (Some(_), ..) => {
-            row_clicked(window, index);
-            None
+/// Resolve the file and its section before handing the read to a background thread.
+pub(crate) fn diff_clicked(window: &AppWindow, live: &Live, index: i32, inline: bool) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    match row(index) {
+        Some((Some(_), ..)) if inline => {
+            later(window, live, move |window, _| row_clicked(window, index));
         }
-        (None, Some((_, change)), _) => Some(change),
-        _ => None,
+        Some((None, Some((staged, change)), _)) if !window.get_git_busy() => {
+            let Some(root) = active_root() else {
+                return;
+            };
+            let (sender, result) = mpsc::channel();
+            PANE.with(|pane| {
+                let mut pane = pane.borrow_mut();
+                pane.diff_reading = Some(DiffRead {
+                    root: root.clone(),
+                    generation: pane.generation,
+                    inline,
+                    result,
+                });
+            });
+            let target = DiffTarget {
+                root,
+                staged,
+                change,
+            };
+            std::thread::spawn(move || {
+                let _ = sender.send(git_change_diff::read(&target));
+            });
+            poll(window, live);
+        }
+        _ => {}
     }
+}
+
+pub(crate) fn cancel_change_diff() {
+    PANE.with(|pane| pane.borrow_mut().diff_reading = None);
 }
 
 fn row_clicked(window: &AppWindow, index: usize) {
@@ -2031,6 +2103,13 @@ pub fn wire(window: &AppWindow, live: &Live) {
         index.max(0) as usize,
         action
     ));
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_git_row_diff(move |index| {
+        if let Some(window) = weak.upgrade() {
+            diff_clicked(&window, &held, index, false);
+        }
+    });
 
     let weak = window.as_weak();
     window.on_git_amend_toggled(move |wanted| {
@@ -2053,10 +2132,7 @@ pub(crate) fn cancel() {
 #[cfg(test)]
 pub(crate) fn pump(window: &AppWindow, live: &Live) -> bool {
     collect(window, live);
-    PANE.with(|pane| {
-        let pane = pane.borrow();
-        pane.job.is_none() && pane.reading.is_none()
-    })
+    idle()
 }
 
 #[cfg(test)]

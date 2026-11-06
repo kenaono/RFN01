@@ -122,6 +122,7 @@ export component GitChangesView inherits Rectangle {
     callback row-activated(int);
     // 行の＋／−：Stage・Unstage（見出しなら全部）。
     callback row-staged(int);
+    callback row-diff(int);
     // 右クリックの行：0 Open、1 Stage・Unstage、2 Undo Changes…（Stash は 0 Apply、1 Pop、2 Drop…）。
     callback row-menu(int, int);
 
@@ -406,7 +407,7 @@ export component GitChangesView inherits Rectangle {
                             }
                         }
 
-                        // ファイル：状態の字、名前、フォルダ、＋／−。
+                        // ファイル：状態の字、名前、フォルダ、差分、＋／−。
                         if row.kind == 3 || row.kind == 4: HorizontalLayout {
                             padding-left: 22px;
                             padding-right: 2px;
@@ -435,6 +436,14 @@ export component GitChangesView inherits Rectangle {
                                 overflow: elide;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
+                            }
+                            if !root.compact: IconButton {
+                                size: 22px;
+                                y: 2px;
+                                icon: Icons.split;
+                                tip: @tr("View Diff");
+                                enabled: !root.busy;
+                                clicked => { root.row-diff(index); }
                             }
                             IconButton {
                                 size: 22px;

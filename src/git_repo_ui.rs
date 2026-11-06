@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use slint::{Color, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
-use crate::git::{self, Change, GitError, Kind, LogEntry, Ref, Stash, Status};
+use crate::git::{self, Change, GitError, LogEntry, Ref, Stash, Status};
+use crate::git_change_diff::Preview;
 use crate::git_graph;
 use crate::git_history::Point;
 use crate::git_ui::{self, Action};
@@ -92,22 +93,16 @@ enum Side {
 }
 
 /// 右の列の差分（PR 2b）が何を比べているか。
-#[derive(Clone)]
-enum DiffSource {
-    /// Commit の詳細のファイル。
-    Commit {
-        sha: String,
-        parent: Option<String>,
-        change: Change,
-    },
-    /// WIP（Commit していない変更）のファイル：前回の Commit と今のファイル。
-    Wip { change: Change },
+enum DiffShown {
+    Commit(CommitDiff),
+    Wip(Preview),
 }
 
-#[derive(Clone)]
-struct DiffShown {
-    source: DiffSource,
-    /// Working Copy（今のファイル）と比べるか。Commit のファイルだけで選べる。
+struct CommitDiff {
+    sha: String,
+    parent: Option<String>,
+    change: Change,
+    /// Working Copy（今のファイル）と比べるか。
     working: bool,
 }
 
@@ -146,6 +141,7 @@ pub fn open(window: &AppWindow, live: &Live) {
             return;
         }
     };
+    git_ui::cancel_change_diff();
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
         if repo.root.as_ref() != Some(&root) {
@@ -179,6 +175,7 @@ pub fn close(window: &AppWindow) {
     if !window.get_git_repo_active() {
         return;
     }
+    git_ui::cancel_change_diff();
     window.set_git_repo_active(false);
     crate::restore_editor_focus(window);
 }
@@ -619,6 +616,7 @@ fn select_row(window: &AppWindow, index: usize) {
     let Some((root, sha)) = target else {
         return;
     };
+    git_ui::cancel_change_diff();
     let (selected, detail) = match sha {
         None => (Selected::Wip, None),
         Some(sha) => match git::detail(&root, &sha) {
@@ -930,77 +928,87 @@ fn diff_rows(unified: &inline_diff::Unified) -> Vec<GitDiffRow> {
 }
 
 /// 差分の左右の文と、見出しに出す文。
-fn diff_texts(root: &Path, diff: &DiffShown) -> Result<(String, String, String), GitError> {
+fn commit_diff_texts(root: &Path, diff: &CommitDiff) -> Result<(String, String, String), GitError> {
     let disk = |path: &str| read_text(std::fs::read(root.join(path)).ok());
     let blob = |sha: &str, path: &str| git::blob_at(root, sha, path).map(read_text);
-    match &diff.source {
-        DiffSource::Commit {
-            sha,
-            parent,
-            change,
-        } => {
-            let short: String = sha.chars().take(7).collect();
-            if diff.working {
-                let caption = say!(
-                    "Commit {short}（左）と今のファイル（右）",
-                    "Commit {short} (left) and the working copy (right)"
-                );
-                return Ok((blob(sha, &change.path)?, disk(&change.path), caption));
-            }
-            let old_path = change.from.as_deref().unwrap_or(&change.path);
-            let before = match parent {
-                Some(parent) => blob(parent, old_path)?,
-                None => String::new(),
-            };
-            let parent_short: String = parent
-                .as_deref()
-                .map(|p| p.chars().take(7).collect())
-                .unwrap_or_else(|| "—".to_owned());
-            let caption = say!(
-                "親Commit {parent_short}（左）と {short}（右）",
-                "Parent {parent_short} (left) and {short} (right)"
-            );
-            Ok((before, blob(sha, &change.path)?, caption))
-        }
-        DiffSource::Wip { change } => {
-            let old_path = change.from.as_deref().unwrap_or(&change.path);
-            let before = match git::head_sha(root) {
-                Some(head) => blob(&head, old_path)?,
-                None => String::new(),
-            };
-            let now = if change.kind == Kind::Deleted {
-                String::new()
-            } else {
-                disk(&change.path)
-            };
-            let caption = say!(
-                "前回のCommit（左）と今のファイル（右）",
-                "Last commit (left) and the working copy (right)"
-            );
-            Ok((before, now, caption))
-        }
+    let CommitDiff {
+        sha,
+        parent,
+        change,
+        working,
+    } = diff;
+    let short: String = sha.chars().take(7).collect();
+    if *working {
+        let caption = say!(
+            "Commit {short}（左）と今のファイル（右）",
+            "Commit {short} (left) and the working copy (right)"
+        );
+        return Ok((blob(sha, &change.path)?, disk(&change.path), caption));
     }
-}
-
-fn change_of(source: &DiffSource) -> &Change {
-    match source {
-        DiffSource::Commit { change, .. } | DiffSource::Wip { change } => change,
-    }
+    let old_path = change.from.as_deref().unwrap_or(&change.path);
+    let before = match parent {
+        Some(parent) => blob(parent, old_path)?,
+        None => String::new(),
+    };
+    let parent_short: String = parent
+        .as_deref()
+        .map(|p| p.chars().take(7).collect())
+        .unwrap_or_else(|| "—".to_owned());
+    let caption = say!(
+        "親Commit {parent_short}（左）と {short}（右）",
+        "Parent {parent_short} (left) and {short} (right)"
+    );
+    Ok((before, blob(sha, &change.path)?, caption))
 }
 
 fn publish_diff(window: &AppWindow, root: &Path, diff: &DiffShown) {
-    let (left, right, caption) = match diff_texts(root, diff) {
-        Ok(texts) => texts,
-        Err(error) => (String::new(), String::new(), error.to_string()),
+    window.set_git_repo_diff_switchable(matches!(diff, DiffShown::Commit(_)));
+    match diff {
+        DiffShown::Commit(commit) => {
+            window.set_git_repo_diff_working(commit.working);
+            let name = &commit.change.path;
+            match commit_diff_texts(root, commit) {
+                Ok((left, right, caption)) => {
+                    publish_diff_rows(window, name, &caption, Ok((&left, &right)));
+                }
+                Err(error) => publish_diff_rows(window, name, "", Err(&error.to_string())),
+            }
+        }
+        DiffShown::Wip(preview) => {
+            window.set_git_repo_diff_working(false);
+            let text = preview
+                .text
+                .as_ref()
+                .map(|(left, right)| (left.as_str(), right.as_str()));
+            publish_diff_rows(
+                window,
+                &preview.name,
+                &preview.caption,
+                text.map_err(String::as_str),
+            );
+        }
+    }
+}
+
+fn publish_diff_rows(
+    window: &AppWindow,
+    name: &str,
+    caption: &str,
+    text: Result<(&str, &str), &str>,
+) {
+    let (rows, removed, added, note) = match text {
+        Ok((left, right)) => {
+            let unified = inline_diff::unified(left, right, 3);
+            (diff_rows(&unified), unified.removed, unified.added, "")
+        }
+        Err(error) => (Vec::new(), 0, 0, error),
     };
-    let unified = inline_diff::unified(&left, &right, 3);
-    window.set_git_repo_diff_name(change_of(&diff.source).path.clone().into());
+    window.set_git_repo_diff_name(name.into());
     window.set_git_repo_diff_caption(caption.into());
-    window.set_git_repo_diff_removed(unified.removed as i32);
-    window.set_git_repo_diff_added(unified.added as i32);
-    window.set_git_repo_diff_working(diff.working);
-    window.set_git_repo_diff_switchable(matches!(diff.source, DiffSource::Commit { .. }));
-    window.set_git_repo_diff_rows(ModelRc::new(VecModel::from(diff_rows(&unified))));
+    window.set_git_repo_diff_note(note.into());
+    window.set_git_repo_diff_removed(removed as i32);
+    window.set_git_repo_diff_added(added as i32);
+    window.set_git_repo_diff_rows(ModelRc::new(VecModel::from(rows)));
     window.set_git_repo_detail_mode(3);
 }
 
@@ -1009,14 +1017,15 @@ fn show_diff(window: &AppWindow, index: usize, working: bool) {
     let source = REPO.with(|repo| {
         let repo = repo.borrow();
         let detail = repo.detail.as_ref()?;
-        Some(DiffSource::Commit {
+        Some(CommitDiff {
             sha: detail.sha.clone(),
             parent: detail.parents.first().cloned(),
             change: detail.files.get(index)?.clone(),
+            working,
         })
     });
     if let Some(source) = source {
-        set_diff(window, DiffShown { source, working });
+        set_diff(window, DiffShown::Commit(source));
     }
 }
 
@@ -1030,6 +1039,7 @@ fn set_diff(window: &AppWindow, diff: DiffShown) {
 
 /// 「‹ Files」：差分を閉じて、詳細（または WIP）へ戻る。
 fn diff_back(window: &AppWindow) {
+    git_ui::cancel_change_diff();
     REPO.with(|repo| {
         let mut repo = repo.borrow_mut();
         repo.diff = None;
@@ -1039,47 +1049,48 @@ fn diff_back(window: &AppWindow) {
 
 /// Previous／Working Copy。
 fn diff_working_chosen(window: &AppWindow, working: bool) {
-    let diff = REPO.with(|repo| repo.borrow().diff.clone());
-    if let Some(mut diff) = diff {
-        diff.working = working;
-        set_diff(window, diff);
-    }
+    REPO.with(|repo| {
+        let mut repo = repo.borrow_mut();
+        if let Some(DiffShown::Commit(commit)) = &mut repo.diff {
+            commit.working = working;
+            publish_detail(window, &repo);
+        }
+    });
 }
 
 /// 「Open in Comparison」：今までの左右の比較の画面で開く（閉じるとここへ戻る）。
 fn diff_open_full(window: &AppWindow) {
-    let target = REPO.with(|repo| {
+    REPO.with(|repo| {
         let repo = repo.borrow();
-        Some((repo.root.clone()?, repo.diff.clone()?))
-    });
-    let Some((root, diff)) = target else {
-        return;
-    };
-    match diff_texts(&root, &diff) {
-        Ok((left, right, caption)) => {
-            let name = &change_of(&diff.source).path;
-            crate::diff_view::show(
-                window,
-                format!("{name}（{caption}）"),
-                left,
-                name.clone(),
-                right,
-            );
+        let (Some(root), Some(diff)) = (&repo.root, &repo.diff) else {
+            return;
+        };
+        match diff {
+            DiffShown::Wip(preview) => preview.open(window),
+            DiffShown::Commit(commit) => match commit_diff_texts(root, commit) {
+                Ok((left, right, caption)) => {
+                    let name = &commit.change.path;
+                    crate::diff_view::show(
+                        window,
+                        format!("{name}（{caption}）"),
+                        left,
+                        name.clone(),
+                        right,
+                    );
+                }
+                Err(error) => window.tell(error.to_string().into()),
+            },
         }
-        Err(error) => window.tell(error.to_string().into()),
-    }
+    });
 }
 
-/// WIP の右の列で行を押した：ファイルなら前回の Commit との差分を出す。
-fn changes_clicked(window: &AppWindow, index: usize) {
-    if let Some(change) = git_ui::clicked_change(window, index) {
-        set_diff(
-            window,
-            DiffShown {
-                source: DiffSource::Wip { change },
-                working: true,
-            },
-        );
+pub(crate) fn show_wip_diff(window: &AppWindow, root: &Path, preview: Preview) {
+    let selected = REPO.with(|repo| {
+        let repo = repo.borrow();
+        repo.root.as_deref() == Some(root) && repo.selected == Some(Selected::Wip)
+    });
+    if window.get_git_repo_active() && selected {
+        set_diff(window, DiffShown::Wip(preview));
     }
 }
 
@@ -1219,10 +1230,13 @@ pub fn wire(window: &AppWindow, live: &Live) {
     on!(on_git_repo_diff_width_changed, |w, _l, width| {
         diff_width_changed(w, width)
     });
-    on!(on_git_repo_changes_clicked, |w, _l, index| changes_clicked(
-        w,
-        index.max(0) as usize
-    ));
+    let weak = window.as_weak();
+    let held = live.clone();
+    window.on_git_repo_changes_clicked(move |index| {
+        if let Some(window) = weak.upgrade() {
+            git_ui::diff_clicked(&window, &held, index, true);
+        }
+    });
     on!(on_git_repo_file_menu, |w, l, index, action| file_menu(
         w,
         l,

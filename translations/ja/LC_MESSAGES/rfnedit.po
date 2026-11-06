@@ -1533,6 +1533,9 @@ msgstr "比較の画面で開く"
 msgid "No differences"
 msgstr "違いはありません"
 
+msgid "View Diff"
+msgstr "差分を表示"
+
 msgid "Previous Commit"
 msgstr "親Commit"
 
