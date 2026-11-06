@@ -10,7 +10,7 @@ import { TitleMenuBar } from "title-menu-bar.slint";
 import { PresetRow } from "preset-row.slint";
 import { FormatButton, FormatButtons } from "format-bar.slint";
 export { FormatButton } from "format-bar.slint";
-import { ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuInput, MenuRow, MenuSep, PanelTab, PickRow, Role, SideTab, StepRow, TextButton, TextRow, ToggleChip } from "controls.slint";
+import { AppearanceCard, AppearanceFontRow, ColorCell, ColourMixer, ColourPalette, Colours, Field, Icon, IconButton, Icons, Ime, MenuFrame, MenuInput, MenuRow, MenuSep, PanelTab, Role, SideTab, StepRow, TextButton, TextRow, ToggleChip, TransparencyRow } from "controls.slint";
 // **Rustから触れるように名前を通す**：大域はこの根のファイルから輸出されていないと
 // 窓の外から見えない。
 export { Ime }
@@ -4752,14 +4752,17 @@ export component AppWindow inherits Window {
 
                                                     // 書き手の求め 2026-09-15: **コードの書体も文字の設定。**本文・見出しの
                                                     // 書体と同じ面に置く（紙の面にあったのはおかしい）。
-                                                    if root.shows-setting("text.code", sheet-index): PickRow {
-                                                        label: @tr("Code Font");
-                                                        value: root.sheet-fonts[sheet-index * 8 + 7];
-                                                        pressed => {
-                                                            root.sheet = sheet-index; root.font-picked(7);
-                                                            root.font-menu-x = self.picker-x;
-                                                            root.font-menu-y = self.picker-y;
-                                                            font-menu.show();
+                                                    if root.shows-setting("text.code", sheet-index): AppearanceCard {
+                                                        AppearanceFontRow {
+                                                            label: @tr("Code Font");
+                                                            family: root.sheet-fonts[sheet-index * 8 + 7];
+                                                            show-ink: false;
+                                                            chose-font => {
+                                                                root.sheet = sheet-index; root.font-picked(7);
+                                                                root.font-menu-x = self.picker-x;
+                                                                root.font-menu-y = self.picker-y;
+                                                                font-menu.show();
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -5366,78 +5369,82 @@ export component AppWindow inherits Window {
 
                                         if root.shows-group(5): VerticalLayout {
                                             spacing: 20px;
-                                            // 追加要件 2026-09-15（書き手）: 新しく開いたTABにランダムな紙の色。
-                                            // 淡色か濃色かを選ぶ。個別に色を付けたTAB・Paneには効かない。
-                                            if root.shows-setting("page.random", -1): VerticalLayout {
+                                            if root.shows-setting("page.random", -1)
+                                                || root.shows-setting("page.transparency", -1)
+                                                || root.shows-setting("page.paper", 0)
+                                                || root.shows-setting("page.paper", 1)
+                                                || root.shows-setting("paper.shared", 1): VerticalLayout {
                                                 spacing: 8px;
                                                 Text {
-                                                    text: root.section-title(@tr("Page"), @tr("NEW TABS"));
+                                                    text: root.section-title(@tr("Page"), @tr("Background"));
                                                     color: Tok.ink-faint;
                                                     font-size: 11px;
                                                     letter-spacing: 0.9px;
                                                 }
-                                                HorizontalLayout {
-                                                    spacing: 6px;
-                                                    height: 28px;
-
-                                                    Text {
-                                                        text: @tr("Random Background");
-                                                        color: Tok.ink;
-                                                        font-size: 12px;
-                                                        vertical-alignment: center;
-                                                        horizontal-stretch: 1;
-                                                    }
-
-                                                    for choice[index] in [@tr("Off"), @tr("Light"), @tr("Dark")]: TextButton {
-                                                        title: choice;
-                                                        role: root.paper-random == index ? Role.primary : Role.normal;
-                                                        clicked => {
-                                                            root.paper-random-chosen(index);
+                                                AppearanceCard {
+                                                    for sheet-index in [0, 1]: VerticalLayout {
+                                                        spacing: 6px;
+                                                        if root.shows-setting("page.paper", sheet-index)
+                                                            || (sheet-index == 1 && root.shows-setting("paper.shared", 1)): HorizontalLayout {
+                                                            spacing: 12px;
+                                                            Text {
+                                                                text: sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL");
+                                                                color: Tok.ink-muted;
+                                                                font-size: 11px;
+                                                                vertical-alignment: center;
+                                                                width: 72px;
+                                                            }
+                                                            if (sheet-index == 0 || !root.paper-shared) && root.shows-setting("page.paper", sheet-index): ColorCell {
+                                                                width: 100px;
+                                                                horizontal-stretch: 0;
+                                                                label: @tr("Background");
+                                                                shown: root.palette[sheet-index * 16 + 7];
+                                                                chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 7, colour); }
+                                                                automatic => { root.sheet = sheet-index; root.colour-default(0, 7); }
+                                                                more => { root.sheet = sheet-index; root.colour-more(0, 7); }
+                                                            }
+                                                            if sheet-index == 1 && root.shows-setting("paper.shared", 1): TextButton {
+                                                                title: @tr("Same as Horizontal");
+                                                                role: root.paper-shared ? Role.primary : Role.normal;
+                                                                clicked => { root.paper-shared-toggled(!root.paper-shared); }
+                                                            }
+                                                            Rectangle { horizontal-stretch: 1; }
+                                                        }
+                                                        if sheet-index == 1 && root.settings-item-selected && root.paper-shared
+                                                            && root.shows-setting("paper.shared", 1) && root.settings-item-id != "paper.shared": Text {
+                                                            text: root.settings-inherited-text;
+                                                            color: Tok.ink;
+                                                            wrap: word-wrap;
                                                         }
                                                     }
-                                                }
-                                            }
-                                            if root.shows-setting("page.transparency", -1): VerticalLayout {
-                                                spacing: 8px;
-                                                Text {
-                                                    text: root.section-title(@tr("Page"), @tr("TRANSPARENCY"));
-                                                    color: Tok.ink-faint;
-                                                    font-size: 11px;
-                                                    letter-spacing: 0.9px;
-                                                }
-                                                HorizontalLayout {
-                                                    spacing: 10px;
-                                                    height: 28px;
-                                                    Text {
-                                                        text: @tr("Background Transparency");
-                                                        color: Tok.ink;
-                                                        font-size: 12px;
-                                                        vertical-alignment: center;
-                                                        horizontal-stretch: 1;
+                                                    if root.shows-setting("page.random", -1): HorizontalLayout {
+                                                        spacing: 12px;
+                                                        Text {
+                                                            text: @tr("Random Background");
+                                                            color: Tok.ink-muted;
+                                                            vertical-alignment: center;
+                                                        }
+                                                        ComboBox {
+                                                            width: 100px;
+                                                            horizontal-stretch: 0;
+                                                            model: [@tr("Off"), @tr("Light"), @tr("Dark")];
+                                                            current-index <=> root.paper-random;
+                                                            selected => { root.paper-random-chosen(self.current-index); }
+                                                        }
+                                                        Rectangle { horizontal-stretch: 1; }
                                                     }
-                                                    Slider {
-                                                        width: 220px;
-                                                        y: 3px;
-                                                        minimum: 0;
-                                                        maximum: 100;
+                                                    if root.shows-setting("page.transparency", -1): TransparencyRow {
                                                         value: root.background-transparency;
-                                                        moved(value) => { root.background-transparency-moved(value); }
-                                                    }
-                                                    Text {
-                                                        text: root.background-transparency + "%";
-                                                        color: Tok.ink-muted;
-                                                        font-size: 12px;
-                                                        vertical-alignment: center;
-                                                        min-width: 40px;
+                                                        changed-value(value) => { root.background-transparency-moved(value); }
                                                     }
                                                 }
-                                                Text {
+                                                if root.shows-setting("page.transparency", -1): Text {
                                                     text: @tr("0% is opaque. Only the document background becomes transparent; text and menus stay opaque.");
                                                     color: Tok.ink-muted;
                                                     font-size: 12px;
                                                     wrap: word-wrap;
                                                 }
-                                                if root.background-transparency > 0 && root.wall-kind != 0: Text {
+                                                if root.shows-setting("page.transparency", -1) && root.background-transparency > 0 && root.wall-kind != 0: Text {
                                                     text: @tr("Background images are hidden while transparency is enabled. Set it to 0% to restore the image.");
                                                     color: Tok.ink-muted;
                                                     font-size: 12px;
@@ -5548,58 +5555,6 @@ export component AppWindow inherits Window {
                                                         min-width: 40px;
                                                     }
                                                 }
-                                            }
-                                            // 書き手の求め 2026-09-15: **横書きと縦書きを縦に並べて全部出す。**
-                                            // 切り替えて見比べるより、並んでいれば1回で読める。どちらのシートの
-                                            // 値かは見出しが言う。押した欄のシートを`root.sheet`へ置いてから
-                                            // 頼む——Rustはそれを「どのシートの値か」として読む。
-                                            for sheet-index in [0, 1]: VerticalLayout {
-                                                spacing: 8px;
-                                                if root.shows-setting("page.*", sheet-index) || (sheet-index == 1 && root.shows-setting("paper.shared", 1)): Text {
-                                                    text: root.section-title(@tr("Page"), sheet-index == 0 ? @tr("HORIZONTAL") : @tr("VERTICAL"));
-                                                    color: Tok.ink-faint;
-                                                    font-size: 11px;
-                                                    letter-spacing: 0.9px;
-                                                }
-
-                                                    // 追加要件 2026-09-15（書き手）: 縦書きの紙を横書きに合わせる。
-                                                    // On の間は縦書きの色の欄を出さない（選んでも効かない欄を置かない）。
-                                                    if sheet-index == 1 && root.settings-item-selected && root.paper-shared && root.shows-setting("paper.shared", 1) && root.settings-item-id != "paper.shared": Text {
-                                                        text: root.settings-inherited-text;
-                                                        color: Tok.ink;
-                                                        wrap: word-wrap;
-                                                    }
-                                                    if (sheet-index == 1) && (root.shows-setting("paper.shared", sheet-index)): HorizontalLayout {
-                                                        spacing: 6px;
-                                                        height: 28px;
-
-                                                        Text {
-                                                            text: @tr("Same as Horizontal");
-                                                            color: Tok.ink;
-                                                            font-size: 12px;
-                                                            vertical-alignment: center;
-                                                            horizontal-stretch: 1;
-                                                        }
-
-                                                        TextButton {
-                                                            title: root.paper-shared ? @tr("On") : @tr("Off");
-                                                            role: root.paper-shared ? Role.primary : Role.normal;
-                                                            clicked => {
-                                                                root.paper-shared-toggled(!root.paper-shared);
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // 書き手の報告 2026-09-08: `Paper`だけでは何のことか読めない。
-                                                    // （コードの書体は 2026-09-15 に Text へ移した。）
-                                                    if (sheet-index == 0 || !root.paper-shared) && (root.shows-setting("page.paper", sheet-index)): ColorCell {
-                                                        label: @tr("Paper Color");
-                                                        shown: root.palette[sheet-index * 16 + 7];
-                                                        chosen(colour) => { root.sheet = sheet-index; root.colour-set(0, 7, colour); }
-                                                        automatic => { root.sheet = sheet-index; root.colour-default(0, 7); }
-                                                        more => { root.sheet = sheet-index; root.colour-more(0, 7); }
-                                                    }
-
                                             }
                                         }
 

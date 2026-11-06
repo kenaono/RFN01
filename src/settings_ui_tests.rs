@@ -325,8 +325,8 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
             });
         };
         draw();
-        // H1 の大きさの欄（上に PRESET の行がある）。
-        let position = slint::LogicalPosition::new(322.0, 250.0);
+        // 横書きの本文カードにある px 欄（上に PRESET の行がある）。
+        let position = slint::LogicalPosition::new(378.0, 252.0);
         window.window().dispatch_event(WindowEvent::PointerPressed {
             position,
             button: PointerEventButton::Left,
@@ -351,12 +351,12 @@ fn settings_open_as_the_one_tab_and_keep_document_keys_away() {
             key(Key::Backspace.into());
         }
         assert!(typed.borrow().is_empty(), "nothing is set while typing");
-        for c in ["2", "5", "0"] {
+        for c in ["2", "5"] {
             key(c.into());
         }
         key(Key::Return.into());
         draw();
-        assert_eq!(&*typed.borrow(), &[(0, 4, "250".to_owned())]);
+        assert_eq!(&*typed.borrow(), &[(0, 0, "25".to_owned())]);
 
         // RFN01-93: Escape in a field gives the keyboard back to the pane, and
         // the next one reaches the pane's way out instead of being swallowed
@@ -1373,6 +1373,7 @@ fn the_find_bar_searches_the_settings() {
     ask("Tab");
     assert_eq!(window.get_settings_query(), "Tab");
     count_in_pane(&window, &live);
+    update_status(&window, id, &document, "", &[], None);
     assert_eq!(
         window.get_count_find(),
         "",

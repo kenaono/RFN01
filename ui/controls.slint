@@ -1542,6 +1542,26 @@ export component NumberField inherits Rectangle {
     }
 }
 
+export component AppearanceCard inherits Rectangle {
+    vertical-stretch: 0;
+    background: Tok.chrome-raised;
+    border-color: Tok.rule;
+    border-width: 1px;
+    border-radius: 6px;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        @children
+    }
+}
+
+export component AppearanceLabel inherits Text {
+    width: 72px;
+    color: Tok.ink-muted;
+    vertical-alignment: center;
+}
+
 // 色を選ぶ（C5、書き手の求め 2026-09-15：「Windows標準は小さくわかりにくいので、
 // MS-Officeの形式がいい」）。
 //
@@ -1917,205 +1937,6 @@ export component ColourMixer inherits Rectangle {
     }
 }
 
-export component TextRow inherits Rectangle {
-    in property <bool> bold;
-    in property <bool> italic;
-    in property <bool> strike;
-    in property <bool> background-on;
-    in property <bool> rule-on;
-    in property <bool> heading;
-    in property <color> background-colour;
-    in property <color> paper-colour;
-    callback decoration-toggled(int, bool);
-    /// C5（2026-09-15）: 背景色をパレットで選んだ／その他の色を頼んだ。
-    callback background-chosen(color);
-    callback background-more();
-    in property <string> label;
-    /// 大きさの数と単位：本文は px、見出しは本文に対する %。
-    in property <string> number;
-    in property <string> unit;
-    /// 同じ大きさを pt で（書き手の求め 2026-09-15）。1pt = 96/72px。
-    in property <string> points;
-    in property <color> shown;
-    in property <string> family;
-    callback stepped(int);
-    callback typed(string);
-    callback typed-points(string);
-    /// C5: 文字色をパレットで選んだ／既定へ戻した／その他の色を頼んだ。
-    callback ink-chosen(color);
-    callback ink-automatic();
-    callback ink-more();
-    callback chose-font();
-    out property <length> picker-x: root.absolute-position.x + font-button.x;
-    out property <length> picker-y: root.absolute-position.y + font-button.y + font-button.height;
-
-    height: 56px;
-
-    HorizontalLayout {
-        y: 29px;
-        height: 27px;
-        spacing: 3px;
-        TextButton { title: @tr("Bold"); role: root.bold ? Role.primary : Role.normal; clicked => { root.decoration-toggled(0, root.bold); } }
-        TextButton { title: @tr("Italic"); role: root.italic ? Role.primary : Role.normal; clicked => { root.decoration-toggled(1, root.italic); } }
-        TextButton { title: @tr("Strikethrough"); role: root.strike ? Role.primary : Role.normal; clicked => { root.decoration-toggled(2, root.strike); } }
-        TextButton {
-            title: root.background-on ? @tr("Color") : @tr("Paper");
-            show-swatch: true;
-            swatch: root.background-on ? root.background-colour : root.paper-colour;
-            clicked => { background-palette.show(); }
-        }
-        if root.heading: TextButton { title: @tr("Rule"); role: root.rule-on ? Role.primary : Role.normal; clicked => { root.decoration-toggled(4, root.rule-on); } }
-    }
-
-    // C5（書き手の求め 2026-09-15）: 背景もパレットで。「Paperに合わせる」が
-    // 一番上の行——Office の「塗りつぶしなし」と同じ場所。
-    background-palette := PopupWindow {
-        y: root.height;
-        width: 236px;
-        close-policy: close-on-click-outside;
-        MenuFrame {
-            width: 236px;
-            ColourPalette {
-                automatic: @tr("Same as Paper");
-                automatic-colour: root.paper-colour;
-                current: root.background-on ? root.background-colour : transparent;
-                chosen(colour) => {
-                    root.background-chosen(colour);
-                    background-palette.close();
-                }
-                automatic-chosen => {
-                    root.decoration-toggled(3, true);
-                    background-palette.close();
-                }
-                more => {
-                    root.background-more();
-                    background-palette.close();
-                }
-            }
-        }
-    }
-
-    HorizontalLayout {
-        y: 0px;
-        height: 28px;
-        spacing: 4px;
-
-        Text {
-            text: root.label;
-            color: Tok.ink-muted;
-            font-size: 12px;
-            vertical-alignment: center;
-            horizontal-stretch: 0;
-            min-width: 34px;
-        }
-
-        IconButton {
-            size: 20px;
-            horizontal-stretch: 0;
-            icon: Icons.minus;
-            clicked => {
-                root.stepped(-1);
-            }
-        }
-
-        NumberField {
-            horizontal-stretch: 0;
-            shown: root.number;
-            unit: root.unit;
-            committed(text) => {
-                root.typed(text);
-            }
-            escaped => {
-                MenuInput.field-left += 1;
-            }
-        }
-
-        IconButton {
-            size: 20px;
-            horizontal-stretch: 0;
-            icon: Icons.plus;
-            clicked => {
-                root.stepped(1);
-            }
-        }
-
-        // 刻みの釦は左の数のもの。pt はその隣に少し離して置く。
-        Rectangle {
-            width: 6px;
-            horizontal-stretch: 0;
-        }
-
-        NumberField {
-            horizontal-stretch: 0;
-            shown: root.points;
-            unit: "pt";
-            committed(text) => {
-                root.typed-points(text);
-            }
-            escaped => {
-                MenuInput.field-left += 1;
-            }
-        }
-
-        // The swatch is a button: a square of colour beside a row of controls
-        // says "press me" whether or not it does anything, so it does.
-        Rectangle {
-            width: 24px;
-            horizontal-stretch: 0;
-
-            Rectangle {
-                y: (parent.height - self.height) / 2;
-                width: 24px;
-                height: 20px;
-                border-radius: 4px;
-                border-width: 1px;
-                border-color: swatch.has-hover ? Tok.accent : Tok.rule-strong;
-                background: root.shown;
-
-                swatch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        ink-palette.show();
-                    }
-                }
-
-                ink-palette := PopupWindow {
-                    y: parent.height + 2px;
-                    width: 236px;
-                    close-policy: close-on-click-outside;
-                    MenuFrame {
-                        width: 236px;
-                        ColourPalette {
-                            automatic: @tr("Default Color");
-                            current: root.shown;
-                            chosen(colour) => {
-                                root.ink-chosen(colour);
-                                ink-palette.close();
-                            }
-                            automatic-chosen => {
-                                root.ink-automatic();
-                                ink-palette.close();
-                            }
-                            more => {
-                                root.ink-more();
-                                ink-palette.close();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        font-button := TextButton {
-            wide: true;
-            title: root.family;
-            clicked => {
-                root.chose-font();
-            }
-        }
-    }
-}
-
 // A colour: what it looks like, and pressing it to change it.
 //
 // **Picked, not typed** (要件 9). The six digits were a field here once, and
@@ -2189,45 +2010,6 @@ export component ColorCell inherits Rectangle {
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-// A label and what is set, opened by pressing it: a font family (要件 9), and
-// anything else later that is chosen from a list rather than stepped.
-export component PickRow inherits Rectangle {
-    out property <length> picker-x: root.absolute-position.x + value-button.x;
-    out property <length> picker-y: root.absolute-position.y + value-button.y + value-button.height;
-    in property <string> label;
-    in property <string> only;
-    in property <string> value;
-    callback pressed();
-
-    height: 28px;
-
-    HorizontalLayout {
-        spacing: 6px;
-
-        Text {
-            text: root.label;
-            color: Tok.ink-muted;
-            font-size: 12px;
-            vertical-alignment: center;
-            horizontal-stretch: 0;
-            min-width: 54px;
-        }
-
-        if root.only != "": Tag {
-            text: root.only;
-            horizontal-stretch: 0;
-        }
-
-        value-button := TextButton {
-            wide: true;
-            title: root.value;
-            clicked => {
-                root.pressed();
             }
         }
     }
@@ -2371,4 +2153,189 @@ export component Slider inherits Rectangle {
         return root.minimum + root.span * clamp(
             1.0 - (y - root.grip / 2) / max(1px, root.height - root.grip), 0.0, 1.0);
     }
+}
+
+export component TransparencyRow inherits HorizontalLayout {
+    in property <int> value;
+    callback changed-value(float);
+
+    spacing: 8px;
+    AppearanceLabel { text: @tr("Transparency"); }
+    Slider {
+        horizontal-stretch: 1;
+        minimum: 0;
+        maximum: 100;
+        value: root.value;
+        moved(value) => { root.changed-value(value); }
+    }
+    NumberField {
+        horizontal-stretch: 0;
+        shown: root.value;
+        unit: "%";
+        committed(text) => {
+            if text.is-float() {
+                root.changed-value(text.to-float());
+            }
+        }
+        escaped => { MenuInput.field-left += 1; }
+    }
+}
+
+export component AppearanceFontRow inherits Rectangle {
+    in property <string> label: @tr("Font");
+    in property <string> family;
+    in property <bool> show-ink: true;
+    in property <color> ink;
+    callback chose-font();
+    callback ink-chosen(color);
+    callback ink-automatic();
+    callback ink-more();
+    out property <length> picker-x: root.absolute-position.x + font-button.x;
+    out property <length> picker-y: root.absolute-position.y + font-button.height;
+
+    height: 28px;
+    HorizontalLayout {
+        spacing: 8px;
+        AppearanceLabel { text: root.label; }
+        font-button := TextButton {
+            wide: true;
+            title: root.family;
+            clicked => { root.chose-font(); }
+        }
+        if root.show-ink: ColorCell {
+            width: 100px;
+            horizontal-stretch: 0;
+            label: @tr("Text Color");
+            shown: root.ink;
+            chosen(colour) => { root.ink-chosen(colour); }
+            automatic => { root.ink-automatic(); }
+            more => { root.ink-more(); }
+        }
+    }
+    @children
+}
+
+export component TextRow inherits AppearanceCard {
+    in property <bool> bold;
+    in property <bool> italic;
+    in property <bool> strike;
+    in property <bool> background-on;
+    in property <bool> rule-on;
+    in property <bool> heading;
+    in property <color> background-colour;
+    in property <color> paper-colour;
+    callback decoration-toggled(int, bool);
+    /// C5（2026-09-15）: 背景色をパレットで選んだ／その他の色を頼んだ。
+    callback background-chosen(color);
+    callback background-more();
+    in property <string> label;
+    /// 大きさの数と単位：本文は px、見出しは本文に対する %。
+    in property <string> number;
+    in property <string> unit;
+    /// 同じ大きさを pt で（書き手の求め 2026-09-15）。1pt = 96/72px。
+    in property <string> points;
+    in property <color> shown;
+    in property <string> family;
+    callback stepped(int);
+    callback typed(string);
+    callback typed-points(string);
+    /// C5: 文字色をパレットで選んだ／既定へ戻した／その他の色を頼んだ。
+    callback ink-chosen(color);
+    callback ink-automatic();
+    callback ink-more();
+    callback chose-font();
+    out property <length> picker-x: font-row.picker-x;
+    out property <length> picker-y: font-row.picker-y;
+
+    Text {
+        text: root.label;
+        color: Tok.ink;
+        font-size: 12px;
+    }
+
+    font-row := AppearanceFontRow {
+        family: root.family;
+        ink: root.shown;
+        chose-font => { root.chose-font(); }
+        ink-chosen(colour) => { root.ink-chosen(colour); }
+        ink-automatic => { root.ink-automatic(); }
+        ink-more => { root.ink-more(); }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        AppearanceLabel { text: @tr("Size"); }
+        IconButton {
+            size: 20px;
+            horizontal-stretch: 0;
+            icon: Icons.minus;
+            clicked => { root.stepped(-1); }
+        }
+        NumberField {
+            horizontal-stretch: 0;
+            shown: root.number;
+            unit: root.unit;
+            committed(text) => { root.typed(text); }
+            escaped => { MenuInput.field-left += 1; }
+        }
+        IconButton {
+            size: 20px;
+            horizontal-stretch: 0;
+            icon: Icons.plus;
+            clicked => { root.stepped(1); }
+        }
+        NumberField {
+            horizontal-stretch: 0;
+            shown: root.points;
+            unit: "pt";
+            committed(text) => { root.typed-points(text); }
+            escaped => { MenuInput.field-left += 1; }
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        TextButton { title: @tr("Bold"); role: root.bold ? Role.primary : Role.normal; clicked => { root.decoration-toggled(0, root.bold); } }
+        TextButton { title: @tr("Italic"); role: root.italic ? Role.primary : Role.normal; clicked => { root.decoration-toggled(1, root.italic); } }
+        TextButton { title: @tr("Strikethrough"); role: root.strike ? Role.primary : Role.normal; clicked => { root.decoration-toggled(2, root.strike); } }
+        paper-button := TextButton {
+            title: root.background-on ? @tr("Color") : @tr("Paper");
+            show-swatch: true;
+            swatch: root.background-on ? root.background-colour : root.paper-colour;
+            clicked => { background-palette.show(); }
+        }
+        if root.heading: TextButton { title: @tr("Rule"); role: root.rule-on ? Role.primary : Role.normal; clicked => { root.decoration-toggled(4, root.rule-on); } }
+        Rectangle { horizontal-stretch: 1; }
+    }
+
+    // C5（書き手の求め 2026-09-15）: 背景もパレットで。「Paperに合わせる」が
+    // 一番上の行——Office の「塗りつぶしなし」と同じ場所。
+    background-palette := PopupWindow {
+        x: paper-button.absolute-position.x - root.absolute-position.x;
+        y: paper-button.absolute-position.y - root.absolute-position.y + paper-button.height;
+        width: 236px;
+        close-policy: close-on-click-outside;
+        MenuFrame {
+            width: 236px;
+            ColourPalette {
+                automatic: @tr("Same as Paper");
+                automatic-colour: root.paper-colour;
+                current: root.background-on ? root.background-colour : transparent;
+                chosen(colour) => {
+                    root.background-chosen(colour);
+                    background-palette.close();
+                }
+                automatic-chosen => {
+                    root.decoration-toggled(3, true);
+                    background-palette.close();
+                }
+                more => {
+                    root.background-more();
+                    background-palette.close();
+                }
+            }
+        }
+    }
+
 }

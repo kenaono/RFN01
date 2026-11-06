@@ -6764,7 +6764,11 @@ fn count_in_pane(window: &AppWindow, live: &Live) {
 /// `selected`はいま選ばれている範囲。それが一致であれば「何件目か」が言える
 /// ——一致でなければ数だけを言う。**立っていないことは0件目ではない。**
 fn tell_find(window: &AppWindow, id: PaneId, source: &str, selected: Option<(usize, usize)>) {
-    let needle = id.screen(window).find_needle.to_string();
+    let screen = id.screen(window);
+    if screen.settings {
+        return;
+    }
+    let needle = screen.find_needle.to_string();
     if needle.is_empty() {
         window.set_count_find(SharedString::new());
         id.update_screen(window, |screen| {
