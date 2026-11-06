@@ -5255,11 +5255,8 @@ impl Tabs {
     }
 }
 
-/// The handles every tab operation needs.
-///
-/// Bundled because a tab switch touches all of them at once and passing six
-/// arguments to each of half a dozen functions hides which ones matter. The
-/// editing callbacks keep their own handles; nothing here changes them.
+/// Shared state and services for the main window. Callbacks clone the handles
+/// so they can access the same tabs, panes, workspace and background jobs.
 #[derive(Clone)]
 struct Live {
     closed_tabs: Rc<RefCell<Vec<PaneTab>>>,
@@ -7423,11 +7420,8 @@ struct ResultRow {
     at: usize,
 }
 
-/// Draw whichever of the left pane's three things is showing (要件 6.2).
-///
-/// **One list, three fillers.** A row is the same shape whatever is in it — a
-/// name and how far in it sits — so which panel is showing is the only thing
-/// that decides what a click on one means (`activate_left_row`).
+/// Publish the active left-pane view. If a Workspace is active, route
+/// Explorer requests to its tree.
 fn publish_left(window: &AppWindow, live: &Live) {
     // 書き手の求め 2026-11-05: **Workspaceを使っているあいだ、Explorerは使えない。**どの道
     // （アイコン・Ctrl+Shift+E・メニュー・パレット・Workspaceを開いた瞬間）から来ても、ここで
