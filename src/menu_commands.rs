@@ -1059,7 +1059,7 @@ pub(crate) struct Target {
 impl Target {
     fn capture(window: &AppWindow, live: &Live) -> Self {
         let field = window.global::<MenuInput>().get_target();
-        Self::with_field(window, live, field)
+        Self::with_field(window, live, field).with_panel_context(window, live)
     }
     /// 設定から割り当てたキーで走らせるときの対象（RFN01-18）。
     ///
@@ -1204,7 +1204,9 @@ pub fn install(window: &AppWindow, live: &Live) {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        if window.get_question_open() || window.get_print_active() || window.get_diff_active() {
+        if window.get_question_open() || window.get_print_active() || window.get_diff_active()
+            || window.get_git_catalog_open()
+        {
             return;
         }
         if window.get_title_menu_open() {
@@ -1875,6 +1877,9 @@ fn build(window: &AppWindow, live: &Live, t: &Target, group: i32) -> Option<Vec<
             }
             root.push(Item::child("最近のフォルダ", "Recent Folders", recent));
             act!(Command::Workspaces);
+            act!(Command::PanelAction(crate::panel_actions::Action::Repositories(
+                crate::git_catalog_ui::Action::Show
+            )));
             // RFN01-67: 全ブランチのグラフ（Git Changes で選んでいるリポジトリ）。
             act!(Command::GitRepository);
             root.push(Item::Sep);

@@ -275,6 +275,24 @@ pub fn repository_root(folder: &Path) -> Result<Option<PathBuf>, GitError> {
     Ok(None)
 }
 
+/// The catalog distinguishes a normal folder from an unreadable registration.
+pub(crate) fn registered_repository(folder: &Path) -> Result<Option<PathBuf>, GitError> {
+    std::fs::read_dir(folder).map_err(|error| GitError::Failed(error.to_string()))?;
+    let output = run(folder, &["rev-parse", "--show-toplevel"], None)?;
+    if output.ok {
+        let root = PathBuf::from(output.text().trim_end_matches(['\r', '\n']));
+        return root.canonicalize().map(|root| Some(crate::backup::plain(&root)))
+            .map_err(|error| GitError::Failed(error.to_string()));
+    }
+    if output.stderr.starts_with("fatal: not a git repository") {
+        return Ok(None);
+    }
+    if output.stderr.contains("safe.directory") {
+        return Err(GitError::Untrusted);
+    }
+    Err(output.failure())
+}
+
 /// 管理下にないフォルダで`git init`。
 pub fn init(folder: &Path) -> Result<(), GitError> {
     checked(folder, &["init", "-q"], None).map(drop)

@@ -60,6 +60,7 @@ mod git_merge_ui;
 mod git_repo_ui;
 mod git_ui;
 mod git_worktree_ui;
+mod git_catalog_ui;
 mod git_version;
 mod i18n;
 #[cfg(test)]
@@ -3350,6 +3351,7 @@ fn main() -> Result<(), slint::PlatformError> {
     settings_transfer::wire(&window, &live);
     backup_ui::wire(&window, &live);
     git_ui::wire(&window, &live);
+    git_catalog_ui::wire(&window, &live);
     git_repo_ui::wire(&window, &live);
     git_file_history::wire(&window, &live);
 
@@ -7203,11 +7205,11 @@ impl WorkFolder {
     }
 }
 
-#[derive(Clone, Copy)]
 enum WorkspaceCleanup {
     Remove(workspace::WorkspaceId),
     Reset(workspace::WorkspaceId),
     Detach(workspace::WorkspaceId, workspace::FolderId),
+    OpenRepository(git_catalog_ui::Selection),
 }
 
 fn observe_folder_autosave(window: &AppWindow, live: &Live) {
@@ -9600,6 +9602,9 @@ fn finish_workspace_change_confirmed(
     live: &Live,
     target: Option<workspace::WorkspaceId>,
 ) {
+    if !git_catalog_ui::check_workspace_destination(window, live) {
+        return;
+    }
     // RFN01-106: 今のWorkspaceの並びを、閉じる前に覚える。RFN01-110: Explorerから入るなら、
     // そのWorkspaceの中のファイルは開いたまま持って入る（前に出ていたものを前に）。
     sync_active_tab(window, live);
@@ -9654,6 +9659,9 @@ fn finish_workspace_change_confirmed(
             WorkspaceCleanup::Detach(id, folder_id) => {
                 workspace_detach_root(window, live, id, folder_id);
                 switch_workspace(window, live, Some(id));
+            }
+            WorkspaceCleanup::OpenRepository(selection) => {
+                git_catalog_ui::open_after_switch(window, live, selection);
             }
         }
     }
@@ -14220,6 +14228,8 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     // The question took the keyboard away from the pane to ask (6.14).
     if window.get_question_return_to_tree() {
         tree_actions::restore_focus(window);
+    } else if window.get_git_catalog_open() {
+        git_catalog_ui::regain_focus(window);
     } else if window.get_git_repo_active() && !window.get_diff_active() {
         git_repo_ui::regain_focus(window);
     } else {
@@ -14341,6 +14351,9 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             );
         }
         (Question::DiscardForWorkspace(target), 0) => {
+            if !git_catalog_ui::check_workspace_destination(window, live) {
+                return;
+            }
             for document in closing_documents(live, target) {
                 if document.file.borrow().path().is_none() {
                     if !saving::discard_memo_copy(window, live, &document) {

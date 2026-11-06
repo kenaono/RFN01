@@ -1861,6 +1861,10 @@ fn build() -> Vec<ActionDef> {
         ("git.worktree-back", ("リポジトリに戻る", "Back to Repository"), A::GitWorktree(W::Back)),
         ("git.worktree-open", ("選択したWorktreeを開く", "Open Selected Worktree"), A::GitWorktree(W::Open)),
         ("git.worktree-create", ("Worktreeを作成", "Create Worktree"), A::GitWorktree(W::Create)),
+        ("git.repositories", ("リポジトリ一覧…", "Repositories…"), A::Repositories(crate::git_catalog_ui::Action::Show)),
+        ("git.repositories-refresh", ("一覧を更新", "Refresh Repository List"), A::Repositories(crate::git_catalog_ui::Action::Refresh)),
+        ("git.repository-open", ("選択したリポジトリを開く", "Open Selected Repository"), A::Repositories(crate::git_catalog_ui::Action::Open)),
+        ("git.repositories-close", ("リポジトリ一覧を閉じる", "Close Repository List"), A::Repositories(crate::git_catalog_ui::Action::Close)),
         ("git.merge-resolution", ("Mergeの解消を開く", "Open Merge Resolution"), A::GitMergeOpen),
         ("git.merge-edit-result", ("解消結果を編集", "Edit Merge Result"), A::GitMergeEdit),
         ("git.merge-stage-result", ("解消結果をStage", "Stage Merge Result"), A::GitMergeStage),
@@ -1887,7 +1891,7 @@ fn build() -> Vec<ActionDef> {
         ].map(|(id, title, action)| {
             let category = match action {
                 A::WorkspaceClone | A::GitFetch | A::GitPull | A::GitPush | A::GitSync
-                | A::GitCancel | A::GitCommit => Git,
+                | A::GitCancel | A::GitCommit | A::Repositories(_) => Git,
                 action if action.available_in_git_overlay() => Git,
                 _ => Surface,
             };

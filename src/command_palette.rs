@@ -252,7 +252,9 @@ pub fn close(window: &AppWindow) {
     window.set_palette_text("".into());
     window.set_palette_rows(ModelRc::from(Rc::new(VecModel::<PaletteRow>::default())));
     PALETTE.with(|held| held.borrow_mut().take());
-    if window.get_git_repo_active() {
+    if window.get_git_catalog_open() {
+        crate::git_catalog_ui::regain_focus(window);
+    } else if window.get_git_repo_active() {
         crate::git_repo_ui::regain_focus(window);
     } else {
         window.set_focus_generation(window.get_focus_generation() + 1);
@@ -291,7 +293,7 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
     let rows = PALETTE.with(|held| {
         let mut held = held.borrow_mut();
         let palette = held.as_mut()?;
-        if window.get_git_repo_active() {
+        if window.get_git_repo_active() || window.get_git_catalog_open() {
             let operations = palette.operations.get_or_insert_with(|| {
                 operations_now(window, live, palette.pane, &palette.tree)
             });
@@ -862,9 +864,14 @@ fn operations_now(
         .filter_map(|(at, action)| {
             let command = action.command.clone()?;
             let enabled = if let menu_commands::Command::PanelAction(action) = command {
-                (!crate::panel_actions::overlay_active(window) || action.available_in_git_overlay())
+                (!crate::panel_actions::overlay_active(window)
+                    || if window.get_git_catalog_open() {
+                        action.available_in_catalog()
+                    } else {
+                        action.available_in_git_overlay()
+                    })
                     && tree_scene.enabled(&command)
-            } else if window.get_git_repo_active() {
+            } else if window.get_git_repo_active() || window.get_git_catalog_open() {
                 false
             } else if matches!(command, menu_commands::Command::Tree(_)) {
                 tree_scene.enabled(&command)
@@ -881,7 +888,7 @@ fn operations_now(
                 })
         })
         .collect();
-    if window.get_git_repo_active() {
+    if window.get_git_repo_active() || window.get_git_catalog_open() {
         return found;
     }
     found.extend(

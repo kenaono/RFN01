@@ -301,6 +301,10 @@ pub(crate) fn active_root() -> Option<PathBuf> {
     PANE.with(|pane| root_of(&pane.borrow()))
 }
 
+pub(crate) fn chosen_folder() -> Option<PathBuf> {
+    PANE.with(|pane| pane.borrow().chosen.clone())
+}
+
 pub(crate) fn merge_snapshot() -> Option<(PathBuf, git::MergeState)> {
     PANE.with(|pane| {
         let pane = pane.borrow();
@@ -1833,9 +1837,9 @@ fn choose_folder(window: &AppWindow, live: &Live, folder: PathBuf) {
     }
 }
 
-pub(crate) fn select_worktree(window: &AppWindow, live: &Live, root: &Path) {
+pub(crate) fn select_registered_folder(window: &AppWindow, live: &Live, registered: &Path) {
     let folders = workspace_folders(live);
-    let Some(folder) = folders.iter().find(|folder| same_path(folder, root)).cloned() else {
+    let Some(folder) = folders.iter().find(|folder| same_path(folder, registered)).cloned() else {
         return;
     };
     PANE.with(|pane| pane.borrow_mut().folders = folders);

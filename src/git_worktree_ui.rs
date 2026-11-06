@@ -214,7 +214,7 @@ pub(crate) fn open_worktree(window: &AppWindow, live: &Live, request: OpenWorktr
         refresh_workspace_tree(window, live, request.workspace);
         publish_workspace_manager(window, live);
     }
-    git_ui::select_worktree(window, live, &path);
+    git_ui::select_registered_folder(window, live, &path);
 }
 
 pub(crate) fn wire(window: &AppWindow) {

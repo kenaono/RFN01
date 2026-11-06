@@ -1,0 +1,204 @@
+import { ScrollView } from "std-widgets.slint";
+import { Field, Role, TextButton } from "controls.slint";
+import { Tok } from "tokens.slint";
+
+export struct GitCatalogRow {
+    name: string,
+    path: string,
+    branch: string,
+    workspaces: string,
+    destination: string,
+    error: string,
+    current: bool,
+}
+
+export component GitCatalogView inherits Rectangle {
+    in property <[GitCatalogRow]> rows;
+    in property <int> focus-generation;
+    in property <bool> scanning;
+    in property <bool> workspace-active;
+    in property <string> note;
+    in-out property <int> selected: -1;
+    in-out property <string> filter;
+    in-out property <bool> current-only;
+    callback filter-changed();
+    callback action(string);
+    pure callback allowed(string) -> bool;
+    pure callback action-title(string) -> string;
+    callback shortcut(KeyEvent) -> EventResult;
+
+    private property <length> row-height: 76px;
+    background: Tok.paper;
+    changed focus-generation => { search.take-focus(); }
+    changed selected => {
+        if root.selected >= 0 && (root.selected * root.row-height < -list.content-y
+            || (root.selected + 1) * root.row-height > -list.content-y + list.visible-height) {
+            list.content-y = -min(root.selected * root.row-height, max(0px, list.content-height - list.visible-height));
+        }
+    }
+
+    function open-selected() {
+        if root.allowed("git.repository-open") { root.action("git.repository-open"); }
+    }
+
+    VerticalLayout {
+        Rectangle {
+            height: 64px;
+            background: Tok.chrome;
+            HorizontalLayout {
+                padding: 14px;
+                spacing: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    spacing: 3px;
+                    Text {
+                        text: @tr("Repositories");
+                        color: Tok.ink-strong;
+                        font-size: 18px;
+                        font-weight: 650;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: @tr("Git repositories in your Workspaces");
+                        color: Tok.ink-muted;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TextButton {
+                        title: root.action-title("git.repositories-refresh");
+                        enabled: root.allowed("git.repositories-refresh");
+                        clicked => { root.action("git.repositories-refresh"); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TextButton {
+                        title: root.action-title("git.repositories-close");
+                        clicked => { root.action("git.repositories-close"); }
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+            vertical-stretch: 1;
+            HorizontalLayout {
+                spacing: 8px;
+                search := Field {
+                    height: 32px;
+                    horizontal-stretch: 1;
+                    text <=> root.filter;
+                    placeholder: @tr("Filter by name, path, branch or Workspace");
+                    init => { self.take-focus(); }
+                    edited => { root.filter-changed(); }
+                    accepted => { root.open-selected(); }
+                    escaped => { root.action("git.repositories-close"); }
+                    shortcut(event) => {
+                        if root.rows.length > 0 && (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                            root.selected = clamp(root.selected + (event.text == Key.UpArrow ? -1 : 1), 0, root.rows.length - 1);
+                            return accept;
+                        }
+                        return root.shortcut(event);
+                    }
+                }
+                if root.workspace-active: TextButton {
+                    title: root.current-only ? @tr("Current Workspace") : @tr("All Workspaces");
+                    clicked => {
+                        root.current-only = !root.current-only;
+                        root.filter-changed();
+                        search.take-focus();
+                    }
+                }
+            }
+            if root.note != "" || root.scanning || root.rows.length == 0: Text {
+                text: root.note != "" ? root.note : root.scanning ? @tr("Reading registered folders…")
+                    : root.filter != "" ? @tr("No matching repositories.")
+                    : @tr("No Git repositories in the registered folders.");
+                color: Tok.ink-muted;
+                wrap: word-wrap;
+            }
+            list := ScrollView {
+                vertical-stretch: 1;
+                content-width: self.visible-width;
+                VerticalLayout {
+                    width: parent.visible-width;
+                    alignment: start;
+                    for row[index] in root.rows: Rectangle {
+                        height: root.row-height;
+                        Rectangle {
+                            y: 2px;
+                            height: parent.height - 4px;
+                            border-radius: 6px;
+                            background: root.selected == index ? Tok.accent-soft
+                                : (hit.has-hover ? Tok.chrome : Tok.accent-faint);
+                        }
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 3px;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: row.name;
+                                    font-size: 15px;
+                                    font-weight: 650;
+                                    color: Tok.ink-strong;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                                if row.branch != "": Text {
+                                    text: row.branch;
+                                    max-width: root.width * 0.35;
+                                    color: Tok.ink-muted;
+                                    overflow: elide;
+                                    font-size: 12px;
+                                }
+                                if row.current: Text { text: @tr("Current repository"); color: Tok.accent; font-size: 12px; }
+                                if row.error != "": Text { text: @tr("Unavailable"); color: Tok.ink-muted; font-size: 12px; }
+                            }
+                            Text { text: row.path; font-size: 12px; color: Tok.ink; overflow: elide; }
+                            Text { text: row.workspaces; font-size: 12px; color: Tok.ink-muted; overflow: elide; }
+                        }
+                        hit := TouchArea {
+                            clicked => { root.selected = index; search.take-focus(); }
+                            double-clicked => { root.selected = index; root.open-selected(); }
+                        }
+                    }
+                }
+            }
+            if root.selected >= 0: Rectangle {
+                height: 1px;
+                background: Tok.rule;
+            }
+            if root.selected >= 0: VerticalLayout {
+                spacing: 4px;
+                Text { text: root.rows[root.selected].path; color: Tok.ink; wrap: char-wrap; font-size: 12px; }
+                if root.rows[root.selected].error != "": Text {
+                    text: root.rows[root.selected].error;
+                    color: Tok.ink-muted;
+                    wrap: word-wrap;
+                    font-size: 12px;
+                }
+                if root.rows[root.selected].destination != "" && root.rows[root.selected].error == "": Text {
+                    text: @tr("Switch to Workspace: {}", root.rows[root.selected].destination);
+                    color: Tok.ink-muted;
+                    wrap: word-wrap;
+                    font-size: 12px;
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                TextButton {
+                    title: root.action-title("git.repository-open");
+                    enabled: root.allowed("git.repository-open");
+                    role: Role.primary;
+                    clicked => { root.open-selected(); }
+                }
+            }
+        }
+    }
+}

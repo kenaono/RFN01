@@ -21,6 +21,8 @@ export { Colours } from "controls.slint";
 import { DiffView, DiffRow } from "diff-window.slint";
 import { BackupHistoryList, BackupPaneRow, BackupRow, BackupsView } from "backup-view.slint";
 import { GitChangesView, GitRow } from "git-view.slint";
+import { GitCatalogView, GitCatalogRow } from "git-catalog.slint";
+export { GitCatalogRow } from "git-catalog.slint";
 import { GitMergeView } from "git-merge.slint";
 import { GitWorktreeRow, GitWorktreesView } from "git-worktrees.slint";
 import { GitBranchRow, GitCommitRow, GitDiffPart, GitDiffRow, GitHunkLine, GitHunkRow, GitLine, GitRef, GitRepositoryView, GitSearchRow } from "git-repository.slint";
@@ -1244,6 +1246,15 @@ export component AppWindow inherits Window {
     callback git-row-diff(int);
     callback git-row-menu(int, int);
     callback git-open-repository();
+    in property <bool> git-catalog-open;
+    in property <bool> git-catalog-scanning;
+    in property <int> git-catalog-focus;
+    in property <[GitCatalogRow]> git-catalog-rows;
+    in property <string> git-catalog-note;
+    in-out property <int> git-catalog-selected: -1;
+    in-out property <string> git-catalog-filter;
+    in-out property <bool> git-catalog-current-only;
+    callback git-catalog-filter-changed();
     /// RFN01-67 PR 2a: Git Repository の画面（`git_repo_ui`）。
     in-out property <bool> git-repo-active;
     in property <string> git-repo-name;
@@ -1790,7 +1801,7 @@ export component AppWindow inherits Window {
     if root.custom-title: TitleMenuBar {
         x: 0px; y: 0px; width: root.width;
         menu-visible: root.title-menu-visible;
-        blocked: root.question-open || root.print-active || root.diff-active || root.git-repo-active;
+        blocked: root.question-open || root.print-active || root.diff-active || root.git-repo-active || root.git-catalog-open;
         maximized: root.title-maximized;
         hot: root.title-hot;
         pressed: root.title-pressed;
@@ -1833,7 +1844,7 @@ export component AppWindow inherits Window {
     // 並びきらない分は末尾の「⋯」にまとめる（`FormatButtons`）。
     if root.format-toolbar-open: Rectangle {
         y: root.title-height;
-        visible: !root.git-merge-open && !root.git-worktrees-open;
+        visible: !root.git-merge-open && !root.git-worktrees-open && !root.git-catalog-open;
         width: root.width;
         height: 34px;
         background: Tok.chrome;
@@ -1859,7 +1870,7 @@ export component AppWindow inherits Window {
     }
     VerticalBox {
         y: root.chrome-height;
-        visible: !root.git-merge-open && !root.git-worktrees-open;
+        visible: !root.git-merge-open && !root.git-worktrees-open && !root.git-catalog-open;
         height: root.height - root.chrome-height;
         spacing: 0px;
 
@@ -2177,6 +2188,9 @@ export component AppWindow inherits Window {
                         row-diff(index) => { root.git-row-diff(index); }
                         row-menu(index, action) => { root.git-row-menu(index, action); }
                         open-repository => { root.git-open-repository(); }
+                        repositories-title: root.git-action-title("git.repositories");
+                        repositories-allowed: root.git-action-allowed("git.repositories", false, root.git-repo-action-generation);
+                        open-repositories => { root.surface-action("git.repositories"); }
                     }
                     if root.left-tab == 7: BackupsView {
                         vertical-stretch: 1;
@@ -7004,6 +7018,24 @@ export component AppWindow inherits Window {
             print-requested => { root.surface-action("print-preview.print"); }
             dismissed => { root.surface-action("print-preview.close"); }
         }
+    }
+
+    if root.git-catalog-open: GitCatalogView {
+        y: root.title-height;
+        height: root.height - root.title-height;
+        rows: root.git-catalog-rows;
+        note: root.git-catalog-note;
+        scanning: root.git-catalog-scanning;
+        focus-generation: root.git-catalog-focus;
+        workspace-active: root.workspace-active;
+        selected <=> root.git-catalog-selected;
+        filter <=> root.git-catalog-filter;
+        current-only <=> root.git-catalog-current-only;
+        filter-changed => { root.git-catalog-filter-changed(); }
+        action(id) => { root.surface-action(id); }
+        allowed(id) => { return root.git-action-allowed(id, false, root.git-repo-action-generation); }
+        action-title(id) => { return root.git-action-title(id); }
+        shortcut(event) => { return root.shortcut-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) ? accept : reject; }
     }
 
     // RFN01-67 PR 2a: Git Repository。ペインとTABはこの下にそのまま残る。比較の画面はこの上に

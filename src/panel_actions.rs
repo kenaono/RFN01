@@ -21,6 +21,7 @@ pub(crate) enum Action {
     GitCommit,
     GitRepo(git_repo_ui::RepoAction),
     GitWorktree(git_worktree_ui::Action),
+    Repositories(git_catalog_ui::Action),
     GitMergeOpen,
     GitMergeEdit,
     GitMergeStage,
@@ -47,6 +48,10 @@ pub(crate) enum Action {
 }
 
 impl Action {
+    pub(crate) fn available_in_catalog(self) -> bool {
+        matches!(self, Self::Repositories(action) if action != git_catalog_ui::Action::Show)
+    }
+
     pub(crate) fn available_in_git_overlay(self) -> bool {
         matches!(self, Self::GitRepo(_) | Self::GitWorktree(_)) || self.is_merge_resolution()
     }
@@ -89,6 +94,10 @@ impl Action {
             GitWorktree(git_worktree_ui::Action::Back) => ("Worktreeの一覧からGit Repositoryへ戻ります。", "Return from the worktree list to Git Repository."),
             GitWorktree(git_worktree_ui::Action::Open) => ("選択した作業先に切り替えます。未登録なら追加を確認します。", "Switch to the selected worktree. Confirm before adding it to the workspace."),
             GitWorktree(git_worktree_ui::Action::Create) => ("指定したフォルダに新しいブランチのWorktreeを作成します。", "Create a worktree on a new branch in the specified folder."),
+            Repositories(git_catalog_ui::Action::Show) => ("Workspaceに登録されたGitリポジトリを一覧します。", "List Git repositories registered in Workspaces."),
+            Repositories(git_catalog_ui::Action::Refresh) => ("登録フォルダとリポジトリの状態を読み直します。", "Read the registered folders and repository state again."),
+            Repositories(git_catalog_ui::Action::Open) => ("選択したリポジトリを所属Workspaceで開きます。", "Open the selected repository in its Workspace."),
+            Repositories(git_catalog_ui::Action::Close) => ("リポジトリ一覧を閉じます。", "Close the repository list."),
             GitMergeOpen => ("進行中のMergeと未解決のファイルを表示します。", "Inspect the in-progress merge and unresolved files."),
             GitMergeEdit => ("選択したファイルの作業版を文書タブで開きます。", "Open the selected working file in an editor tab."),
             GitMergeStage => ("選択したファイルの保存済みの解消結果をStageします。", "Stage the saved resolution for the selected file."),
@@ -132,6 +141,8 @@ pub(crate) struct Context {
     merge: Option<(PathBuf, git::MergeState, Option<git::MergeConflict>)>,
     repo_view: Option<git_repo_ui::ActionTarget>,
     worktree: Option<git_worktree_ui::Target>,
+    catalog_open: bool,
+    repository_selection: Option<git_catalog_ui::Selection>,
 }
 
 impl Context {
@@ -156,6 +167,8 @@ impl Context {
             merge: git_merge_ui::target(),
             repo_view: git_repo_ui::ActionTarget::capture(window),
             worktree: git_worktree_ui::Target::capture(window),
+            catalog_open: window.get_git_catalog_open(),
+            repository_selection: git_catalog_ui::selection(window, live),
         }
     }
 
@@ -185,6 +198,9 @@ impl Context {
             GitWorktree(action) => self.workspace == current.workspace
                 && self.worktree.as_ref().zip(current.worktree.as_ref())
                     .is_some_and(|(target, current)| target.valid(current, action)),
+            Repositories(action) => self.workspace == current.workspace
+                && self.catalog_open == current.catalog_open
+                && (action != git_catalog_ui::Action::Open || self.repository_selection == current.repository_selection),
             action if action.is_merge_resolution() => {
                 self.workspace == current.workspace && self.merge == current.merge
             }
@@ -216,6 +232,15 @@ pub(crate) fn enabled(window: &AppWindow, context: Option<&Context>, action: Act
     let print = window.get_print_active() && !diff;
     let repository = window.get_git_repo_active() && !diff && !print;
     let overlay = diff || print || repository;
+    if window.get_git_catalog_open() {
+        return match action {
+            Repositories(git_catalog_ui::Action::Refresh) => !window.get_git_catalog_scanning(),
+            Repositories(git_catalog_ui::Action::Open) => !window.get_git_busy()
+                && context.is_some_and(|context| context.repository_selection.is_some()),
+            Repositories(git_catalog_ui::Action::Close) => true,
+            _ => false,
+        };
+    }
     let shown =
         |tab: LeftTab| !overlay && window.get_tree_open() && window.get_left_tab() == tab.index();
     let git = (shown(LeftTab::Git) || repository) && window.get_git_mode() == 2;
@@ -255,6 +280,7 @@ pub(crate) fn enabled(window: &AppWindow, context: Option<&Context>, action: Act
         GitWorktree(action) => repository && !window.get_git_merge_open()
             && context.and_then(|context| context.worktree.as_ref())
                 .is_some_and(|target| target.enabled(window, action)),
+        Repositories(action) => action == git_catalog_ui::Action::Show && !overlay && !window.get_git_busy(),
         GitMergeOpen => git && merge_target && !window.get_git_merge_open()
             && !window.get_git_worktrees_open() && !window.get_git_busy(),
         GitMergeEdit => resolver && window.get_git_merge_selected() >= 0 && window.get_git_merge_can_edit(),
@@ -294,7 +320,7 @@ pub(crate) fn enabled(window: &AppWindow, context: Option<&Context>, action: Act
 }
 
 pub(crate) fn overlay_active(window: &AppWindow) -> bool {
-    window.get_diff_active() || window.get_print_active() || window.get_git_repo_active()
+    window.get_diff_active() || window.get_print_active() || window.get_git_repo_active() || window.get_git_catalog_open()
 }
 
 fn print_step(window: &AppWindow) -> i32 {
@@ -329,6 +355,9 @@ pub(crate) fn execute(window: &AppWindow, live: &Live, context: Option<&Context>
                 target.execute(window, live, action);
             }
         }
+        Action::Repositories(action) => git_catalog_ui::execute(
+            window, live, action, context.and_then(|context| context.repository_selection.as_ref()),
+        ),
         Action::DiffPrevious => window.invoke_diff_next_difference(false),
         Action::DiffNext => window.invoke_diff_next_difference(true),
         Action::DiffClose => window.invoke_diff_dismissed(),

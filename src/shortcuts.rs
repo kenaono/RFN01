@@ -735,6 +735,11 @@ pub fn wire(app: &AppWindow, live: &Live) {
             crate::panel_actions::queue(&app, &keyed_live, *action);
             return true;
         }
+        if app.get_git_catalog_open()
+            && usize::try_from(command).ok().and_then(command_at) != Some(&Command::CommandPalette(true))
+        {
+            return false;
+        }
         // RFN01-67（書き手の求め 2026-10-03）: Git Repository の画面では「戻る」で画面を閉じる。
         // ほかのショートカットは、下に隠れているペインへは届けない。
         if app.get_git_repo_active() {

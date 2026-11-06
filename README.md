@@ -1390,6 +1390,8 @@ PCにインストールされている`git`を使います。Gitが無い（イ�
 
 ## Git Repository
 
+Fileの「リポジトリ一覧…」、Git Changesのフォルダアイコン、コマンドパレットから、全Workspaceで管理しているGitリポジトリを一覧できます。名前・パス・ブランチ・Workspaceで検索し、現在のWorkspaceだけに絞れます。↑／↓で選択し、Enterで開きます。別のWorkspaceに所属するリポジトリを開く場合は、画面に表示されたWorkspaceに切り替わります。
+
 File の「Git Repository…」か、Git Changes の見出しの右端のアイコンで、全ブランチのグラフを開きます（RFN01-67、手本はGitKraken）。対象は Git Changes で選んでいるリポジトリです。比較の画面と同じく窓に重ねて開き、Close か Esc、または「戻る」（マウスの戻る釦・Alt+←・メニューの「戻る」）で元のペインとTABへ戻ります。
 - **上の帯**：今のブランチ▾、Undo／Redo、Pull／Push／Fetch／Branch（選んでいるCommitから新しいブランチ）／Stash／Pop。
 - **左の列**：LOCAL・REMOTE・STASHES。ブランチを押すとグラフでその先端を選び、ダブルクリックで Checkout。右クリックで Checkout／New Branch…／Merge into 〈今のブランチ〉／Push／Delete…。**ブランチを押したまま別のローカルブランチへ動かして離すと、確認してから Merge** します（落とし先が今のブランチでなければ、先にそこへ Checkout します）。
