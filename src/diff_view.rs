@@ -669,6 +669,7 @@ mod tests {
         window.window().dispatch_event(WindowEvent::KeyPressed {
             text: slint::platform::Key::Escape.into(),
         });
+        slint::platform::update_timers_and_animations();
         assert!(!window.get_diff_active(), "Escape exits the comparison");
     }
     #[test]
