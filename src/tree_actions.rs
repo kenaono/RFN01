@@ -273,6 +273,42 @@ mod tests {
     }
 
     #[test]
+    fn queued_context_rename_keeps_the_row_captured_by_the_menu() {
+        let root = scratch_directory("tree-context-target");
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        std::fs::write(&second, "second").unwrap();
+        let (harness, _) = Harness::new(|window| open_under(&root, "first.md", "first", window));
+        let window = &harness.window;
+        let live = &harness.live;
+        live.folder.borrow_mut().root = Some(root);
+        window.set_tree_open(true);
+        publish_left(window, live);
+        wiring::wire_left_panel(window, live);
+
+        let row_of = |path: &Path| {
+            live.tree_paths
+                .borrow()
+                .iter()
+                .position(|row| row == path)
+                .unwrap() as i32
+        };
+        let rename = 2;
+        window.invoke_left_context_requested(row_of(&first));
+        window.invoke_tree_context_command(rename);
+        window.invoke_left_row_picked(row_of(&second));
+        slint::platform::update_timers_and_animations();
+        assert!(live.pending.borrow().is_none());
+
+        window.invoke_left_context_requested(row_of(&second));
+        window.invoke_tree_context_command(rename);
+        slint::platform::update_timers_and_animations();
+        assert!(
+            matches!(&*live.pending.borrow(), Some(Question::RenameEntry(path)) if path == &second)
+        );
+    }
+
+    #[test]
     fn workspace_root_navigation_preserves_its_protections() {
         let root = scratch_directory("tree-actions-root");
         let (harness, _) = Harness::new(|window| open_under(&root, "top.md", "", window));

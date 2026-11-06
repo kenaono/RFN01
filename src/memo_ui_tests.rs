@@ -167,7 +167,6 @@ fn file_tree_keeps_focus_through_file_open_and_confirmation() {
 }
 
 #[test]
-#[ignore = "Explorer menu placement and refresh guard"]
 fn explorer_menu_blocks_refresh_until_dismissed() {
     use slint::platform::{PointerEventButton, WindowEvent};
     let surface = MinimalSoftwareWindow::new(Default::default());
@@ -217,9 +216,6 @@ fn explorer_menu_blocks_refresh_until_dismissed() {
         &[0, 1, 2],
         "Explorer toolbar dispatches each action"
     );
-    click(110.0, 82.0, PointerEventButton::Right);
-    draw();
-    assert!(window.get_tree_refresh_blocked());
     let command = Rc::new(Cell::new(-1));
     let received = command.clone();
     window.set_tree_context_items(ModelRc::new(VecModel::from(vec![
@@ -227,6 +223,9 @@ fn explorer_menu_blocks_refresh_until_dismissed() {
         8
     ])));
     window.on_tree_context_command(move |value| received.set(value));
+    click(110.0, 82.0, PointerEventButton::Right);
+    draw();
+    assert!(window.get_tree_refresh_blocked());
     click(100.0, 114.0, PointerEventButton::Left);
     draw();
     assert_eq!(
