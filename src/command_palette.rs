@@ -955,7 +955,7 @@ fn ranked_operations(operations: &[Operation], query: &str, categorized: bool) -
             .into_iter()
             .chain(best_score(query, &title_ja, &title_en))
             .max()
-            .or_else(|| alias_score(query, ja, en));
+            .or_else(|| alias_score(query, operation.action));
         let Some(points) = points else {
             continue;
         };
@@ -1008,10 +1008,10 @@ fn finish_ranked(mut rows: Vec<RankedRow>) -> (Vec<PaletteRow>, Vec<Shown>) {
 
 /// RFN01-107（書き手の求め 2026-11-05）: **名前に無い言葉でも引けるように。**「Terminalを
 /// 閉じる」「Editorを閉じる」で「TABを閉じる」を、「Panelを閉じる」で「下段のTABを閉じる」を。
-/// 表には出さず、探すときだけ使う。名前はどちらの言語で来てもよい。
+/// 表示名に依存しないように、アクションIDに検索語を対応させる。
 const ALIASES: &[(&str, &[&str])] = &[
     (
-        "TABを閉じる",
+        "file.close-tab",
         &[
             "Terminalを閉じる",
             "Editorを閉じる",
@@ -1020,7 +1020,7 @@ const ALIASES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "下段のTABを閉じる",
+        "view.close-strip-tab",
         &[
             "Panelを閉じる",
             "Editor Panelを閉じる",
@@ -1030,12 +1030,16 @@ const ALIASES: &[(&str, &[&str])] = &[
             "Close Terminal Panel",
         ],
     ),
+    ("run.compare-file", &["diff"]),
+    ("run.compare-saved", &["diff saved"]),
+    ("run.compare-head", &["diff git"]),
 ];
 
-fn alias_score(query: &str, name: &str, other: &str) -> Option<i64> {
+fn alias_score(query: &str, action: Option<usize>) -> Option<i64> {
+    let id = &crate::actions::all()[action?].id;
     ALIASES
         .iter()
-        .filter(|(key, _)| *key == name || *key == other)
+        .filter(|(key, _)| *key == id)
         .flat_map(|(_, words)| words.iter())
         .filter_map(|word| score(query, word))
         .max()
@@ -1094,6 +1098,19 @@ mod tests {
             after = after.split_once(stage).unwrap_or_else(|| panic!("missing {stage}: {written}")).1;
         }
         assert!(!written.contains(query));
+    }
+
+    #[test]
+    fn diff_search_lists_file_comparison_first() {
+        let (harness, _) = crate::saving::Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let window = &harness.window;
+        install(window, &harness.live);
+        window.invoke_palette_requested(true);
+        window.invoke_palette_edited("> diff".into());
+
+        let rows = window.get_palette_rows();
+        assert_eq!(rows.row_data(0).unwrap().assign.as_str(), "run.compare-file");
+        close(window);
     }
 
     /// RFN01-87: the letters in order, together counting for more.
