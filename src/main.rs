@@ -78,6 +78,7 @@ mod link_ui_tests;
 #[cfg(test)]
 mod memo_ui_tests;
 mod menu_commands;
+mod panel_actions;
 mod open_document;
 mod pane_layout;
 mod panel_source;

@@ -106,6 +106,17 @@ export component QuickDraft inherits Window {
     /// Bring one of the kept drafts back, by its place in the list.
     callback history-picked(int);
 
+    public function run-action(id: string) {
+        if root.text == "" { return; }
+        if id == "draft.copy-all" || id == "draft.copy-and-close" {
+            root.copy-all();
+            if id == "draft.copy-and-close" { root.copy-and-close(); }
+        }
+        if id == "draft.clear" { root.clear-requested(); }
+        if id == "draft.paste-to-tab" { root.send-requested(); }
+    }
+
+
     /// 要件 12.3: the whole draft, whatever is selected.
     ///
     /// **The selection is put back afterwards.** Copying is not an edit and
@@ -312,7 +323,7 @@ export component QuickDraft inherits Window {
                 role: Role.danger;
                 enabled: root.text != "";
                 clicked => {
-                    root.clear-requested();
+                    root.run-action("draft.clear");
                 }
             }
 
@@ -370,7 +381,7 @@ export component QuickDraft inherits Window {
                             // Once the list is up it has the pointer, and the
                             // row under it answers for itself.
                             if (!tabs-menu.is-open) {
-                                root.send-requested();
+                                root.run-action("draft.paste-to-tab");
                             }
                         }
                     }
@@ -425,8 +436,7 @@ export component QuickDraft inherits Window {
                 title: @tr("Copy & close");
                 enabled: root.text != "";
                 clicked => {
-                    root.copy-all();
-                    root.copy-and-close();
+                    root.run-action("draft.copy-and-close");
                 }
             }
 
@@ -435,7 +445,7 @@ export component QuickDraft inherits Window {
                 role: Role.primary;
                 enabled: root.text != "";
                 clicked => {
-                    root.copy-all();
+                    root.run-action("draft.copy-all");
                 }
             }
         }

@@ -766,7 +766,7 @@ msgid "Shortcuts"
 msgstr "ショートカット"
 
 msgid "Show Current Document in Tree"
-msgstr "現在の文書をツリー内に表示"
+msgstr "現在の文書をファイルツリーで表示"
 
 msgid "Show spaces and line breaks"
 msgstr "空白・改行を表示"

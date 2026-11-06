@@ -691,6 +691,8 @@ mod tests {
             "edit",
             "find",
             "tab",
+            "palette",
+            "palette.detail",
         ] {
             log.write(category, "detail-must-not-appear");
         }

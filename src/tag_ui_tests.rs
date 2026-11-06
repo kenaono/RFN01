@@ -55,7 +55,10 @@ fn the_tag_view_answers_its_clicks() {
     let row = heard.clone();
     window.on_left_row_activated(move |index| row.borrow_mut().push(format!("row {index}")));
     let all = heard.clone();
-    window.on_tag_fold_all(move |close| all.borrow_mut().push(format!("all {close}")));
+    window.on_surface_action(move |id| {
+        assert_eq!(id.as_str(), "tags.collapse-all");
+        all.borrow_mut().push("all true".into());
+    });
 
     window.set_left_tab(6);
     window.set_tag_available(true);
