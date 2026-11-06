@@ -765,3 +765,139 @@ fn each_workspace_keeps_its_tabs_and_explorer_files_come_along() {
     assert_eq!(runtime.borrow().active_workspace(), Some(first));
     assert_eq!(names(), ["a.md", "b.md"], "the outside file is closed");
 }
+
+#[test]
+fn carried_document_is_shared_by_duplicate_views_without_replacing_their_carets() {
+    use crate::saving::{Harness, edit, open_under, scratch_directory};
+    let root = scratch_directory("workspace-carried-duplicates");
+    let (harness, document) = Harness::new(|weak| open_under(&root, "draft.md", "original", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    edit(&document, " carried edit");
+    let path = root.join("draft.md").canonicalize().unwrap();
+    let stored_tab = |caret| app_data::SessionTab {
+        origin: Some(path.clone()),
+        caret: Some(caret),
+        ..Default::default()
+    };
+    let stored = app_data::Session {
+        layout: "S h 0.5 P 0 P 1".to_owned(),
+        panes: vec![
+            app_data::SessionPane {
+                tabs: vec![stored_tab(1), stored_tab(2)],
+                ..Default::default()
+            },
+            app_data::SessionPane {
+                tabs: vec![stored_tab(3)],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let carried = live.tabs.borrow().of(PaneId::FIRST).tabs[0].clone();
+    restore_workspace_tabs(
+        window,
+        live,
+        Some(stored),
+        vec![carried],
+        Some(document.clone()),
+    );
+    let tabs = live.tabs.borrow();
+    let views = tabs
+        .panes
+        .iter()
+        .flat_map(|strip| &strip.tabs)
+        .collect::<Vec<_>>();
+    assert_eq!(views.len(), 3);
+    assert!(views.iter().all(|tab| Rc::ptr_eq(&tab.document, &document)));
+    assert_eq!(
+        views
+            .iter()
+            .map(|tab| tab.view.state.caret_source_byte)
+            .collect::<Vec<_>>(),
+        [Some(1), Some(2), Some(3)]
+    );
+}
+
+#[test]
+fn workspace_restore_filters_outside_tabs_and_preserves_the_original_selection() {
+    use crate::saving::{Harness, open_under, scratch_directory};
+    let root = scratch_directory("workspace-restore-scope");
+    let inside = root.join("inside");
+    std::fs::create_dir(&inside).unwrap();
+    let (harness, _) = Harness::new(|weak| open_under(&inside, "first.md", "first", weak));
+    std::fs::write(root.join("outside.md"), "outside").unwrap();
+    std::fs::write(inside.join("active.md"), "active").unwrap();
+    std::fs::write(inside.join("last.md"), "last").unwrap();
+    let stored = |active| app_data::Session {
+        layout: "P 0".to_owned(),
+        panes: vec![app_data::SessionPane {
+            active,
+            tabs: [
+                root.join("outside.md"),
+                inside.join("first.md"),
+                inside.join("missing.md"),
+                inside.join("active.md"),
+                inside.join("last.md"),
+            ]
+            .into_iter()
+            .map(|path| app_data::SessionTab {
+                origin: Some(path),
+                ..Default::default()
+            })
+            .collect(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    // The selected active row is preserved. A missing selected row chooses
+    // the next remaining row.
+    for original in [2, 3] {
+        let (tabs, _) = session::open_session(
+            &harness.window,
+            Some(stored(original)),
+            Vec::new(),
+            Some(&[inside.clone()]),
+        );
+        let pane = tabs.of(PaneId::FIRST);
+        assert_eq!(pane.tabs.len(), 3);
+        assert_eq!(
+            pane.current().unwrap().document.text.borrow().as_str(),
+            "active"
+        );
+    }
+}
+
+#[test]
+fn workspace_change_keeps_a_dirty_editor_panel_until_confirmed() {
+    use crate::saving::{Harness, attach_workspace, edit, open_under, scratch_directory};
+    let root = scratch_directory("workspace-panel-close");
+    let (harness, _) = Harness::new(|weak| open_under(&root, "draft.md", "original", weak));
+    let (window, live) = (&harness.window, &harness.live);
+    attach_workspace(live, &root, workspace::SaveMode::Recovery);
+    let id = PaneId::FIRST;
+    terminal_panels::ensure(window, live, id);
+    let panel = terminal_panels::current(live, id).unwrap();
+    edit(&panel.borrow().document, "unsaved panel");
+    request_workspace_change(window, live, None);
+    assert!(matches!(
+        *live.pending.borrow(),
+        Some(Question::ChangeWorkspace(None))
+    ));
+    answer_question(window, live, 2);
+    assert!(Rc::ptr_eq(
+        &panel,
+        &terminal_panels::current(live, id).unwrap()
+    ));
+    assert_eq!(
+        panel.borrow().document.text.borrow().as_str(),
+        "unsaved panel"
+    );
+    request_workspace_change(window, live, None);
+    answer_question(window, live, 1);
+    assert!(matches!(
+        *live.pending.borrow(),
+        Some(Question::DiscardForWorkspace(None))
+    ));
+    answer_question(window, live, 0);
+    assert!(terminal_panels::current(live, id).is_none());
+}

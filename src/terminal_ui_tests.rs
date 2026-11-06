@@ -12,15 +12,187 @@ fn missing_wsl_and_powershell_7_leave_windows_powershell_available() {
     profiles[2].command = format!("\"{}\" -NoLogo", directory.join("pwsh.exe").display());
     hold_shells(&h.window, &profiles);
     h.window.set_wsl_discovery_complete(true);
-    h.window.set_default_shell(2);
+    h.window.set_default_shell_id("3".into());
 
     publish_shells(&h.window);
     assert_eq!(offered_shells(&h.window), vec![profiles[1].clone()]);
-    assert_eq!(
-        shell_at(&h.window, h.window.get_default_shell()),
-        profiles[1]
-    );
+    assert_eq!(default_shell(&h.window), profiles[1]);
+    assert_eq!(default_shell_id(&h.window), 3);
     assert_eq!(configured_shells(&h.window), profiles);
+}
+
+#[test]
+fn terminal_selection_uses_profile_ids_through_filtering_and_wsl_redetection() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let directory = app_data::app_directory().unwrap();
+    let wsl = directory.join("wsl.exe");
+    std::fs::write(&wsl, []).unwrap();
+    let shells = [
+        TerminalShell {
+            id: 10,
+            name: "Missing".into(),
+            command: format!("\"{}\"", directory.join("missing.exe").display()),
+            directory: String::new(),
+        },
+        TerminalShell {
+            id: 11,
+            name: "Windows".into(),
+            command: "cmd.exe".into(),
+            directory: String::new(),
+        },
+        TerminalShell {
+            id: 12,
+            name: "Ubuntu".into(),
+            command: format!("\"{}\" -d Ubuntu", wsl.display()),
+            directory: String::new(),
+        },
+        TerminalShell {
+            id: 13,
+            name: "Other Windows".into(),
+            command: "cmd.exe".into(),
+            directory: String::new(),
+        },
+    ];
+    let w = &h.window;
+    hold_shells(w, &shells);
+    w.set_default_shell_id("12".into());
+    w.set_wsl_discovery_complete(true);
+    w.set_wsl_distributions(ModelRc::new(VecModel::from(vec![SharedString::from(
+        "ubuntu",
+    )])));
+    publish_shells(w);
+    let ids = w
+        .get_terminal_shells()
+        .iter()
+        .map(|row| row.profile_id.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["11", "12", "13"]);
+    assert_eq!(default_shell(w).id, 12);
+
+    w.set_wsl_distributions(ModelRc::default());
+    publish_shells(w);
+    let ids = w
+        .get_terminal_shells()
+        .iter()
+        .map(|row| row.profile_id.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["11", "13"]);
+    assert_eq!(selected_shell(w, 13), Some(shells[3].clone()));
+    assert!(selected_shell(w, 12).is_none());
+    assert!(!w.get_render_status().is_empty());
+    assert_eq!(default_shell(w).id, 11);
+    let values = settings_values(w);
+    assert!(values.contains(&("terminal.default".into(), "id:12".into())));
+    let profile_label = w.get_shell_profile_names().row_data(2).unwrap();
+    assert!(profile_label.contains(pick("既定", "Default")));
+    assert!(profile_label.contains(pick(
+        "WSL ディストリビューションを利用できません",
+        "WSL distribution unavailable"
+    )));
+
+    let numbers = VecModel::from(vec![0; 2 * SHEET_NUMBERS]);
+    let palette = VecModel::from(vec![Color::default(); 2 * SHEET_COLOURS]);
+    let fonts = VecModel::from(vec![SharedString::default(); 2 * SHEET_FONTS]);
+    w.set_default_shell_id("11".into());
+    apply_settings(w, &numbers, &palette, &fonts, &values);
+    assert_eq!(default_shell_id(w), 12);
+    w.set_wsl_distributions(ModelRc::new(VecModel::from(vec![SharedString::from(
+        "Ubuntu",
+    )])));
+    publish_shells(w);
+    assert_eq!(default_shell(w).id, 12);
+}
+
+#[test]
+fn terminal_profile_apply_diagnostics_omit_secret_arguments() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let root = app_data::app_directory().unwrap();
+    for args in [Vec::new(), vec!["--diagnostics".into()]] {
+        let config = diag::Config::from_args(args).unwrap();
+        h.live
+            .cache
+            .borrow_mut()
+            .diag
+            .start_in(&root.join("profile-diag"), config);
+        h.window.set_shell_profile_index(-1);
+        h.window.set_shell_profile_name("QA shell".into());
+        h.window.set_shell_profile_executable("cmd.exe".into());
+        h.window
+            .set_shell_profile_arguments("ACCEPTED_SECRET_169".into());
+        terminal_shells::action(&h.window, &h.live, 1, 0);
+        h.window.set_shell_profile_name("QA shell".into());
+        h.window
+            .set_shell_profile_arguments("REJECTED_SECRET_169\ninvalid".into());
+        terminal_shells::action(&h.window, &h.live, 1, 0);
+        let log = std::fs::read_to_string(h.live.cache.borrow().diag.path().unwrap()).unwrap();
+        assert!(log.contains("profile saved"));
+        assert!(log.contains("profile refused"));
+        assert!(!log.contains("SECRET_169"));
+        terminal_shells::action(&h.window, &h.live, 6, 0);
+    }
+}
+
+#[test]
+fn workspace_switches_keep_their_own_terminal_history_until_disabled() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let (window, live) = (&h.window, &h.live);
+    let directory = app_data::app_directory().unwrap();
+    let runtime = Rc::new(RefCell::new(workspace_ui::Runtime::open(directory.clone())));
+    let (first, second) = runtime
+        .borrow_mut()
+        .edit(|registry| {
+            Ok((
+                registry.create_workspace("First".into())?,
+                registry.create_workspace("Second".into())?,
+            ))
+        })
+        .unwrap();
+    runtime
+        .borrow_mut()
+        .switch_active(Some(first), Default::default());
+    live.folder.borrow_mut().workspace = Some(runtime);
+    window.set_terminal_history_limit(1);
+    let terminal = TerminalSession::waiting(
+        TerminalShell {
+            id: 19,
+            name: "QA".into(),
+            command: "cmd.exe".into(),
+            directory: String::new(),
+        },
+        Some(directory.to_string_lossy().into_owned()),
+        vec!["older".into(), "latest".into()],
+        "then".into(),
+    );
+    live.tabs.borrow_mut().of_mut(PaneId::FIRST).unwrap().tabs[0].terminal =
+        Some(Rc::new(RefCell::new(terminal)));
+    request_workspace_change(window, live, Some(second));
+    let stored = app_data::read_workspace_tabs(&directory, first).unwrap();
+    let stored_shell = stored.panes[0].tabs[0].shell.as_ref().unwrap();
+    let output = stored_shell.output.as_ref().unwrap();
+    assert_eq!(stored_shell.profile_id, 19);
+    assert!(stored_shell.directory.is_empty());
+    assert_eq!(stored_shell.launch_directory.as_deref(), directory.to_str());
+    session::write_terminal_outputs(window, live);
+    session::write_session(window, live);
+    session::prune_terminal_outputs(window, live);
+    assert_eq!(
+        app_data::read_terminal_output(&directory, output)
+            .unwrap()
+            .1,
+        ["latest"]
+    );
+    request_workspace_change(window, live, Some(first));
+    let restored = live.tabs.borrow().of(PaneId::FIRST).tabs[0]
+        .terminal
+        .clone()
+        .unwrap();
+    assert_eq!(restored.borrow().output_lines(10), ["latest"]);
+    assert_eq!(restored.borrow().folder(), Some(directory.as_path()));
+    window.set_terminal_restore_output(false);
+    request_workspace_change(window, live, Some(second));
+    session::write_session(window, live);
+    session::prune_terminal_outputs(window, live);
+    assert!(app_data::read_terminal_output(&directory, output).is_none());
 }
 
 #[test]
@@ -127,7 +299,7 @@ fn closing_window_with_terminal_only_does_not_offer_to_save_panels() {
         String::new(),
     );
     let path = app_data::app_directory().unwrap().join("terminal.log");
-    terminal.start_file_log(path.clone(), std::fs::File::create(path).unwrap(), None);
+    terminal.start_file_log(path, None, || {});
     let terminal = Rc::new(RefCell::new(terminal));
     h.live.tabs.borrow_mut().of_mut(id).unwrap().tabs[0].terminal = Some(terminal.clone());
 
@@ -406,7 +578,7 @@ fn terminal_new_tab_random_and_direct_file_capture() {
         app_data::TEST_DIRECTORY.with(|p| p.borrow().as_ref().unwrap().join("direct-log.txt"));
     source
         .borrow_mut()
-        .start_file_log(path.clone(), std::fs::File::create(&path).unwrap(), None);
+        .start_file_log(path.clone(), None, || {});
     terminal_panels::publish_source(&h.window, &h.live, id);
     assert!(id.screen(&h.window).terminal_file_logging);
     assert!(!id.screen(&h.window).terminal_capturing);
@@ -427,14 +599,12 @@ fn terminal_new_tab_random_and_direct_file_capture() {
     while Instant::now() < until {
         source.borrow_mut().wait(Duration::from_millis(30));
         terminal_panels::drain(&h.window, &h.live);
-        if std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("DIRECT_CAPTURE")
-        {
+        if std::fs::read_to_string(&path).is_ok_and(|text| text.contains("DIRECT_CAPTURE")) {
             break;
         }
     }
     terminal_panels::action(&h.window, &h.live, id, 14, 0);
+    assert!(terminal_session::wait_for_file_logs().is_empty());
     assert!(!id.screen(&h.window).terminal_file_logging);
     assert!(source.borrow().file_log_path().is_none());
     assert!(
@@ -543,6 +713,97 @@ fn the_palette_keys_are_the_windows_in_a_shell() {
     assert!(!key("r", false), "and bash's Ctrl+R");
 }
 
+fn add_test_terminal(
+    h: &Harness,
+    number: u32,
+    final_output: Option<&[u8]>,
+) -> (Rc<()>, Rc<RefCell<TerminalSession>>) {
+    let mut session = TerminalSession::waiting(
+        TerminalShell {
+            id: 0,
+            name: "QA".into(),
+            command: "cmd.exe".into(),
+            directory: String::new(),
+        },
+        None,
+        Vec::new(),
+        String::new(),
+    );
+    if let Some(output) = final_output {
+        session.finish_output_for_test(output);
+    }
+    let session = Rc::new(RefCell::new(session));
+    let id = PaneId::FIRST;
+    let tab = PaneTab {
+        terminal: Some(session.clone()),
+        ..PaneTab::showing(
+            &h.window,
+            id,
+            OpenDocument::untitled(number, h.window.as_weak()),
+        )
+    };
+    let identity = tab.identity.clone();
+    add_tab(&h.window, &h.live, id, tab);
+    (identity, session)
+}
+
+#[test]
+fn ctrl_w_after_logout_closes_only_the_terminal_that_received_it() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let id = PaneId::FIRST;
+    let document = h.live.tabs.borrow().of(id).tabs[0].identity.clone();
+    for (offset, text) in ["w", "W", "\u{17}"].into_iter().enumerate() {
+        let (terminal, session) = add_test_terminal(&h, 2 + offset as u32, Some(b"logout\r\n"));
+        assert!(session.borrow().finished());
+        assert!(session.borrow().screen().retained_text().contains("logout"));
+        send_terminal_key(
+            &h.window,
+            &h.live,
+            id,
+            TerminalSpot::Front,
+            text,
+            0,
+            true,
+            false,
+            false,
+        );
+        assert!(Rc::ptr_eq(
+            &h.live.tabs.borrow().of(id).current().unwrap().identity,
+            &terminal
+        ));
+        switch_to_tab(&h.window, &h.live, id, 0);
+        slint::platform::update_timers_and_animations();
+        let tabs = h.live.tabs.borrow();
+        assert_eq!(tabs.of(id).tabs.len(), 1);
+        assert!(Rc::ptr_eq(&tabs.of(id).tabs[0].identity, &document));
+        assert!(!h.window.get_question_open());
+    }
+}
+
+#[test]
+fn ctrl_w_still_sends_delete_word_to_a_shell_that_has_not_exited() {
+    let (h, _) = Harness::new(|weak| OpenDocument::untitled(1, weak));
+    let (terminal, session) = add_test_terminal(&h, 2, None);
+    let input = session.borrow_mut().input_for_test();
+    let id = PaneId::FIRST;
+    send_terminal_key(
+        &h.window,
+        &h.live,
+        id,
+        TerminalSpot::Front,
+        "w",
+        0,
+        true,
+        false,
+        false,
+    );
+    assert_eq!(input.try_recv().unwrap(), [0x17]);
+    assert!(Rc::ptr_eq(
+        &h.live.tabs.borrow().of(id).current().unwrap().identity,
+        &terminal
+    ));
+}
+
 /// RFN01-97: the shells along a document's foot come back as that strip's
 /// Terminal Panel tabs, in order, with the one in front in front — and are
 /// written down again the same way. **No shell is started**: they wait.
@@ -556,6 +817,7 @@ fn the_shells_along_a_foot_come_back_waiting() {
         output: None,
         // RFN01-99: the name the program had given it last run.
         title: (name == "B").then(|| "ken@KN01: /mnt/d/原稿/第一部".to_owned()),
+        ..Default::default()
     };
     let stored = app_data::Session {
         layout: "P 0".to_owned(),
@@ -577,7 +839,7 @@ fn the_shells_along_a_foot_come_back_waiting() {
         }],
         ..Default::default()
     };
-    let (tabs, _) = session::open_session(&h.window, Some(stored), Vec::new());
+    let (tabs, _) = session::open_session(&h.window, Some(stored), Vec::new(), None);
     let tab = &tabs.panes[0].tabs[0];
     assert!(tab.below.open);
     assert_eq!(tab.below.entries.len(), 2);
@@ -619,7 +881,10 @@ fn the_shells_along_a_foot_come_back_waiting() {
         ["A", "B"]
     );
     assert_eq!(again.below_active, 1);
-    assert!(again.below_shells.iter().all(|s| s.output.is_some()));
+    assert!(
+        again.below_shells.iter().all(|s| s.output.is_none()),
+        "there is no saved history file to reference"
+    );
     assert!(
         session::session_tab(tab, false)
             .below_shells
@@ -691,7 +956,7 @@ fn a_shell_comes_back_after_a_restart_with_its_output() {
     );
     h.window.set_terminal_restore_output(true);
 
-    let (tabs, _) = session::open_session(&h.window, Some(stored), Vec::new());
+    let (tabs, _) = session::open_session(&h.window, Some(stored), Vec::new(), None);
     let back = tabs.panes[0]
         .tabs
         .iter()
@@ -957,7 +1222,6 @@ fn terminal_settings_refresh_profiles_loaded_after_install() {
         }],
     );
     publish_shells(&h.window);
-    h.window.set_default_shell(0);
     open_settings(&h.window, &h.live);
     assert_eq!(h.window.get_shell_profile_names().row_count(), 1);
     assert!(
@@ -1694,17 +1958,18 @@ fn terminal_panel_shell_selection_same_cancel_and_replace() {
     let tab = h.live.tabs.borrow().of(id).tabs[0].clone();
     h.live.show_tab(&h.window, id, &tab);
     let panel = terminal_panels::current(&h.live, id).unwrap();
-    terminal_panels::action(&h.window, &h.live, id, 12, 0);
+    let profiles = configured_shells(&h.window);
+    terminal_panels::switch_profile(&h.window, &h.live, id, profiles[0].id);
     assert!(h.live.pending.borrow().is_none());
     assert!(Rc::ptr_eq(panel.borrow().shell.as_ref().unwrap(), &old));
-    terminal_panels::action(&h.window, &h.live, id, 12, 1);
+    terminal_panels::switch_profile(&h.window, &h.live, id, profiles[1].id);
     assert!(matches!(
         *h.live.pending.borrow(),
         Some(Question::PanelSwitch { .. })
     ));
     answer_question(&h.window, &h.live, 1);
     assert!(Rc::ptr_eq(panel.borrow().shell.as_ref().unwrap(), &old));
-    terminal_panels::action(&h.window, &h.live, id, 12, 1);
+    terminal_panels::switch_profile(&h.window, &h.live, id, profiles[1].id);
     answer_question(&h.window, &h.live, 0);
     assert_eq!(
         panel.borrow().shell.as_ref().unwrap().borrow().name(),

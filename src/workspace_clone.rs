@@ -3,15 +3,17 @@
 //! never returned to diagnostics because either can contain authentication data.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
+use crate::git::ManagedChild;
+
 pub struct Job {
     result: Receiver<Result<PathBuf, String>>,
     finished: bool,
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<Mutex<Option<ManagedChild>>>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -89,8 +91,7 @@ impl Drop for Job {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(mut process) = child.take() {
-            let _ = process.kill();
-            let _ = process.wait();
+            process.stop();
         }
     }
 }
@@ -242,7 +243,7 @@ fn is_reparse(_: &std::fs::Metadata) -> bool {
 fn clone_repository(
     url: &str,
     destination: &Path,
-    child: &Arc<Mutex<Option<Child>>>,
+    child: &Arc<Mutex<Option<ManagedChild>>>,
     cancelled: &AtomicBool,
 ) -> Result<PathBuf, String> {
     // Recheck immediately before spawning; a failed clone is never cleaned up
@@ -262,7 +263,7 @@ fn clone_repository(
 fn run_git(
     url: &str,
     destination: Option<&Path>,
-    child: &Arc<Mutex<Option<Child>>>,
+    child: &Arc<Mutex<Option<ManagedChild>>>,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     let mut command = Command::new("git");
@@ -309,7 +310,7 @@ fn run_git(
         if cancelled.load(Ordering::Acquire) {
             return Err("Repository download cancelled.".into());
         }
-        *held = Some(command.spawn().map_err(|_| {
+        *held = Some(ManagedChild::spawn(&mut command).map_err(|_| {
             "Could not start Git. Check that Git is installed and available.".to_string()
         })?);
     }
@@ -320,15 +321,14 @@ fn run_git(
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if cancelled.load(Ordering::Acquire) {
                 if let Some(mut process) = held.take() {
-                    let _ = process.kill();
-                    let _ = process.wait();
+                    process.stop();
                 }
                 return Err("Repository download cancelled.".into());
             }
             let Some(process) = held.as_mut() else {
                 return Err("Repository download stopped.".into());
             };
-            match process.try_wait() {
+            match process.process.try_wait() {
                 Ok(Some(status)) => {
                     *held = None;
                     break status;
@@ -336,8 +336,7 @@ fn run_git(
                 Ok(None) => {}
                 Err(_) => {
                     if let Some(mut process) = held.take() {
-                        let _ = process.kill();
-                        let _ = process.wait();
+                        process.stop();
                     }
                     return Err("Could not read the repository download result.".into());
                 }

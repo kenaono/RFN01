@@ -52,7 +52,15 @@ pub(crate) enum Action {
 impl Action {
     pub(crate) fn is_merge_resolution(self) -> bool {
         use Action::*;
-        matches!(self, GitMergeOpen | GitMergeEdit | GitMergeStage | GitMergeDelete | GitMergeContinue | GitMergeAbort)
+        matches!(
+            self,
+            GitMergeOpen
+                | GitMergeEdit
+                | GitMergeStage
+                | GitMergeDelete
+                | GitMergeContinue
+                | GitMergeAbort
+        )
     }
 
     pub(crate) fn description(self) -> (&'static str, &'static str) {
@@ -80,31 +88,104 @@ impl Action {
                 "Git Changesで選んでいるリポジトリの、全ブランチのグラフを開きます。",
                 "Opens the graph of all branches of the repository chosen in Git Changes.",
             ),
-            GitRepo(OpenComparison) => ("表示中の差分を左右に並べます。", "Open the displayed diff side by side."),
-            GitRepo(ReviewBlocks) => ("表示中の差分を変更ブロックごとに確認します。", "Review the displayed diff one change block at a time."),
-            GitRepo(StageBlock) => ("選択した変更ブロックをStageします。", "Stage the selected change block."),
-            GitRepo(UnstageBlock) => ("選択した変更ブロックをUnstageします。", "Unstage the selected change block."),
-            GitRepo(OpenSearch) => ("リポジトリのコミット履歴を検索します。", "Search the repository's commit history."),
-            GitRepo(CloseSearch) => ("履歴検索からコミットグラフに戻ります。", "Return from history search to the commit graph."),
-            GitRepo(SetBase) => ("対象のコミットを二点比較の比較元にします。", "Use the target commit as the comparison base."),
-            GitRepo(CompareWithBase) => ("比較元と対象のコミットの差分を表示します。", "Compare the base with the target commit."),
-            GitWorktree(git_worktree_ui::Action::Show) => ("同じリポジトリの作業先を一覧します。", "List the worktrees for this repository."),
-            GitWorktree(git_worktree_ui::Action::Back) => ("Worktreeの一覧からGit Repositoryへ戻ります。", "Return from the worktree list to Git Repository."),
-            GitWorktree(git_worktree_ui::Action::Open) => ("選択した作業先に切り替えます。未登録なら追加を確認します。", "Switch to the selected worktree. Confirm before adding it to the workspace."),
-            GitWorktree(git_worktree_ui::Action::Create) => ("指定したフォルダに新しいブランチのWorktreeを作成します。", "Create a worktree on a new branch in the specified folder."),
-            Repositories(git_catalog_ui::Action::Enter) => ("左ペインのGitを開閉します。", "Toggles the Git pane."),
-            Repositories(git_catalog_ui::Action::Show) => ("Workspaceに登録されたGitリポジトリを一覧します。", "List Git repositories registered in Workspaces."),
-            Repositories(git_catalog_ui::Action::Refresh) => ("登録フォルダとリポジトリの状態を読み直します。", "Read the registered folders and repository state again."),
-            Repositories(git_catalog_ui::Action::Open) => ("選択したリポジトリを所属Workspaceで開きます。", "Open the selected repository in its Workspace."),
-            Repositories(git_catalog_ui::Action::Unregister) => ("選択行のRFN Editでの登録を解除します。ディスク上のファイルやGit履歴は残ります。", "Remove the selected registration from RFN Edit. Files on disk and Git history stay intact."),
-            Repositories(git_catalog_ui::Action::Close) => ("リポジトリ一覧を閉じます。", "Close the repository list."),
-            GitMergeOpen => ("進行中のMergeと未解決のファイルを表示します。", "Inspect the in-progress merge and unresolved files."),
-            GitMergeEdit => ("選択したファイルの作業版を文書タブで開きます。", "Open the selected working file in an editor tab."),
-            GitMergeStage => ("選択したファイルの保存済みの解消結果をStageします。", "Stage the saved resolution for the selected file."),
-            GitMergeDelete => ("片側が削除したファイルを削除してStageします。", "Delete the selected file and stage that resolution."),
-            GitMergeContinue => ("未解決のファイルがなくなったMergeを完了します。", "Complete the merge after all conflicts are resolved."),
-            GitMergeAbort => ("確認してからGitにMergeの中止を依頼します。", "Confirm before asking Git to abort the merge."),
-            GitMergeBack => ("Mergeの解消画面からリポジトリに戻ります。", "Return from merge resolution to the repository."),
+            GitRepo(OpenComparison) => (
+                "表示中の差分を左右に並べます。",
+                "Open the displayed diff side by side.",
+            ),
+            GitRepo(ReviewBlocks) => (
+                "表示中の差分を変更ブロックごとに確認します。",
+                "Review the displayed diff one change block at a time.",
+            ),
+            GitRepo(StageBlock) => (
+                "選択した変更ブロックをStageします。",
+                "Stage the selected change block.",
+            ),
+            GitRepo(UnstageBlock) => (
+                "選択した変更ブロックをUnstageします。",
+                "Unstage the selected change block.",
+            ),
+            GitRepo(OpenSearch) => (
+                "リポジトリのコミット履歴を検索します。",
+                "Search the repository's commit history.",
+            ),
+            GitRepo(CloseSearch) => (
+                "履歴検索からコミットグラフに戻ります。",
+                "Return from history search to the commit graph.",
+            ),
+            GitRepo(SetBase) => (
+                "対象のコミットを二点比較の比較元にします。",
+                "Use the target commit as the comparison base.",
+            ),
+            GitRepo(CompareWithBase) => (
+                "比較元と対象のコミットの差分を表示します。",
+                "Compare the base with the target commit.",
+            ),
+            GitWorktree(git_worktree_ui::Action::Show) => (
+                "同じリポジトリの作業先を一覧します。",
+                "List the worktrees for this repository.",
+            ),
+            GitWorktree(git_worktree_ui::Action::Back) => (
+                "Worktreeの一覧からGit Repositoryへ戻ります。",
+                "Return from the worktree list to Git Repository.",
+            ),
+            GitWorktree(git_worktree_ui::Action::Open) => (
+                "選択した作業先に切り替えます。未登録なら追加を確認します。",
+                "Switch to the selected worktree. Confirm before adding it to the workspace.",
+            ),
+            GitWorktree(git_worktree_ui::Action::Create) => (
+                "指定したフォルダに新しいブランチのWorktreeを作成します。",
+                "Create a worktree on a new branch in the specified folder.",
+            ),
+            Repositories(git_catalog_ui::Action::Enter) => {
+                ("左ペインのGitを開閉します。", "Toggles the Git pane.")
+            }
+            Repositories(git_catalog_ui::Action::Show) => (
+                "Workspaceに登録されたGitリポジトリを一覧します。",
+                "List Git repositories registered in Workspaces.",
+            ),
+            Repositories(git_catalog_ui::Action::Refresh) => (
+                "登録フォルダとリポジトリの状態を読み直します。",
+                "Read the registered folders and repository state again.",
+            ),
+            Repositories(git_catalog_ui::Action::Open) => (
+                "選択したリポジトリを所属Workspaceで開きます。",
+                "Open the selected repository in its Workspace.",
+            ),
+            Repositories(git_catalog_ui::Action::Unregister) => (
+                "選択行のRFN Editでの登録を解除します。ディスク上のファイルやGit履歴は残ります。",
+                "Remove the selected registration from RFN Edit. Files on disk and Git history stay intact.",
+            ),
+            Repositories(git_catalog_ui::Action::Close) => {
+                ("リポジトリ一覧を閉じます。", "Close the repository list.")
+            }
+            GitMergeOpen => (
+                "進行中のMergeと未解決のファイルを表示します。",
+                "Inspect the in-progress merge and unresolved files.",
+            ),
+            GitMergeEdit => (
+                "選択したファイルの作業版を文書タブで開きます。",
+                "Open the selected working file in an editor tab.",
+            ),
+            GitMergeStage => (
+                "選択したファイルの保存済みの解消結果をStageします。",
+                "Stage the saved resolution for the selected file.",
+            ),
+            GitMergeDelete => (
+                "片側が削除したファイルを削除してStageします。",
+                "Delete the selected file and stage that resolution.",
+            ),
+            GitMergeContinue => (
+                "未解決のファイルがなくなったMergeを完了します。",
+                "Complete the merge after all conflicts are resolved.",
+            ),
+            GitMergeAbort => (
+                "確認してからGitにMergeの中止を依頼します。",
+                "Confirm before asking Git to abort the merge.",
+            ),
+            GitMergeBack => (
+                "Mergeの解消画面からリポジトリに戻ります。",
+                "Return from merge resolution to the repository.",
+            ),
             DiffPrevious | DiffNext | DiffClose | DiffApply | DiffKeepLeft | DiffTakeRight
             | DiffCopyLeft | DiffCopyRight => (
                 "比較中に割り当てたキーで使えます。",
@@ -182,7 +263,10 @@ impl Context {
     }
 
     pub(crate) fn set_git_branch_target(&mut self, branch: &git::Ref) {
-        self.repo_view = self.repo_view.take().map(|target| target.for_branch(branch));
+        self.repo_view = self
+            .repo_view
+            .take()
+            .map(|target| target.for_branch(branch));
     }
 
     pub(crate) fn valid(&self, window: &AppWindow, live: &Live, action: Action) -> bool {
@@ -200,26 +284,49 @@ impl Context {
                     && self.git_amend == current.git_amend
             }
             GitFetch | GitPull | GitPush | GitSync => {
-                self.workspace == current.workspace && self.repo == current.repo && self.branch == current.branch
+                self.workspace == current.workspace
+                    && self.repo == current.repo
+                    && self.branch == current.branch
             }
             GitCancel => self.job_id.is_some() && self.job_id == current.job_id,
-            GitRepositoryOpen => self.workspace == current.workspace && self.repository_folder == current.repository_folder,
-            GitRepo(action) => self.workspace == current.workspace
-                && self.repo_view.as_ref().zip(current.repo_view.as_ref())
-                    .is_some_and(|(target, current)| target.valid(current, action)),
-            GitWorktree(action) => self.workspace == current.workspace
-                && self.worktree.as_ref().zip(current.worktree.as_ref())
-                    .is_some_and(|(target, current)| target.valid(current, action)),
-            Repositories(action) => self.workspace == current.workspace
-                && (action != git_catalog_ui::Action::Enter || self.git_pane_open == current.git_pane_open)
-                && self.catalog_open == current.catalog_open
-                && (!matches!(action, git_catalog_ui::Action::Open | git_catalog_ui::Action::Unregister)
-                    || self.repository_selection == current.repository_selection),
+            GitRepositoryOpen => {
+                self.workspace == current.workspace
+                    && self.repository_folder == current.repository_folder
+            }
+            GitRepo(action) => {
+                self.workspace == current.workspace
+                    && self
+                        .repo_view
+                        .as_ref()
+                        .zip(current.repo_view.as_ref())
+                        .is_some_and(|(target, current)| target.valid(current, action))
+            }
+            GitWorktree(action) => {
+                self.workspace == current.workspace
+                    && self
+                        .worktree
+                        .as_ref()
+                        .zip(current.worktree.as_ref())
+                        .is_some_and(|(target, current)| target.valid(current, action))
+            }
+            Repositories(action) => {
+                self.workspace == current.workspace
+                    && (action != git_catalog_ui::Action::Enter
+                        || self.git_pane_open == current.git_pane_open)
+                    && self.catalog_open == current.catalog_open
+                    && (!matches!(
+                        action,
+                        git_catalog_ui::Action::Open | git_catalog_ui::Action::Unregister
+                    ) || self.repository_selection == current.repository_selection)
+            }
             action if action.is_merge_resolution() => {
                 self.workspace == current.workspace && self.merge == current.merge
             }
-            GitMergeBack => self.workspace == current.workspace && self.repo == current.repo
-                && self.merge_open == current.merge_open,
+            GitMergeBack => {
+                self.workspace == current.workspace
+                    && self.repo == current.repo
+                    && self.merge_open == current.merge_open
+            }
             DiffPrevious | DiffNext | DiffClose | DiffCopyLeft | DiffCopyRight => {
                 self.comparison == current.comparison
             }
@@ -239,7 +346,13 @@ impl Context {
     }
 }
 
-pub(crate) fn enabled(window: &AppWindow, context: Option<&Context>, action: Action, document: bool, settings: bool) -> bool {
+pub(crate) fn enabled(
+    window: &AppWindow,
+    context: Option<&Context>,
+    action: Action,
+    document: bool,
+    settings: bool,
+) -> bool {
     use Action::*;
     if window.get_question_open() {
         return false;
@@ -252,11 +365,13 @@ pub(crate) fn enabled(window: &AppWindow, context: Option<&Context>, action: Act
     let shown =
         |tab: LeftTab| !overlay && window.get_tree_open() && window.get_left_tab() == tab.index();
     let git = window.get_git_mode() == 2
-        && ((shown(LeftTab::Git) && !catalog) || (repository && git_repo_ui::root() == git_ui::active_root()));
+        && ((shown(LeftTab::Git) && !catalog)
+            || (repository && git_repo_ui::root() == git_ui::active_root()));
     let git_controls = git && !window.get_git_merge_open() && !window.get_git_worktrees_open();
     let merging = window.get_git_merge_active();
     let merge_target = merging && (!repository || git_repo_ui::root() == git_ui::active_root());
-    let resolver = git && repository && merge_target && window.get_git_merge_open() && !window.get_git_busy();
+    let resolver =
+        git && repository && merge_target && window.get_git_merge_open() && !window.get_git_busy();
     match action {
         OutlineCollapse | OutlineExpand => shown(LeftTab::Outline) && document,
         TagsCollapse | TagsExpand => shown(LeftTab::Tags) && window.get_tag_available(),
@@ -270,15 +385,21 @@ pub(crate) fn enabled(window: &AppWindow, context: Option<&Context>, action: Act
                 && !window.get_workspace_cloning()
         }
         GitFetch => git_controls && !window.get_git_busy() && window.get_git_has_commit(),
-        GitPull => git_controls && !merging && !window.get_git_busy() && window.get_git_has_upstream(),
+        GitPull => {
+            git_controls && !merging && !window.get_git_busy() && window.get_git_has_upstream()
+        }
         GitPush | GitSync => {
-            git_controls && !merging && !window.get_git_busy()
+            git_controls
+                && !merging
+                && !window.get_git_busy()
                 && window.get_git_has_commit()
                 && window.get_git_on_branch()
         }
         GitCancel => git_controls && window.get_git_can_cancel(),
         GitCommit => {
-            git_controls && !merging && !window.get_git_busy()
+            git_controls
+                && !merging
+                && !window.get_git_busy()
                 && !window.get_git_message().trim().is_empty()
                 && if window.get_git_amend() {
                     window.get_git_has_commit()
@@ -287,27 +408,52 @@ pub(crate) fn enabled(window: &AppWindow, context: Option<&Context>, action: Act
                 }
         }
         GitRepositoryOpen => !overlay && !catalog && !window.get_git_busy(),
-        GitRepo(action) => repository && !window.get_git_merge_open() && !window.get_git_worktrees_open()
-            && context.and_then(|context| context.repo_view.as_ref())
-                .is_some_and(|target| target.enabled(window, action)),
-        GitWorktree(action) => repository && !window.get_git_merge_open()
-            && context.and_then(|context| context.worktree.as_ref())
-                .is_some_and(|target| target.enabled(window, action)),
+        GitRepo(action) => {
+            repository
+                && !window.get_git_merge_open()
+                && !window.get_git_worktrees_open()
+                && context
+                    .and_then(|context| context.repo_view.as_ref())
+                    .is_some_and(|target| target.enabled(window, action))
+        }
+        GitWorktree(action) => {
+            repository
+                && !window.get_git_merge_open()
+                && context
+                    .and_then(|context| context.worktree.as_ref())
+                    .is_some_and(|target| target.enabled(window, action))
+        }
         Repositories(action) => match action {
             git_catalog_ui::Action::Enter => !overlay,
             git_catalog_ui::Action::Show => !overlay && !catalog && !window.get_git_busy(),
             git_catalog_ui::Action::Refresh => catalog && !window.get_git_catalog_scanning(),
-            git_catalog_ui::Action::Open => catalog && !window.get_git_busy()
-                && context.and_then(|context| context.repository_selection.as_ref()).is_some_and(git_catalog_ui::CatalogTarget::can_open),
-            git_catalog_ui::Action::Unregister => catalog && !window.get_git_busy()
-                && context.is_some_and(|context| context.repository_selection.is_some()),
+            git_catalog_ui::Action::Open => {
+                catalog
+                    && !window.get_git_busy()
+                    && context
+                        .and_then(|context| context.repository_selection.as_ref())
+                        .is_some_and(git_catalog_ui::CatalogTarget::can_open)
+            }
+            git_catalog_ui::Action::Unregister => {
+                catalog
+                    && !window.get_git_busy()
+                    && context.is_some_and(|context| context.repository_selection.is_some())
+            }
             git_catalog_ui::Action::Close => catalog,
         },
-        GitMergeOpen => git && merge_target && !window.get_git_merge_open()
-            && !window.get_git_worktrees_open() && !window.get_git_busy(),
-        GitMergeEdit => resolver && window.get_git_merge_selected() >= 0 && window.get_git_merge_can_edit(),
+        GitMergeOpen => {
+            git && merge_target
+                && !window.get_git_merge_open()
+                && !window.get_git_worktrees_open()
+                && !window.get_git_busy()
+        }
+        GitMergeEdit => {
+            resolver && window.get_git_merge_selected() >= 0 && window.get_git_merge_can_edit()
+        }
         GitMergeStage => resolver && window.get_git_merge_selected() >= 0,
-        GitMergeDelete => resolver && window.get_git_merge_selected() >= 0 && window.get_git_merge_can_delete(),
+        GitMergeDelete => {
+            resolver && window.get_git_merge_selected() >= 0 && window.get_git_merge_can_delete()
+        }
         GitMergeContinue => resolver && window.get_git_merge_ready(),
         GitMergeAbort => resolver,
         GitMergeBack => repository && window.get_git_merge_open(),
@@ -369,7 +515,9 @@ pub(crate) fn execute(window: &AppWindow, live: &Live, context: Option<&Context>
         Action::GitCancel => git_ui::cancel(),
         Action::GitCommit => git_ui::commit(window, live),
         Action::GitRepositoryOpen => git_repo_ui::open_folder(
-            window, live, context.and_then(|context| context.repository_folder.as_deref()),
+            window,
+            live,
+            context.and_then(|context| context.repository_folder.as_deref()),
         ),
         Action::GitMergeBack => {
             window.set_git_merge_open(false);
@@ -386,7 +534,10 @@ pub(crate) fn execute(window: &AppWindow, live: &Live, context: Option<&Context>
             }
         }
         Action::Repositories(action) => git_catalog_ui::execute(
-            window, live, action, context.and_then(|context| context.repository_selection.as_ref()),
+            window,
+            live,
+            action,
+            context.and_then(|context| context.repository_selection.as_ref()),
         ),
         Action::DiffPrevious => window.invoke_diff_next_difference(false),
         Action::DiffNext => window.invoke_diff_next_difference(true),
@@ -407,10 +558,12 @@ pub(crate) fn execute(window: &AppWindow, live: &Live, context: Option<&Context>
         Action::SettingsExport => window.invoke_settings_export_requested(),
         Action::SettingsImport => window.invoke_settings_import_requested(),
         Action::SettingsReset => window.invoke_reset_all_requested(),
-        Action::GitMergeOpen | Action::GitMergeEdit | Action::GitMergeStage
-        | Action::GitMergeDelete | Action::GitMergeContinue | Action::GitMergeAbort => {
-            git_merge_ui::execute(window, live, action)
-        }
+        Action::GitMergeOpen
+        | Action::GitMergeEdit
+        | Action::GitMergeStage
+        | Action::GitMergeDelete
+        | Action::GitMergeContinue
+        | Action::GitMergeAbort => git_merge_ui::execute(window, live, action),
     }
 }
 
@@ -437,8 +590,12 @@ pub(crate) fn wire(window: &AppWindow, live: &Live) {
     let weak = window.as_weak();
     let live = live.clone();
     window.on_git_action_allowed(move |id, branch_menu, _generation| {
-        let Some(window) = weak.upgrade() else { return false };
-        let Some(action) = action_of(&id) else { return false };
+        let Some(window) = weak.upgrade() else {
+            return false;
+        };
+        let Some(action) = action_of(&id) else {
+            return false;
+        };
         let command = menu_commands::Command::PanelAction(action);
         let target = if branch_menu {
             git_repo_ui::branch_target()
@@ -530,7 +687,10 @@ mod tests {
         window.set_diff_merge_enabled(true);
         window.set_diff_can_apply(true);
         window.set_diff_selected_row(0);
-        window.set_diff_rows(ModelRc::new(VecModel::from(vec![DiffRow::default(), DiffRow::default()])));
+        window.set_diff_rows(ModelRc::new(VecModel::from(vec![
+            DiffRow::default(),
+            DiffRow::default(),
+        ])));
         let received = Rc::new(Cell::new(0));
         let hit = received.clone();
         window.on_diff_apply_merge(move || hit.set(hit.get() + 1));
@@ -545,13 +705,20 @@ mod tests {
         assert_eq!(received.get(), 1, "different selected row");
 
         window.set_diff_selected_row(0);
-        window.set_diff_rows(ModelRc::new(VecModel::from(vec![DiffRow::default(), DiffRow::default()])));
+        window.set_diff_rows(ModelRc::new(VecModel::from(vec![
+            DiffRow::default(),
+            DiffRow::default(),
+        ])));
         run(window, live, &target, action.clone(), "");
         assert_eq!(received.get(), 1, "new comparison rows at the same index");
 
         let current = Target::for_surface(window, live);
         window.set_diff_active(false);
         run(window, live, &current, action, "");
-        assert_eq!(received.get(), 1, "comparison closed after capturing the target");
+        assert_eq!(
+            received.get(),
+            1,
+            "comparison closed after capturing the target"
+        );
     }
 }

@@ -1,7 +1,7 @@
 import { CheckBox, ComboBox, HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
 import { TerminalSettings } from "terminal-settings.slint";
 import { PanelStyleEditor } from "panel-style-editor.slint";
-import { PanelStyle, EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece, WordModeRow } from "editor-pane.slint";
+import { PanelStyle, EditorPane, PaneScreen, PreviewTile, PreviewSelectionRect, TabInfo, WallPiece, WordModeRow, TerminalShellRow } from "editor-pane.slint";
 // RFN01-47: 本文の右クリックメニューへ出す挿入の行（中身はRustが作る）。
 import { InsertRow } from "editor-pane.slint";
 import { Slider } from "controls.slint";
@@ -451,12 +451,6 @@ export component AppWindow inherits Window {
     in property <[UnusedFolderRow]> workspace-unused-folder-rows;
     callback workspace-unused-folder-removed(int);
 
-    /// The work folders opened before this one, newest first (要件 5.1).
-    /// Names with the folder that holds them, the way the 履歴 panel names a
-    /// file — Rust draws them, and the one already open is not among them.
-    in property <[string]> recent-folders;
-    /// Go back to one of them, by its place in that list.
-    callback recent-folder-chosen(int);
     // The whole work folder, not the document in front (要件 7.7). Its own
     // field, separate from the find bar's: one asks about a document and the
     // other about a folder, and they are not the same question.
@@ -467,6 +461,8 @@ export component AppWindow inherits Window {
     in-out property <bool> folder-regex;
     in-out property <string> folder-replacement;
     callback folder-replace-requested();
+    in property <bool> folder-replacing;
+    in property <string> folder-replace-progress;
     in property <string> folder-status;
     // 要件 7.7（2026-09-07追加）: どのフォルダを歩くか。名前だけを出し、
     // 道のりはマウスを載せたときに出す。`scoped`は作業フォルダより内側に
@@ -983,6 +979,7 @@ export component AppWindow inherits Window {
     callback terminal-focus(int, int, bool);
     /// The strip along the foot of a pane (追加要件 Terminal).
     callback terminal-url(int, int, float, float);
+    callback terminal-wsl-open(int, int, string, string, int, int);
     /// RFN01-95: Ctrl over a shell's link (pane, spot, x, y).
     callback pane-terminal-link-hover(int, int, float, float) -> bool;
     /// RFN01-98: a key pressed in a shell that the window may take first.
@@ -1014,14 +1011,14 @@ export component AppWindow inherits Window {
     /// A shell wrote something. **Rung from its reading thread**, so it says
     /// only that: which pane, and what changed, are decided on this side.
     callback terminal-woken();
-    /// 追加要件 Terminal: open a shell in the pane the writer is in. The number
-    /// is which shell, as a position in `terminal-shells`.
-    callback terminal-requested(int);
+    /// Open the default shell in the pane the writer is in.
+    callback terminal-requested();
     /// The shells a terminal tab can be opened on (追加要件 Terminal). **Named
     /// by Rust**, because the list is what can actually be started.
-    in property <[string]> terminal-shells;
+    in property <[TerminalShellRow]> terminal-shells;
     in property <[string]> wsl-distributions;
     in property <bool> wsl-discovery-complete;
+    in property <bool> wsl-discovery-running;
     /// 追加要件 2026-09-08: 設定ファイルが並べているシェルを、書かれたままの
     /// 形で（`名前 | コマンド行`）。
     ///
@@ -1117,8 +1114,8 @@ export component AppWindow inherits Window {
     callback word-group-exported(int);
     /// 追加要件 2026-09-07: **どれが既定か。**接続先を訊かない場所——`＋`のNew Tab、
     /// タブ列のメニュー、ペインの下段——はすべてこれを起こす。設定にも残る。
-    in-out property <int> default-shell: 0;
-    callback default-shell-chosen(int);
+    in property <string> default-shell-id;
+    in property <string> default-shell-name;
     /// 追加要件 2026-09-08: 端末の見た目（要件 6.8）。
     ///
     /// **紙とは別に持つ。**要件 9 のシートは原稿の紙の設定で、端末を黒地で使うことと
@@ -1756,8 +1753,9 @@ export component AppWindow inherits Window {
     /// as a new untitled document in a pane.
     in property <[string]> template-names;
     callback pane-new-from-template(int, string);
-    callback pane-new-terminal(int, int);
-    callback pane-switch-shell(int, int);
+    callback pane-new-terminal(int);
+    callback pane-switch-shell(int, string);
+    callback panel-switch-shell(int, string);
     /// Publish the strips again. Called from Rust when a document's unsaved
     /// marker moves, which is the one change to a strip that does not come from
     /// something the writer did to the strip itself.
@@ -2425,7 +2423,7 @@ export component AppWindow inherits Window {
                                         MenuRow {
                                             title: @tr("New Terminal");
                                             activated => {
-                                                root.terminal-requested(root.default-shell);
+                                                root.terminal-requested();
                                                 root.focus-generation += 1;
                                                 tree-plus-menu.close();
                                             }
@@ -2485,7 +2483,7 @@ export component AppWindow inherits Window {
                                 height: 28px;
                                 placeholder: @tr("Replace with…");
                                 text <=> root.folder-replacement;
-                                accepted => { root.folder-replace-requested(); }
+                                accepted => { if !root.folder-replacing { root.folder-replace-requested(); } }
                                 escaped => { root.left-field-escaped(); }
                                 shortcut(event) => {
                                     if root.left-field-shortcut(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift) { return accept; }
@@ -2493,12 +2491,12 @@ export component AppWindow inherits Window {
                                 }
                             }
                             TextButton {
-                                title: @tr("Replace All");
+                                title: root.folder-replacing ? @tr("Cancel") : @tr("Replace All");
                                 clicked => { root.folder-replace-requested(); }
                             }
                         }
                         // Where it looks, when narrowed to one folder, and what it found.
-                        if root.search-folder-scoped || root.folder-status != "": HorizontalLayout {
+                        if root.search-folder-scoped || root.folder-replacing || root.folder-status != "": HorizontalLayout {
                             height: 22px;
                             spacing: 4px;
                             if root.search-folder-scoped: TextButton {
@@ -2506,7 +2504,7 @@ export component AppWindow inherits Window {
                                 clicked => { root.search-folder-reset(); }
                             }
                             Text {
-                                text: root.folder-status;
+                                text: root.folder-replacing ? root.folder-replace-progress : root.folder-status;
                                 color: Tok.accent;
                                 font-size: 12px;
                                 vertical-alignment: center;
@@ -2582,7 +2580,7 @@ export component AppWindow inherits Window {
                                 placeholder: @tr("Replace with…");
                                 text <=> root.folder-replacement;
                                 accepted => {
-                                    root.folder-replace-requested();
+                                    if !root.folder-replacing { root.folder-replace-requested(); }
                                 }
                                 escaped => { root.left-field-escaped(); }
                             }
@@ -2700,14 +2698,14 @@ export component AppWindow inherits Window {
                                 }
 
                                 TextButton {
-                                    title: @tr("Replace All");
+                                    title: root.folder-replacing ? @tr("Cancel") : @tr("Replace All");
                                     clicked => {
                                         root.folder-replace-requested();
                                     }
                                 }
 
                                 Text {
-                                    text: root.folder-status;
+                                    text: root.folder-replacing ? root.folder-replace-progress : root.folder-status;
                                     color: Tok.accent;
                                     font-size: 12px;
                                     vertical-alignment: center;
@@ -3419,7 +3417,7 @@ export component AppWindow inherits Window {
                     // window had not been told there was one. Rust keeps
                     // `focused-pane` naming a pane that is on screen
                     // (`place_panes`), so this needs no second condition.
-                    takes-focus: pane.id == root.focused-pane;
+                    takes-focus: pane.id == root.focused-pane && !root.question-open;
 
                         resized => { root.pane-resized(pane.id); }
                         scrolled(offset) => { root.pane-scroll-changed(pane.id, offset); }
@@ -3457,7 +3455,7 @@ export component AppWindow inherits Window {
                         empty: pane.empty;
                         settings: pane.settings;
                         terminal-shells: root.terminal-shells;
-                        default-shell: root.default-shell;
+                        default-shell-name: root.default-shell-name;
                         terminal-key(text, number, ctrl, alt, shift) => {
                             root.pane-terminal-key(pane.id, text, number, ctrl, alt, shift);
                         }
@@ -3717,15 +3715,18 @@ export component AppWindow inherits Window {
                             root.pane-new-from-template(pane.id, name);
                             root.focus-generation += 1;
                         }
-                        new-terminal-requested(shell) => {
+                        new-terminal-requested => {
                             root.focused-pane = pane.id; root.focused-pane-row = index;
-                            root.pane-new-terminal(pane.id, shell);
+                            root.pane-new-terminal(pane.id);
                             root.focus-generation += 1;
                         }
                         tab-shell-chosen(shell) => {
                             root.focused-pane = pane.id; root.focused-pane-row = index;
                             root.pane-switch-shell(pane.id, shell);
                             root.focus-generation += 1;
+                        }
+                        panel-shell-chosen(shell) => {
+                            root.panel-switch-shell(pane.id, shell);
                         }
                         preview-toggled => {
                             // The strip and its buttons belong to this pane, so
@@ -3776,10 +3777,6 @@ export component AppWindow inherits Window {
                         }
                         reveal-requested => {
                             root.reveal-requested();
-                            root.focus-generation += 1;
-                        }
-                        close-active-tab => {
-                            root.pane-tab-closed(pane.id, pane.active-tab);
                             root.focus-generation += 1;
                         }
                         close-other-tabs => {
@@ -7201,6 +7198,7 @@ export component AppWindow inherits Window {
             }
             changed generation => {
                 self.selected-choice = -1;
+                if !root.question-asks-name { self.focus(); }
             }
             init => {
                 self.focus();

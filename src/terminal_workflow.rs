@@ -20,7 +20,11 @@ pub(crate) fn input(
     text: &str,
     draft: Option<Rc<RefCell<terminal_panels::PanelDocument>>>,
 ) {
-    if text.is_empty() || session.borrow().finished() {
+    if text.is_empty() {
+        return;
+    }
+    if session.borrow().finished() {
+        tell_send_busy(window);
         return;
     }
     let input = Input {
@@ -67,6 +71,7 @@ pub(crate) fn input(
 
 pub(crate) fn send(window: &AppWindow, live: &Live, input: Input) {
     if input.session.borrow().finished() {
+        tell_send_busy(window);
         return;
     }
     if let Some(entry) = input.draft {
@@ -90,11 +95,11 @@ pub(crate) fn send(window: &AppWindow, live: &Live, input: Input) {
     refresh_terminal_panes(window, live);
 }
 
-fn tell_send_busy(window: &AppWindow) {
+pub(crate) fn tell_send_busy(window: &AppWindow) {
     window.tell(
         crate::pick(
-            "Terminalに送信できません。入力が詰まっているか、送信するテキストが大きすぎます",
-            "Cannot send to Terminal. Input is backed up or the text is too large",
+            "Terminal に送信できません。シェルの終了、入力の詰まり、または送信サイズの上限を確認してください",
+            "Cannot send to Terminal. The shell may have stopped, input may be backed up, or the text may be too large",
         )
         .into(),
     );
@@ -248,9 +253,8 @@ pub(crate) fn ask_close(window: &AppWindow, live: &Live, identity: Rc<()>) {
     );
 }
 
-pub(crate) fn close(window: &AppWindow, live: &Live, identity: Rc<()>, save: bool) {
-    let target = live
-        .tabs
+fn tab_at_identity(live: &Live, identity: &Rc<()>) -> Option<(PaneId, usize)> {
+    live.tabs
         .borrow()
         .panes
         .iter()
@@ -259,19 +263,48 @@ pub(crate) fn close(window: &AppWindow, live: &Live, identity: Rc<()>, save: boo
             strip
                 .tabs
                 .iter()
-                .position(|t| Rc::ptr_eq(&t.identity, &identity))
-                .map(|index| {
-                    (
-                        PaneId::from_index(pane as i32),
-                        index,
-                        strip.tabs[index].below.entries.clone(),
-                    )
-                })
-        });
-    let Some((pane, index, entries)) = target else {
+                .position(|t| Rc::ptr_eq(&t.identity, identity))
+                .map(|index| (PaneId::from_index(pane as i32), index))
+        })
+}
+
+/// Close on the next tick, after the key handler has finished with the tab row.
+pub(crate) fn request_close(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSpot) {
+    let identity = match spot {
+        TerminalSpot::Front => {
+            let tabs = live.tabs.borrow();
+            let Some(tab) = tabs.of(id).current().filter(|tab| tab.terminal.is_some()) else {
+                return;
+            };
+            Some(tab.identity.clone())
+        }
+        TerminalSpot::Below => None,
+    };
+    let weak = window.as_weak();
+    let live = live.clone();
+    Timer::single_shot(Duration::ZERO, move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        if let Some(identity) = identity {
+            if let Some((pane, index)) = tab_at_identity(&live, &identity) {
+                close_tab(&window, &live, pane, index);
+            }
+        } else {
+            terminal_panels::action(&window, &live, id, 2, 0);
+        }
+    });
+}
+
+pub(crate) fn close(window: &AppWindow, live: &Live, identity: Rc<()>, save: bool) {
+    let Some((pane, index)) = tab_at_identity(live, &identity) else {
         return;
     };
     if save {
+        let entries = live.tabs.borrow().of(pane).tabs[index]
+            .below
+            .entries
+            .clone();
         for entry in &entries {
             let dirty = panel_needs_save(&entry.borrow());
             if dirty && !terminal_panels::save_for_close(window, live, entry) {
@@ -475,20 +508,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, spot: Terminal
         // would: the shell's own tab, or the strip's Terminal Panel tab. **On
         // the next tick**, like every tab command: the strip is republished.
         23 => {
-            let weak = window.as_weak();
-            let live = live.clone();
-            Timer::single_shot(Duration::ZERO, move || {
-                let Some(window) = weak.upgrade() else {
-                    return;
-                };
-                match spot {
-                    TerminalSpot::Front => {
-                        let index = live.tabs.borrow().of(id).active;
-                        close_tab(&window, &live, id, index);
-                    }
-                    TerminalSpot::Below => terminal_panels::action(&window, &live, id, 2, 0),
-                }
-            });
+            request_close(window, live, id, spot);
             return;
         }
         // RFN01-96: Copy Last Output.
@@ -669,12 +689,10 @@ pub(crate) fn below_closed(pane: PaneId) {
     }
 }
 
-/// RFN01-95: what a link in a shell opens, once it is known to be openable.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Opens {
+enum Opens {
     Url(String),
     File {
-        path: PathBuf,
+        lookup: FileLookup,
         line: Option<usize>,
         column: Option<usize>,
     },
@@ -702,13 +720,12 @@ pub(crate) fn resolve_path(text: &str, folder: Option<&Path>) -> Option<PathBuf>
 
 /// RFN01-95（案A）: a prompt's folder as a Windows folder. `/mnt/d/…` and
 /// `D:\…` are; `~` and other Linux folders are not.
-fn prompt_folder(written: &str, wsl: Option<&WslAsk>) -> Option<PathBuf> {
+fn prompt_folder(written: &str) -> Option<PathBuf> {
     if let Some(path) = terminal_shells::wsl_mount(written) {
         return Some(path);
     }
     if is_linux_path(written) {
-        // RFN01-100: `~/Dev/10_Editor` is wherever WSL says it is.
-        return wsl?.windows(written);
+        return None;
     }
     let path = Path::new(written);
     path.is_absolute().then(|| path.to_path_buf())
@@ -722,39 +739,46 @@ fn is_linux_path(text: &str) -> bool {
         || (text.starts_with('/') && terminal_shells::wsl_mount(text).is_none())
 }
 
-/// RFN01-100: asking WSL from a shell that is WSL. **Without waiting from the
-/// pointer** (the answer comes back on a thread and the window measures
-/// again), waiting from a click.
-struct WslAsk {
-    distribution: Option<String>,
-    wait: bool,
-    window: slint::Weak<AppWindow>,
+struct FileLookup {
+    text: String,
+    prompt: Option<String>,
+    folder: Option<PathBuf>,
+    launch_directory: Option<String>,
+    /// Some(None) is a WSL profile using the default distribution.
+    distribution: Option<Option<String>>,
 }
 
-impl WslAsk {
-    fn of(window: &AppWindow, session: &TerminalSession, wait: bool) -> Option<Self> {
-        let distribution = terminal_shells::wsl_distribution(&session.profile()?.command)?;
-        Some(Self {
-            distribution,
-            wait,
-            window: window.as_weak(),
-        })
-    }
-
-    fn windows(&self, linux: &str) -> Option<PathBuf> {
-        let weak = self.window.clone();
-        terminal_shells::wsl_windows_path(
-            self.distribution.as_deref(),
-            linux,
-            self.wait,
-            move || {
-                // The pointer resting on the link is measured again.
-                let _ = weak.upgrade_in_event_loop(|window| {
-                    let links = window.global::<TerminalLinks>();
-                    links.set_generation(links.get_generation() + 1);
-                });
-            },
-        )
+impl FileLookup {
+    fn resolve(
+        &self,
+        resolve_wsl: impl Fn(Option<&str>, &str) -> Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        let posix = |path: &str| path.starts_with('/') || path == "~" || path.starts_with("~/");
+        let text = self.text.as_str();
+        let wsl_file = |linux: &str| {
+            resolve_wsl(self.distribution.as_ref()?.as_deref(), linux)
+                .filter(|path| path.is_file() && opens_as_text(path))
+        };
+        if self.distribution.is_some() && posix(text) {
+            return wsl_file(text);
+        }
+        if Path::new(text).has_root() || posix(text) {
+            return resolve_path(text, None);
+        }
+        // The nearest prompt is the best evidence of where the command ran.
+        // A relative POSIX path must be resolved as a whole to follow links
+        // in both the directory and the final filename.
+        for folder in self.prompt.iter().chain(self.launch_directory.iter()) {
+            let found = if self.distribution.is_some() && posix(folder) {
+                wsl_file(&format!("{}/{text}", folder.trim_end_matches('/')))
+            } else {
+                prompt_folder(folder).and_then(|folder| resolve_path(text, Some(&folder)))
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        resolve_path(text, self.folder.as_deref())
     }
 }
 
@@ -781,8 +805,7 @@ fn link_under(
     spot: TerminalSpot,
     x: f32,
     y: f32,
-    wait: bool,
-) -> Option<(Opens, Vec<PreviewSelectionRect>)> {
+) -> Option<(Opens, Vec<PreviewSelectionRect>, u64)> {
     let (session, looking) = live
         .cache
         .borrow_mut()
@@ -800,27 +823,14 @@ fn link_under(
     let opens = match link.target {
         terminal::LinkTarget::Url(url) => Opens::Url(url),
         terminal::LinkTarget::Path { text, line, column } => Opens::File {
-            // RFN01-95（案A、書き手と合意 2026-11-04）: **the folder the nearest
-            // prompt names first** — after a `cd` it is where the shell, and an
-            // agent started there, is; a name in both folders means the one
-            // the prompt is in. Then the folder the shell started in.
-            //
-            // RFN01-100: a Linux path — `~/…`, `/home/…` — is asked of WSL,
-            // which follows its links; only one that lands on a Windows drive
-            // opens.
-            path: {
-                let wsl = WslAsk::of(window, &session, wait);
-                if is_linux_path(&text) {
-                    wsl.as_ref()
-                        .and_then(|wsl| wsl.windows(&text))
-                        .filter(|path| path.is_file() && opens_as_text(path))?
-                } else {
-                    screen
-                        .prompt_folder_above(row)
-                        .and_then(|folder| prompt_folder(&folder, wsl.as_ref()))
-                        .and_then(|folder| resolve_path(&text, Some(&folder)))
-                        .or_else(|| resolve_path(&text, session.folder()))?
-                }
+            lookup: FileLookup {
+                text,
+                prompt: screen.prompt_folder_above(row),
+                folder: session.folder().map(Path::to_path_buf),
+                launch_directory: session.launch_directory().map(str::to_owned),
+                distribution: session
+                    .profile()
+                    .and_then(|profile| terminal_shells::wsl_distribution(&profile.command)),
             },
             line,
             column,
@@ -838,7 +848,7 @@ fn link_under(
             height: 1.0,
         })
         .collect();
-    Some((opens, underline))
+    Some((opens, underline, session.number()))
 }
 
 /// RFN01-95: Ctrl held over a link underlines it, and says so (the pointer
@@ -855,9 +865,22 @@ fn hover(window: &AppWindow, live: &Live, id: PaneId, spot: TerminalSpot, x: f32
         return false;
     }
     let underline = control
-        .then(|| link_under(window, live, id, spot, x, y, false))
+        .then(|| link_under(window, live, id, spot, x, y))
         .flatten()
-        .map(|(_, underline)| underline)
+        .and_then(|(opens, underline, _)| match opens {
+            Opens::Url(_) => Some(underline),
+            Opens::File { lookup, .. } => lookup
+                .resolve(|distribution, linux| {
+                    let weak = window.as_weak();
+                    terminal_shells::cached_wsl_windows_path(distribution, linux, move || {
+                        let _ = weak.upgrade_in_event_loop(|window| {
+                            let links = window.global::<TerminalLinks>();
+                            links.set_generation(links.get_generation() + 1);
+                        });
+                    })
+                })
+                .map(|_| underline),
+        })
         .unwrap_or_default();
     let shown = !underline.is_empty();
     UNDERLINED.set(shown);
@@ -1017,8 +1040,11 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
         } else {
             TerminalSpot::Below
         };
-        match link_under(&window, &url_live, id, spot, x, y, true).map(|(opens, _)| opens) {
-            Some(Opens::Url(url)) => {
+        let Some((opens, _, number)) = link_under(&window, &url_live, id, spot, x, y) else {
+            return;
+        };
+        match opens {
+            Opens::Url(url) => {
                 use windows::Win32::UI::{
                     Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL,
                 };
@@ -1034,11 +1060,93 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
                     );
                 }
             }
-            Some(Opens::File { path, line, column }) => {
-                open_file_at(&window, &url_live, id, &path, line, column);
+            Opens::File {
+                lookup,
+                line,
+                column,
+            } if lookup.distribution.is_some() => {
+                let weak = window.as_weak();
+                let coordinate =
+                    |at: Option<usize>| at.and_then(|at| i32::try_from(at).ok()).unwrap_or(0);
+                if !terminal_shells::start_fresh_wsl_lookup(move || {
+                    let path = lookup.resolve(terminal_shells::ask_wsl);
+                    let _ = weak.upgrade_in_event_loop(move |window| {
+                        window.invoke_terminal_wsl_open(
+                            pane,
+                            if spot == TerminalSpot::Front { 0 } else { 1 },
+                            number.to_string().into(),
+                            path.map_or_else(SharedString::default, |path| {
+                                path.to_string_lossy().into_owned().into()
+                            }),
+                            coordinate(line),
+                            coordinate(column),
+                        );
+                    });
+                }) {
+                    window.tell(
+                        pick(
+                            "WSL のパスを確認中です。もう一度お試しください",
+                            "WSL path lookups are busy. Try again shortly",
+                        )
+                        .into(),
+                    );
+                }
             }
-            None => {}
+            Opens::File {
+                lookup,
+                line,
+                column,
+            } => {
+                if let Some(path) = lookup.resolve(|_, _| None) {
+                    open_file_at(&window, &url_live, id, &path, line, column);
+                }
+            }
         }
+    });
+    let weak = window.as_weak();
+    let wsl_live = live.clone();
+    window.on_terminal_wsl_open(move |pane, spot, number, path, line, column| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let id = PaneId::from_index(pane);
+        let spot = if spot == 0 {
+            TerminalSpot::Front
+        } else {
+            TerminalSpot::Below
+        };
+        let Ok(number) = number.parse::<u64>() else {
+            return;
+        };
+        if !id.is_shown(&window)
+            || !wsl_live
+                .cache
+                .borrow_mut()
+                .pane(id)
+                .shell(spot)
+                .is_some_and(|shell| shell.session.borrow().number() == number)
+        {
+            return;
+        }
+        if path.is_empty() {
+            window.tell(
+                pick(
+                    "WSL のリンク先を開けません",
+                    "Could not open the WSL link target",
+                )
+                .into(),
+            );
+            return;
+        }
+        let coordinate = |at| (at > 0).then_some(at as usize);
+        open_file_at(
+            &window,
+            &wsl_live,
+            id,
+            Path::new(path.as_str()),
+            coordinate(line),
+            coordinate(column),
+        );
     });
     let weak = window.as_weak();
     let hover_live = live.clone();
@@ -1136,15 +1244,15 @@ mod tests {
     #[test]
     fn prompt_folders_have_windows_names() {
         assert_eq!(
-            prompt_folder("/mnt/d/原稿/第一部", None),
+            prompt_folder("/mnt/d/原稿/第一部"),
             Some(PathBuf::from("D:\\原稿\\第一部"))
         );
         assert_eq!(
-            prompt_folder("D:\\work\\book", None),
+            prompt_folder("D:\\work\\book"),
             Some(PathBuf::from("D:\\work\\book"))
         );
-        assert_eq!(prompt_folder("~/notes", None), None, "not a WSL shell");
-        assert_eq!(prompt_folder("/home/ken", None), None);
+        assert_eq!(prompt_folder("~/notes"), None, "not a WSL shell");
+        assert_eq!(prompt_folder("/home/ken"), None);
         assert!(is_linux_path("~") && is_linux_path("~/a") && is_linux_path("/home/ken"));
         assert!(!is_linux_path("/mnt/d/x") && !is_linux_path("a/b") && !is_linux_path("D:\\x"));
     }

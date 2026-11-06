@@ -670,7 +670,9 @@ fn change_folder(window: &AppWindow, live: &Live, chosen: String) {
     let (Some(from), Some(to)) = (from, to) else {
         return;
     };
-    if let Err(error) = from.move_to(&to) {
+    if let Err(error) = from.move_to_after(&to, || {
+        persist_backup_setting(window, crate::BACKUP_FOLDER_SETTING, &chosen)
+    }) {
         let why = why(error);
         live.cache.borrow_mut().log_diag(
             "file",
@@ -690,7 +692,6 @@ fn change_folder(window: &AppWindow, live: &Live, chosen: String) {
         return;
     }
     window.set_backup_folder(chosen.into());
-    save_settings(window, &live.cache);
     publish_settings(window);
     refresh_pane(window, live);
     window.tell(say!("保存先を変えました", "Backup folder changed").into());
@@ -710,8 +711,8 @@ fn problem_text(problem: backup::FormatProblem) -> String {
         )
         .to_owned(),
         backup::FormatProblem::Ext => pick(
-            "この書式は使えません：{ext} は1つまでです。",
-            "This format cannot be used: {ext} may appear only once.",
+            "この書式は使えません：元ファイルの識別に {ext} がちょうど1つ要ります。",
+            "This format needs exactly one {ext} to identify the original file.",
         )
         .to_owned(),
         backup::FormatProblem::Character(c) => say!(
@@ -749,7 +750,9 @@ fn name_accepted(window: &AppWindow, live: &Live, format: &str) {
     let Some(store) = backup_store(window) else {
         return;
     };
-    if let Err(error) = store.rename_to(format) {
+    if let Err(error) = store.rename_to_after(format, || {
+        persist_backup_setting(window, crate::BACKUP_NAME_SETTING, format)
+    }) {
         let why = why(error);
         live.cache.borrow_mut().log_diag(
             "file",
@@ -770,13 +773,22 @@ fn name_accepted(window: &AppWindow, live: &Live, format: &str) {
         return;
     }
     window.set_backup_name_format(format.into());
-    save_settings(window, &live.cache);
     live.cache
         .borrow_mut()
         .log_diag("file", &format!("backup rename ok format={format}"));
     publish_settings(window);
     refresh_pane(window, live);
     window.tell(say!("ファイル名の書式を変えました", "File name format changed").into());
+}
+
+fn persist_backup_setting(window: &AppWindow, key: &str, value: &str) -> std::io::Result<()> {
+    let directory = crate::app_data::app_directory()
+        .ok_or_else(|| std::io::Error::other("The application data location is unavailable"))?;
+    let mut settings = crate::settings_values(window);
+    if let Some((_, current)) = settings.iter_mut().find(|(name, _)| name == key) {
+        *current = value.to_owned();
+    }
+    crate::app_data::write_settings(&directory, &settings).map(|_| ())
 }
 
 pub fn wire(window: &AppWindow, live: &Live) {

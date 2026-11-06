@@ -16,6 +16,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+mod process_tree;
+mod stash;
+pub(crate) use process_tree::ManagedChild;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitError {
     /// `git`が無い。
@@ -141,14 +145,14 @@ fn run_command(
     if input.is_some() {
         git.stdin(Stdio::piped());
     }
-    let mut child = git
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => GitError::Missing,
-            _ => GitError::Failed(error.to_string()),
-        })?;
+    if cancel.is_some_and(Cancel::cancelled) {
+        return Err(GitError::Cancelled);
+    }
+    git.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = ManagedChild::spawn(&mut git).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => GitError::Missing,
+        _ => GitError::Failed(error.to_string()),
+    })?;
     // 出力は別のスレッドで読み切る。待つ側が読まないと、管が詰まってGitが止まる。
     let reader = |source: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -161,18 +165,21 @@ fn run_command(
     };
     let stdout = reader(
         child
+            .process
             .stdout
             .take()
             .map(|s| Box::new(s) as Box<dyn Read + Send>),
     );
     let stderr = reader(
         child
+            .process
             .stderr
             .take()
             .map(|s| Box::new(s) as Box<dyn Read + Send>),
     );
     let input_result = input.map(|bytes| {
         child
+            .process
             .stdin
             .take()
             .expect("piped Git stdin")
@@ -180,18 +187,23 @@ fn run_command(
     });
     let status = loop {
         if cancel.is_some_and(Cancel::cancelled) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(GitError::Cancelled);
+            break Err(GitError::Cancelled);
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
+        match child.process.try_wait() {
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(error) => return Err(GitError::Failed(error.to_string())),
+            Err(error) => break Err(GitError::Failed(error.to_string())),
         }
     };
+    if status.is_err() {
+        child.stop();
+    } else {
+        // Helpers can retain the pipe handles after Git itself exits.
+        child.close_tree();
+    }
     let stdout = stdout.join().unwrap_or_default();
     let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+    let status = status?;
     if status.success()
         && let Some(Err(error)) = input_result
     {
@@ -292,7 +304,9 @@ pub(crate) fn registered_repository(folder: &Path) -> Result<Option<PathBuf>, Gi
     let output = run(folder, &["rev-parse", "--show-toplevel"], None)?;
     if output.ok {
         let root = PathBuf::from(output.text().trim_end_matches(['\r', '\n']));
-        return root.canonicalize().map(|root| Some(crate::backup::plain(&root)))
+        return root
+            .canonicalize()
+            .map(|root| Some(crate::backup::plain(&root)))
             .map_err(|error| GitError::Failed(error.to_string()));
     }
     if output.stderr.starts_with("fatal: not a git repository") {
@@ -484,21 +498,52 @@ pub fn status(root: &Path) -> Result<Status, GitError> {
 pub struct Stash {
     /// `stash@{0}`。
     pub name: String,
+    pub oid: String,
     pub message: String,
+    reflog_date: String,
+    reflog_actor: String,
 }
 
 pub fn stashes(root: &Path) -> Result<Vec<Stash>, GitError> {
-    let text = checked(root, &["stash", "list", "--format=%gd%x1f%s%x1e"], None)?;
+    let text = checked(
+        root,
+        &[
+            "stash",
+            "list",
+            "-z",
+            "--date=raw",
+            "--format=%gd%x1f%H%x1f%gn <%ge>%x1f%gs",
+        ],
+        None,
+    )?;
     Ok(text
-        .split('\x1e')
-        .filter_map(|entry| {
-            let (name, message) = entry.trim_start_matches('\n').split_once('\x1f')?;
+        .split_terminator('\0')
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let mut fields = entry.splitn(4, '\x1f');
             Some(Stash {
-                name: name.to_owned(),
-                message: message.to_owned(),
+                name: format!("stash@{{{index}}}"),
+                reflog_date: fields.next()?.to_owned(),
+                oid: fields.next()?.to_owned(),
+                reflog_actor: fields.next()?.to_owned(),
+                message: fields.next()?.to_owned(),
             })
         })
         .collect())
+}
+
+/// Identity of a stash created by this process, independent of its list index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedStash(Stash);
+
+impl CreatedStash {
+    pub fn matches(&self, stash: &Stash) -> bool {
+        let created = &self.0;
+        created.oid == stash.oid
+            && created.message == stash.message
+            && created.reflog_date == stash.reflog_date
+            && created.reflog_actor == stash.reflog_actor
+    }
 }
 
 /// ローカルのブランチ（名前の順）。
@@ -613,17 +658,22 @@ pub fn head_is_pushed(root: &Path) -> bool {
 }
 
 /// Stash All（新しいファイルも）。`message`が空ならGitの既定の名前。
-pub fn stash_all(root: &Path, message: &str) -> Result<(), GitError> {
-    let mut arguments = vec!["stash", "push", "-q", "--include-untracked"];
-    if !message.trim().is_empty() {
-        arguments.extend(["-m", message]);
-    }
-    checked(root, &arguments, None).map(drop)
+pub fn stash_all(root: &Path, message: &str) -> Result<Option<CreatedStash>, GitError> {
+    stash::push(root, message)
 }
 
 /// Apply・Pop。**追跡しているファイルに変更があれば断る**——衝突したときに、書き手の変更を
 /// 巻き込まずに元へ戻せるのは、手元が前回のCommitと同じときだけだから。
-pub fn stash_apply(root: &Path, name: &str, pop: bool) -> Result<(), GitError> {
+pub fn stash_apply(root: &Path, stash: &Stash, pop: bool) -> Result<(), GitError> {
+    stash_apply_with(root, stash, pop, || {})
+}
+
+fn stash_apply_with(
+    root: &Path,
+    stash: &Stash,
+    pop: bool,
+    after_apply: impl FnOnce(),
+) -> Result<(), GitError> {
     if status(root)?.has_tracked_changes() {
         return Err(GitError::Failed(
             crate::i18n::pick(
@@ -633,8 +683,12 @@ pub fn stash_apply(root: &Path, name: &str, pop: bool) -> Result<(), GitError> {
             .to_owned(),
         ));
     }
+    if pop {
+        stash::require_files_refs(root)?;
+    }
     let before = untracked(root)?;
-    let output = run(root, &["stash", "apply", "-q", name], None)?;
+    check_stash(root, stash)?;
+    let output = run(root, &["stash", "apply", "-q", &stash.oid], None)?;
     if !output.ok {
         if !conflicted(root)? && !output.stderr.contains("CONFLICT") {
             return Err(output.failure());
@@ -652,13 +706,38 @@ pub fn stash_apply(root: &Path, name: &str, pop: bool) -> Result<(), GitError> {
         return Err(GitError::Conflict);
     }
     if pop {
-        checked(root, &["stash", "drop", "-q", name], None)?;
+        after_apply();
+        stash_drop(root, stash).map_err(|error| {
+            GitError::Failed(crate::say!(
+                "Stashを適用しましたが、削除できませんでした: {error}",
+                "Applied the stash but could not drop it: {error}"
+            ))
+        })?;
     }
     Ok(())
 }
 
-pub fn stash_drop(root: &Path, name: &str) -> Result<(), GitError> {
-    checked(root, &["stash", "drop", "-q", name], None).map(drop)
+fn check_stash(root: &Path, expected: &Stash) -> Result<(), GitError> {
+    let list = stashes(root)?;
+    let mut matches = list.iter().filter(|stash| stash.oid == expected.oid);
+    if matches.next() == Some(expected) && matches.next().is_none() {
+        return Ok(());
+    }
+    Err(stash_changed())
+}
+
+fn stash_changed() -> GitError {
+    GitError::Failed(
+        crate::i18n::pick(
+            "対象のStashが変更されたか、一意に特定できません。一覧から選び直してください。",
+            "The selected stash changed or is ambiguous. Select it again from the list.",
+        )
+        .to_owned(),
+    )
+}
+
+pub fn stash_drop(root: &Path, stash: &Stash) -> Result<(), GitError> {
+    stash::drop_locked(root, stash, || {})
 }
 
 fn untracked(root: &Path) -> Result<Vec<String>, GitError> {
@@ -1225,6 +1304,26 @@ pub(crate) fn change_blob(root: &Path, revision: &str, path: &str) -> Result<Vec
     }
 }
 
+pub(crate) fn tree_entry_is_symlink(
+    root: &Path,
+    revision: &str,
+    path: &str,
+) -> Result<bool, GitError> {
+    let mode = checked(
+        root,
+        &[
+            "--literal-pathspecs",
+            "ls-tree",
+            "--format=%(objectmode)",
+            revision,
+            "--",
+            path,
+        ],
+        None,
+    )?;
+    Ok(mode.trim() == "120000")
+}
+
 fn blob_output(root: &Path, revision: &str, path: &str) -> Result<Output, GitError> {
     let object = format!("{revision}:{path}");
     run(root, &["cat-file", "blob", &object], None)
@@ -1354,8 +1453,69 @@ pub fn cherry_pick(root: &Path, sha: &str, merge_commit: bool) -> Result<(), Git
 
 /// Reset。`hard`は Delete Changes（作業ツリーの変更も消す）、そうでなければ Keep Changes（--mixed）。
 pub fn reset(root: &Path, sha: &str, hard: bool) -> Result<(), GitError> {
-    let mode = if hard { "--hard" } else { "--mixed" };
-    checked(root, &["reset", "-q", mode, sha, "--"], None).map(drop)
+    if !hard {
+        return checked(root, &["reset", "-q", "--mixed", sha, "--"], None).map(drop);
+    }
+    let target = checked(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{sha}^{{commit}}"),
+        ],
+        None,
+    )?;
+    let target = target.trim();
+    protect_untracked_reset_paths(root, target)?;
+    checked(root, &["reset", "-q", "--hard", target, "--"], None).map(drop)
+}
+
+fn protect_untracked_reset_paths(root: &Path, target: &str) -> Result<(), GitError> {
+    let paths = |arguments: &[&str]| -> Result<Vec<(String, String)>, GitError> {
+        let output = run(root, arguments, None)?;
+        if !output.ok {
+            return Err(output.failure());
+        }
+        let text = std::str::from_utf8(&output.stdout)
+            .map_err(|error| GitError::Failed(error.to_string()))?;
+        Ok(text
+            .split_terminator('\0')
+            .map(|path| {
+                let path = path.trim_end_matches('/');
+                let key = if cfg!(windows) {
+                    path.to_lowercase()
+                } else {
+                    path.to_owned()
+                };
+                (key, path.to_owned())
+            })
+            .collect())
+    };
+    let incoming: std::collections::BTreeSet<_> =
+        paths(&["ls-tree", "-r", "--name-only", "-z", target])?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+    // No --exclude-standard: ignored files can also be overwritten by a hard reset.
+    for (key, shown) in paths(&["ls-files", "--others", "-z"])? {
+        let children = format!("{key}/");
+        let overlaps = incoming.contains(&key)
+            || key
+                .match_indices('/')
+                .any(|(at, _)| incoming.contains(&key[..at]))
+            || incoming
+                .range(children.clone()..)
+                .next()
+                .is_some_and(|path| path.starts_with(&children));
+        if overlaps {
+            return Err(GitError::Failed(crate::say!(
+                "未追跡のファイルと衝突するため、Hard Resetを中止しました: {shown}",
+                "Hard Reset stopped because it would overwrite an untracked path: {shown}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `target`へ Reset すると、どこかのリモートにある Commit が今のブランチから外れるか。

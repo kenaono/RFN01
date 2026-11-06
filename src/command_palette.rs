@@ -17,22 +17,33 @@
 //! in the field by then, and the pane it acts on is the one the writer was in.
 use super::*;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    mpsc::{Receiver, TryRecvError, channel},
+};
 
 /// How many files a folder walk takes before it stops. A work folder is a few
 /// hundred files; a folder this big is not one a name search should wait on.
 const WALK_LIMIT: usize = 20_000;
+const WALK_ENTRIES: usize = 4 * WALK_LIMIT;
+static SCANS_RUNNING: AtomicUsize = AtomicUsize::new(0);
 /// How many rows the list shows. The rest are found by typing more.
 const ROWS_SHOWN: usize = 200;
 
 thread_local! {
     static PALETTE: RefCell<Option<Palette>> = const { RefCell::new(None) };
+    static SCAN_TIMER: slint::Timer = slint::Timer::default();
 }
 
 struct Palette {
-    pane: PaneId,
-    tree: menu_commands::Target,
+    target: menu_commands::Target,
     /// Files in the order an empty search lists them: recent first.
     files: Option<Vec<FileCandidate>>,
+    file_scope: Option<(Vec<PathBuf>, bool)>,
+    file_index: Option<Arc<Vec<workspace_index::Entry>>>,
+    file_scan: Option<FileScan>,
+    file_note: &'static str,
     /// RFN01-114: the operations that can run now, read when first asked.
     operations: Option<Vec<Operation>>,
     /// RFN01-88: the templates of the Workspace in use, read when first asked.
@@ -43,11 +54,30 @@ struct Palette {
     shown: Vec<Shown>,
 }
 
+struct FileScan {
+    cancelled: Arc<AtomicBool>,
+    reply: Receiver<(Vec<FileCandidate>, bool)>,
+}
+
+impl Drop for FileScan {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
+struct ScanSlot;
+
+impl Drop for ScanSlot {
+    fn drop(&mut self) {
+        SCANS_RUNNING.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// RFN01-114（書き手と合意 2026-11-05）: 選ぶ一覧。データで中身が変わる項目は、汎用の
 /// アクションがこの一覧をパレットに出す（キーはそのアクションに割り当てる）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum List {
-    Templates,
+    Templates { new_document: bool },
     Recent,
     WordModes,
     Shells,
@@ -138,7 +168,11 @@ pub fn install(window: &AppWindow, live: &Live) {
         trace(
             &focus,
             "palette",
-            if returned { "stage=field-focus-returned" } else { "stage=field-focus-begin" },
+            if returned {
+                "stage=field-focus-returned"
+            } else {
+                "stage=field-focus-begin"
+            },
         );
     });
 }
@@ -166,9 +200,12 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
         let pane = focused_pane(window);
         PALETTE.with(|held| {
             *held.borrow_mut() = Some(Palette {
-                pane,
-                tree: menu_commands::Target::for_panels(window, live),
+                target: menu_commands::Target::for_palette(window, live, pane),
                 files: None,
+                file_scope: None,
+                file_index: None,
+                file_scan: None,
+                file_note: "",
                 operations: None,
                 templates: None,
                 only: None,
@@ -190,35 +227,54 @@ pub fn open(window: &AppWindow, live: &Live, commands: bool) {
 fn prepare_open(window: &AppWindow, live: &Live, text: &str) {
     trace(live, "palette", "stage=initial-rows-begin");
     refilter(window, live, text);
-    trace(live, "palette", &format!(
-        "stage=initial-rows-published rows={}", window.get_palette_rows().row_count()
-    ));
+    trace(
+        live,
+        "palette",
+        &format!(
+            "stage=initial-rows-published rows={}",
+            window.get_palette_rows().row_count()
+        ),
+    );
     trace(live, "palette", "stage=focus-request");
     window.set_palette_focus_generation(window.get_palette_focus_generation() + 1);
 }
 
 /// RFN01-88 (Insert ▸ Template…): the palette with the templates only, for
 /// `pane` — the one the template goes into.
-pub fn open_templates(window: &AppWindow, live: &Live, pane: PaneId) {
-    open_list_for(window, live, pane, List::Templates);
+pub(crate) fn open_templates(
+    window: &AppWindow,
+    live: &Live,
+    target: &menu_commands::Target,
+    new_document: bool,
+) {
+    open_list_for(
+        window,
+        live,
+        target.clone(),
+        List::Templates { new_document },
+    );
 }
 
 /// RFN01-114: the palette with one list only (Open Recent Folder…, Choose Word
 /// Check Mode…, New Terminal (Choose Shell)…), for the pane in front.
 pub(crate) fn open_list(window: &AppWindow, live: &Live, list: List) {
-    open_list_for(window, live, focused_pane(window), list);
+    let target = menu_commands::Target::for_palette(window, live, focused_pane(window));
+    open_list_for(window, live, target, list);
 }
 
-fn open_list_for(window: &AppWindow, live: &Live, pane: PaneId, list: List) {
+fn open_list_for(window: &AppWindow, live: &Live, target: menu_commands::Target, list: List) {
     trace(live, "palette", "stage=open-begin mode=list");
     if window.get_title_menu_visible() {
         window.invoke_title_menu_dismissed();
     }
     PALETTE.with(|held| {
         *held.borrow_mut() = Some(Palette {
-            pane,
-            tree: menu_commands::Target::for_panels(window, live),
+            target,
             files: None,
+            file_scope: None,
+            file_index: None,
+            file_scan: None,
+            file_note: "",
             operations: None,
             templates: None,
             only: Some(list),
@@ -252,6 +308,7 @@ pub fn close(window: &AppWindow) {
     window.set_palette_text("".into());
     window.set_palette_rows(ModelRc::from(Rc::new(VecModel::<PaletteRow>::default())));
     PALETTE.with(|held| held.borrow_mut().take());
+    SCAN_TIMER.with(slint::Timer::stop);
     if window.get_git_repo_active() {
         crate::git_repo_ui::regain_focus(window);
     } else if crate::git_catalog_ui::visible(window) {
@@ -290,13 +347,45 @@ fn setting_row(titles: &(String, String), key: &str) -> PaletteRow {
 
 fn refilter(window: &AppWindow, live: &Live, text: &str) {
     trace(live, "palette.detail", "stage=filter-begin");
+    let file_mode = is_file_mode(window, text);
+    if file_mode {
+        poll_file_scan(live);
+        SCAN_TIMER.with(|timer| {
+            if timer.running() {
+                return;
+            }
+            let weak = window.as_weak();
+            let live = live.clone();
+            timer.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(60),
+                move || {
+                    let Some(window) = weak.upgrade().filter(AppWindow::get_palette_open) else {
+                        SCAN_TIMER.with(slint::Timer::stop);
+                        return;
+                    };
+                    let text = window.get_palette_text();
+                    if is_file_mode(&window, &text) && poll_file_scan(&live) {
+                        refilter(&window, &live, &text);
+                    }
+                },
+            );
+        });
+    } else {
+        SCAN_TIMER.with(slint::Timer::stop);
+        PALETTE.with_borrow_mut(|held| {
+            if let Some(palette) = held {
+                palette.file_scan = None;
+            }
+        });
+    }
     let rows = PALETTE.with(|held| {
         let mut held = held.borrow_mut();
         let palette = held.as_mut()?;
         if window.get_git_repo_active() {
-            let operations = palette.operations.get_or_insert_with(|| {
-                operations_now(window, live, palette.pane, &palette.tree)
-            });
+            let operations = palette
+                .operations
+                .get_or_insert_with(|| operations_now(window, live, &palette.target));
             let query = text.strip_prefix('>').unwrap_or(text).trim();
             let (mut rows, shown) = finish_ranked(ranked_operations(operations, query, true));
             for row in &mut rows {
@@ -306,7 +395,7 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
             return Some(rows);
         }
         if let Some(list) = palette.only {
-            if list == List::Templates {
+            if matches!(list, List::Templates { .. }) {
                 let templates = palette
                     .templates
                     .get_or_insert_with(|| crate::templates_in_use(live));
@@ -323,16 +412,20 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
         }
         Some(match text.strip_prefix('>') {
             Some(query) => {
-                let pane = palette.pane;
                 let operations = palette
                     .operations
-                    .get_or_insert_with(|| operations_now(window, live, pane, &palette.tree));
+                    .get_or_insert_with(|| operations_now(window, live, &palette.target));
                 let mut ranked = ranked_operations(operations, query.trim(), true);
                 // RFN01-88: each template is an operation of its own here.
-                let templates = palette
-                    .templates
-                    .get_or_insert_with(|| crate::templates_in_use(live));
-                ranked.extend(ranked_templates(templates, query.trim(), true));
+                if operations.iter().any(|operation| {
+                    operation.command
+                        == menu_commands::Command::Insert(menu_commands::InsertShape::Template)
+                }) {
+                    let templates = palette
+                        .templates
+                        .get_or_insert_with(|| crate::templates_in_use(live));
+                    ranked.extend(ranked_templates(templates, query.trim(), true));
+                }
                 let settings_category = crate::actions::Category::ALL.len() as i32;
                 let folded_query = crate::fold_for_search(query.trim());
                 if !folded_query.is_empty() {
@@ -383,9 +476,6 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
                 rows
             }
             None => {
-                if palette.files.is_none() {
-                    palette.files = Some(file_candidates(live));
-                }
                 let files = palette.files.as_deref().unwrap_or_default();
                 let (rows, shown) = file_rows(files, text.trim());
                 palette.shown = shown;
@@ -401,26 +491,144 @@ fn refilter(window: &AppWindow, live: &Live, text: &str) {
             row.detail_parts = highlight(query, &row.detail);
         }
     }
-    let note = if rows.is_empty() {
+    let file_note = if file_mode {
+        PALETTE.with_borrow(|held| held.as_ref().map_or("", |palette| palette.file_note))
+    } else {
+        ""
+    };
+    let note = if !file_note.is_empty() {
+        file_note
+    } else if rows.is_empty() {
         crate::i18n::pick("一致するものはありません", "No matches")
     } else {
         ""
     };
-    trace(live, "palette.detail", &format!("stage=publish-begin rows={}", rows.len()));
+    trace(
+        live,
+        "palette.detail",
+        &format!("stage=publish-begin rows={}", rows.len()),
+    );
     window.set_palette_note(note.into());
     window.set_palette_selected(0);
     window.set_palette_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
     trace(live, "palette.detail", "stage=publish-returned");
 }
 
+fn is_file_mode(window: &AppWindow, text: &str) -> bool {
+    !text.starts_with('>')
+        && !window.get_git_repo_active()
+        && PALETTE.with_borrow(|held| held.as_ref().is_some_and(|palette| palette.only.is_none()))
+}
+
+fn poll_file_scan(live: &Live) -> bool {
+    let scope = file_scope(live);
+    let entries = scope
+        .1
+        .then(|| workspace_link_ui(live).borrow().index.entries_shared());
+    PALETTE.with_borrow_mut(|held| {
+        let Some(palette) = held else { return false };
+        let mut changed = false;
+        let same_index = match (&palette.file_index, &entries) {
+            (Some(old), Some(current)) => Arc::ptr_eq(old, current),
+            (None, None) => true,
+            _ => false,
+        };
+        if palette.file_scope.as_ref() != Some(&scope) || !same_index {
+            palette.file_scope = Some(scope.clone());
+            palette.file_index = entries.clone();
+            palette.file_scan = None;
+            palette.files = None;
+            palette.file_note =
+                crate::i18n::pick("候補を読み込んでいます…", "Reading file candidates…");
+            changed = true;
+        }
+        if palette.files.is_some() {
+            return changed;
+        }
+        if let Some(scan) = &palette.file_scan {
+            match scan.reply.try_recv() {
+                Ok((files, partial)) => {
+                    palette.files = Some(files);
+                    palette.file_note = if partial {
+                        crate::i18n::pick(
+                            "走査の上限に達しました。一部の候補を表示しています",
+                            "Scan limit reached. Showing partial results",
+                        )
+                    } else {
+                        ""
+                    };
+                }
+                Err(TryRecvError::Empty) => return changed,
+                Err(TryRecvError::Disconnected) => {
+                    palette.files = Some(Vec::new());
+                    palette.file_note = crate::i18n::pick(
+                        "候補を読み込めませんでした",
+                        "Could not read file candidates",
+                    );
+                }
+            }
+            palette.file_scan = None;
+            return true;
+        }
+        // A blocked network read cannot be interrupted. Allow one other scan
+        // to proceed, then retry the current request when a slot is free.
+        if SCANS_RUNNING
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < 2).then_some(n + 1)
+            })
+            .is_err()
+        {
+            return changed;
+        }
+        let slot = ScanSlot;
+        let (roots, _) = scope;
+        let recent = live.recent.borrow().clone();
+        let (send, reply) = channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = cancelled.clone();
+        if std::thread::Builder::new()
+            .name("file-palette".into())
+            .spawn(move || {
+                let _slot = slot;
+                if let Some(files) = file_candidates(
+                    &roots,
+                    entries.as_deref().map(Vec::as_slice),
+                    &recent,
+                    &stop,
+                ) {
+                    let _ = send.send(files);
+                }
+            })
+            .is_err()
+        {
+            palette.files = Some(Vec::new());
+            palette.file_note = crate::i18n::pick(
+                "候補を読み込めませんでした",
+                "Could not read file candidates",
+            );
+            return true;
+        }
+        palette.file_scan = Some(FileScan { cancelled, reply });
+        changed
+    })
+}
+
 fn accept(window: &AppWindow, live: &Live) {
     let selected = window.get_palette_selected();
-    let Some((pane, tree, chosen)) = PALETTE.with(|held| {
+    let Some((target, chosen)) = PALETTE.with(|held| {
         let held = held.borrow();
         let palette = held.as_ref()?;
         let shown = palette.shown.get(usize::try_from(selected).ok()?)?.clone();
         let chosen = match shown {
-            Shown::File(at) => Chosen::File(palette.files.as_ref()?.get(at)?.path.clone()),
+            Shown::File(at) => {
+                if palette.file_scope.as_ref() != Some(&file_scope(live)) {
+                    return None;
+                }
+                Chosen::File(
+                    palette.files.as_ref()?.get(at)?.path.clone(),
+                    palette.file_scope.clone()?,
+                )
+            }
             Shown::Operation(at) => {
                 let operation = palette.operations.as_ref()?.get(at)?;
                 Chosen::Operation(
@@ -429,7 +637,16 @@ fn accept(window: &AppWindow, live: &Live) {
                 )
             }
             Shown::Template(at) => {
-                Chosen::Template(palette.templates.as_ref()?.get(at)?.path.clone())
+                let template = palette.templates.as_ref()?.get(at)?;
+                let new_document =
+                    matches!(palette.only, Some(List::Templates { new_document: true }));
+                Chosen::Operation(
+                    menu_commands::Command::ApplyTemplate {
+                        path: template.path.clone(),
+                        new_document,
+                    },
+                    template.name.clone(),
+                )
             }
             Shown::SettingItem(item) => Chosen::SettingItem(item),
             Shown::SettingGroup(group) => Chosen::SettingGroup(group),
@@ -441,29 +658,27 @@ fn accept(window: &AppWindow, live: &Live) {
                     .to_owned(),
             ),
         };
-        Some((palette.pane, palette.tree.clone(), chosen))
+        Some((palette.target.clone(), chosen))
     }) else {
         return;
     };
     close(window);
     let weak = window.as_weak();
     let live = live.clone();
-    // After the keyboard is back where it was: an operation acts on the focus.
+    // Let focus return before running the action against the target captured at open.
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         let Some(window) = weak.upgrade() else {
             return;
         };
         match chosen {
-            Chosen::File(path) => open_path_in_focused_pane(&window, &live, &path, Opening::Kept),
+            Chosen::File(path, scope) => {
+                if scope == file_scope(&live) {
+                    open_path_in_focused_pane(&window, &live, &path, Opening::Kept);
+                }
+            }
             Chosen::Operation(command, name) => {
-                let target = if matches!(command, menu_commands::Command::Tree(_) | menu_commands::Command::PanelAction(_)) {
-                    tree
-                } else {
-                    menu_commands::Target::for_pane(&window, &live, pane)
-                };
                 menu_commands::run(&window, &live, &target, command, &name);
             }
-            Chosen::Template(path) => crate::insert_template(&window, &live, pane, &path),
             Chosen::SettingItem(item) => {
                 if let Some(toggle) = item.toggle {
                     toggle.flip(&window);
@@ -503,9 +718,8 @@ fn assign(window: &AppWindow, live: &Live, index: i32) {
 }
 
 enum Chosen {
-    File(PathBuf),
+    File(PathBuf, (Vec<PathBuf>, bool)),
     Operation(menu_commands::Command, String),
-    Template(PathBuf),
     Settings(String),
     SettingItem(&'static crate::settings_items::Item),
     SettingGroup(crate::settings_items::Group),
@@ -552,8 +766,13 @@ fn ranked_templates(
 }
 
 /// The files a name search looks through, recent ones first.
-fn file_candidates(live: &Live) -> Vec<FileCandidate> {
-    let (roots, indexed) = search_scope(live);
+fn file_candidates(
+    roots: &[PathBuf],
+    indexed: Option<&[workspace_index::Entry]>,
+    recent: &[PathBuf],
+    cancelled: &AtomicBool,
+) -> Option<(Vec<FileCandidate>, bool)> {
+    let stop = || cancelled.load(Ordering::Relaxed);
     let roots: Vec<PathBuf> = roots.iter().map(|root| same_form(root)).collect();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -584,7 +803,10 @@ fn file_candidates(live: &Live) -> Vec<FileCandidate> {
         Some(_) => crate::workspace_boundary::existing_file_allowed(&roots, path),
         None => path.is_file(),
     };
-    for path in live.recent.borrow().iter() {
+    for path in recent {
+        if stop() {
+            return None;
+        }
         if !openable(path) {
             continue;
         }
@@ -599,13 +821,27 @@ fn file_candidates(live: &Live) -> Vec<FileCandidate> {
             });
         }
     }
-    let mut rest: Vec<PathBuf> = match indexed {
+    let (mut rest, partial) = match indexed {
         // The index's paths are resolved already: only the prefix comes off.
-        Some(entries) => entries.iter().map(|path| without_verbatim(path)).collect(),
-        None => walk(&roots),
+        Some(entries) => (
+            entries
+                .iter()
+                .filter(|entry| {
+                    roots
+                        .iter()
+                        .any(|root| file_tree::is_within(root, &entry.canonical))
+                })
+                .map(|entry| without_verbatim(&entry.canonical))
+                .collect(),
+            false,
+        ),
+        None => walk(&roots, WALK_LIMIT, WALK_ENTRIES, &stop)?,
     };
-    rest.sort_by_key(|path| entry_name(path).to_lowercase());
+    rest.sort_by_cached_key(|path| entry_name(path).to_lowercase());
     for path in rest {
+        if stop() {
+            return None;
+        }
         if seen.insert(path.clone()) {
             out.push(FileCandidate {
                 name: entry_name(&path),
@@ -616,7 +852,7 @@ fn file_candidates(live: &Live) -> Vec<FileCandidate> {
             });
         }
     }
-    out
+    Some((out, partial))
 }
 
 /// A path in the one form every list here is compared in: resolved, and without
@@ -637,48 +873,48 @@ fn without_verbatim(path: &Path) -> PathBuf {
 
 /// Where files are looked for: the active Workspace's registered folders, with
 /// its index, or the Explorer's folder, which is walked.
-fn search_scope(live: &Live) -> (Vec<PathBuf>, Option<Vec<PathBuf>>) {
+fn file_scope(live: &Live) -> (Vec<PathBuf>, bool) {
     let folder = live.folder.borrow();
     let workspace = folder.workspace.as_ref().and_then(|runtime| {
         let runtime = runtime.borrow();
         runtime.active_workspace().map(|_| runtime.active_roots())
     });
     if let Some(roots) = workspace {
-        drop(folder);
-        let held = workspace_link_ui(live);
-        let entries = held
-            .try_borrow()
-            .map(|ui| {
-                ui.index
-                    .entries_shared()
-                    .iter()
-                    .map(|entry| entry.canonical.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let roots = roots
-            .iter()
-            .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()))
-            .collect();
-        return (roots, Some(entries));
+        return (roots, true);
     }
     let root = if folder.workspace_view {
         folder.explorer_location.root.clone()
     } else {
         folder.root.clone()
     };
-    (root.into_iter().collect(), None)
+    (root.into_iter().collect(), false)
 }
 
 /// Every file under `roots`, folders that hold no writing left out.
-fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
+fn walk(
+    roots: &[PathBuf],
+    file_limit: usize,
+    entry_limit: usize,
+    stop: &impl Fn() -> bool,
+) -> Option<(Vec<PathBuf>, bool)> {
     let mut out = Vec::new();
     let mut pending: Vec<PathBuf> = roots.to_vec();
+    let mut visited = 0;
     while let Some(folder) = pending.pop() {
+        if stop() {
+            return None;
+        }
         let Ok(read) = std::fs::read_dir(&folder) else {
             continue;
         };
         for entry in read.flatten() {
+            if stop() {
+                return None;
+            }
+            if visited == entry_limit {
+                return Some((out, true));
+            }
+            visited += 1;
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
@@ -690,14 +926,14 @@ fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
                     pending.push(path);
                 }
             } else if kind.is_file() {
-                out.push(path);
-                if out.len() >= WALK_LIMIT {
-                    return out;
+                if out.len() == file_limit {
+                    return Some((out, true));
                 }
+                out.push(path);
             }
         }
     }
-    out
+    Some((out, false))
 }
 
 /// Folders a name search does not go into: hidden ones (`.git`) and what tools
@@ -822,8 +1058,13 @@ fn file_rows(files: &[FileCandidate], query: &str) -> (Vec<PaletteRow>, Vec<Show
         })
         .collect();
     if !query.is_empty() {
-        // Stable, so equal scores keep the recent-first order.
-        found.sort_by_key(|(points, _)| std::cmp::Reverse(*points));
+        // The original index breaks score ties in recent-first order.
+        let rank = |(points, at): &(i64, usize)| (std::cmp::Reverse(*points), *at);
+        if found.len() > ROWS_SHOWN {
+            found.select_nth_unstable_by_key(ROWS_SHOWN, rank);
+            found.truncate(ROWS_SHOWN);
+        }
+        found.sort_unstable_by_key(rank);
     }
     found.truncate(ROWS_SHOWN);
     let rows = found
@@ -850,14 +1091,14 @@ fn file_rows(files: &[FileCandidate], query: &str) -> (Vec<PaletteRow>, Vec<Show
 }
 
 /// RFN01-114: いま実行できる操作。アクションの表の行（Quick Draftの中の操作を除く）と、
-/// 書き手のデータの行。**前提は1つの答え**（`menu_commands::allowed_for`）。
+/// 書き手のデータの行。同じ表示の行は1つの場面から実行可否を読む。
 fn operations_now(
     window: &AppWindow,
     live: &Live,
-    pane: PaneId,
-    tree: &menu_commands::Target,
+    target: &menu_commands::Target,
 ) -> Vec<Operation> {
-    let tree_scene = menu_commands::Scene::read(window, live, tree);
+    let scene = menu_commands::Scene::read(window, live, target);
+    let keys = shortcuts::resolved_bindings(&window.get_shortcut_bindings());
     let mut found: Vec<Operation> = crate::actions::all()
         .iter()
         .enumerate()
@@ -865,22 +1106,20 @@ fn operations_now(
             let command = action.command.clone()?;
             let enabled = if let menu_commands::Command::PanelAction(_) = command {
                 (window.get_git_repo_active() || !crate::panel_actions::overlay_active(window))
-                    && tree_scene.enabled(&command)
+                    && scene.enabled(&command)
             } else if window.get_git_repo_active() {
-                false
-            } else if matches!(command, menu_commands::Command::Tree(_)) {
-                tree_scene.enabled(&command)
+                command == menu_commands::Command::Navigate(false) && scene.enabled(&command)
             } else {
-                menu_commands::allowed_for(window, live, pane, &command) == menu_commands::Allowed::Yes
+                scene.enabled(&command)
             };
             enabled.then(|| Operation {
-                    category: action.category,
-                    title: action.title.clone(),
-                    description: action.description.clone(),
-                    key: shortcuts::label(window, at),
-                    command,
-                    action: Some(at),
-                })
+                category: action.category,
+                title: action.title.clone(),
+                description: action.description.clone(),
+                key: keys.get(at).cloned().unwrap_or_default(),
+                command,
+                action: Some(at),
+            })
         })
         .collect();
     if window.get_git_repo_active() {
@@ -889,10 +1128,7 @@ fn operations_now(
     found.extend(
         data_operations(window, live, None)
             .into_iter()
-            .filter(|operation| {
-                menu_commands::allowed_for(window, live, pane, &operation.command)
-                    == menu_commands::Allowed::Yes
-            }),
+            .filter(|operation| scene.enabled(&operation.command)),
     );
     found
 }
@@ -940,7 +1176,7 @@ fn data_operations(window: &AppWindow, live: &Live, only: Option<List>) -> Vec<O
         }
     }
     if wants(List::Shells) {
-        for (at, shell) in crate::configured_shells(window).iter().enumerate() {
+        for shell in crate::offered_shells(window) {
             found.push(Operation {
                 category: crate::actions::Category::File,
                 title: (
@@ -952,7 +1188,7 @@ fn data_operations(window: &AppWindow, live: &Live, only: Option<List>) -> Vec<O
                     "Opens a new Terminal tab with this shell.".to_owned(),
                 ),
                 key: String::new(),
-                command: menu_commands::Command::NewTerminal(at as i32),
+                command: menu_commands::Command::NewTerminal(Some(shell.id)),
                 action: None,
             });
         }
@@ -1087,13 +1323,94 @@ fn two_lines(shown: &str, other: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::menu_commands::Command;
+
+    #[test]
+    fn file_palette_walk_bounds_files_and_empty_folders_and_can_be_cancelled() {
+        let root = crate::saving::scratch_directory("palette-walk");
+        let folders = root.join("folders");
+        for n in 0..3 {
+            std::fs::create_dir_all(folders.join(n.to_string())).unwrap();
+            std::fs::write(root.join(format!("{n}.md")), "").unwrap();
+        }
+        let files = std::slice::from_ref(&root);
+        let (paths, partial) = walk(files, 2, 100, &|| false).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(partial);
+        let (paths, partial) = walk(&[folders], 100, 2, &|| false).unwrap();
+        assert!(paths.is_empty() && partial);
+        assert!(walk(files, 100, 100, &|| true).is_none());
+    }
+
+    #[test]
+    fn a_palette_action_refuses_to_save_a_tab_that_replaced_its_target() {
+        let (h, _) = crate::saving::Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        let saves = Rc::new(std::cell::Cell::new(0));
+        let count = saves.clone();
+        window.on_save_requested(move || count.set(count.get() + 1));
+        open(window, live, true);
+        refilter(window, live, "> save");
+        let row = PALETTE.with_borrow(|held| {
+            let palette = held.as_ref().unwrap();
+            let operations = palette.operations.as_ref().unwrap();
+            palette.shown.iter().position(|row| {
+                matches!(row, Shown::Operation(index) if operations[*index].command == Command::Save(false))
+            }).expect("Save row")
+        });
+        window.set_palette_selected(row as i32);
+        accept(window, live);
+        crate::new_file_tab(window, live, PaneId::FIRST);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(saves.get(), 0);
+        assert!(
+            window
+                .get_render_status()
+                .contains("操作対象が変わりました")
+        );
+    }
+
+    #[test]
+    fn new_from_template_picker_creates_a_tab_and_keeps_the_existing_text() {
+        let (h, original) = crate::saving::Harness::new(|weak| OpenDocument::untitled(1, weak));
+        let (window, live) = (&h.window, &h.live);
+        *original.text.borrow_mut() = "existing text".to_owned();
+        let directory = app_data::app_directory().unwrap();
+        let root = directory.join("templates");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("note.md"), "template body").unwrap();
+        let mut registry = workspace::Registry::new();
+        let id = registry.create_workspace("Templates".to_owned()).unwrap();
+        registry.add_root(id, &root).unwrap();
+        registry.set_templates(id, Some(root)).unwrap();
+        workspace::save(&directory, &registry).unwrap();
+        let mut runtime = workspace_ui::Runtime::open(directory);
+        runtime.set_active_silently(Some(id));
+        live.folder.borrow_mut().workspace = Some(Rc::new(RefCell::new(runtime)));
+
+        let target = menu_commands::Target::for_shortcut(window, live);
+        menu_commands::run(window, live, &target, Command::TemplatePicker, "");
+        assert_eq!(window.get_palette_rows().row_count(), 1);
+        accept(window, live);
+        slint::platform::update_timers_and_animations();
+        let tabs = live.tabs.borrow();
+        let strip = tabs.of(PaneId::FIRST);
+        assert_eq!(strip.tabs.len(), 2);
+        assert_eq!(&*original.text.borrow(), "existing text");
+        assert_eq!(
+            &*strip.current().unwrap().document.text.borrow(),
+            "template body"
+        );
+    }
 
     #[test]
     fn palette_diagnostics_record_stages_without_the_query() {
         let (harness, _) = crate::saving::Harness::new(|weak| OpenDocument::untitled(1, weak));
         let window = &harness.window;
         let live = &harness.live;
-        let directory = app_data::app_directory().unwrap().join("palette-diagnostics");
+        let directory = app_data::app_directory()
+            .unwrap()
+            .join("palette-diagnostics");
         let config = crate::diag::Config::from_args(["--diagnostics=ui".into()]).unwrap();
         let path = {
             let mut cache = live.cache.borrow_mut();
@@ -1120,7 +1437,10 @@ mod tests {
             "stage=filter-begin",
             "stage=publish-returned",
         ] {
-            after = after.split_once(stage).unwrap_or_else(|| panic!("missing {stage}: {written}")).1;
+            after = after
+                .split_once(stage)
+                .unwrap_or_else(|| panic!("missing {stage}: {written}"))
+                .1;
         }
         assert!(!written.contains(query));
     }
@@ -1134,7 +1454,10 @@ mod tests {
         window.invoke_palette_edited("> diff".into());
 
         let rows = window.get_palette_rows();
-        assert_eq!(rows.row_data(0).unwrap().assign.as_str(), "run.compare-file");
+        assert_eq!(
+            rows.row_data(0).unwrap().assign.as_str(),
+            "run.compare-file"
+        );
         close(window);
     }
 

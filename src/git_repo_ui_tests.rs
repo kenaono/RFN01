@@ -103,7 +103,10 @@ fn repository_palette_keeps_the_original_registered_folder() {
     let (window, live) = (&harness.window, &harness.live);
     let runtime = live.folder.borrow().workspace.clone().unwrap();
     let workspace = runtime.borrow().active_workspace().unwrap();
-    runtime.borrow_mut().edit(|registry| registry.add_root(workspace, &second)).unwrap();
+    runtime
+        .borrow_mut()
+        .edit(|registry| registry.add_root(workspace, &second))
+        .unwrap();
     git_ui::wire(window, live);
     wire(window, live);
     crate::panel_actions::wire(window, live);
@@ -113,8 +116,11 @@ fn repository_palette_keeps_the_original_registered_folder() {
     assert!(git_ui::chosen_folder().is_some_and(|path| git_ui::same_path(&path, &first)));
 
     crate::command_palette::open(window, live, true);
-    let index = window.get_palette_rows().iter()
-        .position(|row| row.title.contains("Git Repository…")).unwrap();
+    let index = window
+        .get_palette_rows()
+        .iter()
+        .position(|row| row.title.contains("Git Repository…"))
+        .unwrap();
     window.set_palette_selected(index as i32);
     window.invoke_git_repo_chosen(1);
     slint::platform::update_timers_and_animations();
@@ -143,13 +149,24 @@ fn git_toolbar_and_palette_share_merge_availability() {
     for merging in [false, true] {
         window.set_git_merge_active(merging);
         crate::command_palette::open(window, live, true);
-        for (id, expected) in [("git.fetch", true), ("git.pull", !merging), ("git.push", !merging)] {
+        for (id, expected) in [
+            ("git.fetch", true),
+            ("git.pull", !merging),
+            ("git.push", !merging),
+        ] {
             let at = crate::actions::index_of(id).unwrap();
             let title = &crate::actions::all()[at].title;
             let caption = pick(&title.0, &title.1);
-            assert_eq!(window.invoke_git_action_allowed(id.into(), false, 0), expected, "{id}");
             assert_eq!(
-                window.get_palette_rows().iter().any(|row| row.title.contains(caption)),
+                window.invoke_git_action_allowed(id.into(), false, 0),
+                expected,
+                "{id}"
+            );
+            assert_eq!(
+                window
+                    .get_palette_rows()
+                    .iter()
+                    .any(|row| row.title.contains(caption)),
                 expected,
                 "{id}",
             );
@@ -213,17 +230,20 @@ fn selecting_shows_details_and_a_branch_jumps_to_its_tip() {
     open(window, live);
     settle(window, live);
     assert_eq!(messages(window)[0], "// WIP");
-    select_row(window, row_of(window, "二"));
+    select_row(window, live, row_of(window, "二"));
+    settle(window, live);
     assert_eq!(window.get_git_repo_detail_mode(), 1);
     assert_eq!(window.get_git_repo_detail_message(), "二");
     let files = window.get_git_repo_detail_files();
     assert_eq!(files.row_count(), 1);
     assert_eq!(files.row_data(0).unwrap().label, "原稿.md");
-    select_row(window, 0);
+    select_row(window, live, 0);
+    settle(window, live);
     assert_eq!(window.get_git_repo_detail_mode(), 2);
 
     let generation = window.get_git_repo_scroll_generation();
-    branch_clicked(window, side_index(window, 1, "draft"));
+    branch_clicked(window, live, side_index(window, 1, "draft"));
+    settle(window, live);
     assert_eq!(
         window.get_git_repo_selected() as usize,
         row_of(window, "場面")
@@ -232,8 +252,10 @@ fn selecting_shows_details_and_a_branch_jumps_to_its_tip() {
     assert_eq!(window.get_git_repo_scroll_generation(), generation + 1);
 
     // ファイルを押すと、右の列に1列の差分（PR 2b）。「Open in Comparison」で比較の画面がこの上に開く。
-    select_row(window, row_of(window, "二"));
-    show_diff(window, 0, false);
+    select_row(window, live, row_of(window, "二"));
+    settle(window, live);
+    show_diff(window, live, 0, false);
+    settle(window, live);
     assert_eq!(window.get_git_repo_detail_mode(), 3);
     diff_open_full(window);
     assert!(window.get_diff_active());
@@ -437,8 +459,10 @@ fn a_file_shows_an_inline_diff_with_the_changed_characters() {
     let (window, live) = (&harness.window, &harness.live);
     open(window, live);
     settle(window, live);
-    select_row(window, row_of(window, "二"));
-    show_diff(window, 0, false);
+    select_row(window, live, row_of(window, "二"));
+    settle(window, live);
+    show_diff(window, live, 0, false);
+    settle(window, live);
     assert_eq!(window.get_git_repo_detail_mode(), 3);
     assert_eq!(window.get_git_repo_diff_name(), "原稿.md");
     assert!(window.get_git_repo_diff_switchable());
@@ -454,13 +478,54 @@ fn a_file_shows_an_inline_diff_with_the_changed_characters() {
     assert_eq!(lines[1], (2, "二行目".to_owned(), vec!["二".to_owned()]));
     // Working Copy：その Commit と今のファイル。
     fs::write(root.join("原稿.md"), "二行目を直した\n").unwrap();
-    diff_working_chosen(window, true);
+    diff_working_chosen(window, live, true);
+    settle(window, live);
     assert!(window.get_git_repo_diff_working());
     let lines = diff_text(window);
     assert_eq!(lines[1].2, ["を直した"]);
+    // Reflow and the full comparison use the displayed snapshot even if the
+    // working file changes while the split handle is dragged.
+    fs::write(root.join("原稿.md"), "later external edit\n").unwrap();
+    diff_width_changed(window, 400.0);
+    assert_eq!(diff_text(window), lines);
+    diff_open_full(window);
+    assert!(window.get_diff_active());
+    crate::diff_view::dismiss(window);
     // ‹ Files で詳細へ戻る。
     diff_back(window);
     assert_eq!(window.get_git_repo_detail_mode(), 1);
+}
+
+#[test]
+fn changing_commit_selection_discards_a_delayed_detail_result() {
+    let Some((_root, harness)) = manuscript("repo-delayed-detail") else {
+        return;
+    };
+    let (window, live) = (&harness.window, &harness.live);
+    open(window, live);
+    settle(window, live);
+    let old = row_of(window, "最初");
+    let target = REPO.with(|repo| repo.borrow().rows[old].clone().unwrap());
+    select_detail(
+        window,
+        Selected::Commit(target.clone()),
+        None,
+        old as i32,
+        false,
+    );
+    let (release, delayed) = mpsc::channel();
+    let (sent, done) = mpsc::channel();
+    start_lookup(window, live, "waiting", move |root| {
+        delayed.recv().unwrap();
+        let result = git::detail(root, &target).map(Lookup::SelectedCommit);
+        sent.send(()).unwrap();
+        result
+    });
+    select_row(window, live, row_of(window, "二"));
+    release.send(()).unwrap();
+    done.recv_timeout(Duration::from_secs(5)).unwrap();
+    settle(window, live);
+    assert_eq!(window.get_git_repo_detail_message(), "二");
 }
 
 #[test]
@@ -504,7 +569,8 @@ fn both_git_changes_surfaces_compare_the_selected_section() {
 
     open(window, live);
     settle(window, live);
-    select_row(window, 0);
+    select_row(window, live, 0);
+    settle(window, live);
     assert_eq!(window.get_git_repo_detail_mode(), 2);
     window.invoke_git_repo_changes_clicked(row_for(3));
     settle(window, live);
@@ -552,7 +618,8 @@ fn the_wip_block_button_stages_and_unstages_the_selected_hunk() {
     crate::command_palette::install(window, live);
     open(window, live);
     settle(window, live);
-    select_row(window, 0);
+    select_row(window, live, 0);
+    settle(window, live);
 
     let show = |kind| {
         let rows = window.get_git_rows();
@@ -572,7 +639,11 @@ fn the_wip_block_button_stages_and_unstages_the_selected_hunk() {
     window.invoke_git_repo_select_hunk(1);
     crate::command_palette::open(window, live, true);
     let title = pick("ブロックをStage", "Stage Block");
-    let at = window.get_palette_rows().iter().position(|row| row.title.contains(title)).unwrap();
+    let at = window
+        .get_palette_rows()
+        .iter()
+        .position(|row| row.title.contains(title))
+        .unwrap();
     window.set_palette_selected(at as i32);
     window.invoke_git_repo_select_hunk(0);
     window.invoke_palette_accepted();
@@ -595,7 +666,10 @@ fn the_wip_block_button_stages_and_unstages_the_selected_hunk() {
     crate::command_palette::open(window, live, true);
     let rows = window.get_palette_rows();
     let title = pick("ブロックをUnstage", "Unstage Block");
-    let at = rows.iter().position(|row| row.title.contains(title)).unwrap();
+    let at = rows
+        .iter()
+        .position(|row| row.title.contains(title))
+        .unwrap();
     window.set_palette_selected(at as i32);
     window.invoke_palette_accepted();
     slint::platform::update_timers_and_animations();
@@ -686,7 +760,8 @@ fn history_search_opens_a_commit_outside_the_graph_page() {
             .label,
         path
     );
-    show_diff(window, 0, false);
+    show_diff(window, live, 0, false);
+    settle(window, live);
     assert!(diff_text(window).iter().any(|(_, text, _)| text == "旧版"));
 }
 
@@ -810,7 +885,10 @@ fn worktree_creation_and_opening_share_actions_and_isolate_unsaved_documents() {
     window.set_git_message("commit in linked worktree".into());
     action("git.commit-changes");
     assert!(live.pending.borrow().is_none());
-    assert_eq!(git::last_message(&linked).unwrap(), "commit in linked worktree");
+    assert_eq!(
+        git::last_message(&linked).unwrap(),
+        "commit in linked worktree"
+    );
     assert_eq!(git::head_sha(&root).unwrap(), head);
     assert!(document.text.edited());
 
@@ -975,15 +1053,18 @@ fn git_repository_screens() {
     window.show().unwrap();
     open(window, live);
     settle(window, live);
-    select_row(window, row_of(window, "第一章を直す"));
+    select_row(window, live, row_of(window, "第一章を直す"));
+    settle(window, live);
     draw("git-repository");
-    show_diff(window, 0, false);
+    show_diff(window, live, 0, false);
+    settle(window, live);
     // 右の列の幅が知らされて、段を折り直す（時計を回す）。
     draw("git-repository-diff");
     slint::platform::update_timers_and_animations();
     draw("git-repository-diff");
     diff_back(window);
-    select_row(window, 0);
+    select_row(window, live, 0);
+    settle(window, live);
     draw("git-repository-wip");
     // main の先へ TestBranch で Commit した形（紫の幹は main のまま）。
     git_ok(&root, &["switch", "-q", "-c", "TestBranch"]);

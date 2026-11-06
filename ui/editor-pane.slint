@@ -20,8 +20,8 @@ import { ColourPalette, Field, Icon, IconButton, Icons, LinkRow, MenuFrame, Menu
 // computes covers both and this side does not have to know which is which.
 // 追加要件 2026-09-15（書き手）: Windowsの壁紙の、画面1台ぶん。**座標は画面の論理画素**
 // で、面が自分の画面上の位置を引いて置く。画面の矩形で切り、地の色の上に画像を置く。
-export { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
-import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, PreviewSelectionRect, PanelStyle, PaneScreen } from "editor-types.slint";
+export { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, PreviewSelectionRect, PanelStyle, PaneScreen, TerminalShellRow } from "editor-types.slint";
+import { WallPiece, PreviewTile, TabInfo, DraftLine, WordModeRow, InsertRow, PreviewSelectionRect, PanelStyle, PaneScreen, TerminalShellRow } from "editor-types.slint";
 
 export component EditorPane inherits Rectangle {
     in property <int> menu-action;
@@ -215,16 +215,17 @@ export component EditorPane inherits Rectangle {
     /// ここでWSL固定にすると、PowerShellを選ぶ道が☰しか無くなり、
     /// しかもそちらは新しいタブを開いてしまう。並びは窓が持っているもの
     /// （先頭が既定）をそのまま出す。
-    in property <[string]> terminal-shells;
+    in property <[TerminalShellRow]> terminal-shells;
     /// 追加要件 2026-09-07: 既定の接続先。**訊かない道はこれを起こす**。
-    in property <int> default-shell;
+    in property <string> default-shell-name;
     callback new-file-requested();
-    callback new-terminal-requested(int);
+    callback new-terminal-requested();
     /// RFN01-88: the templates a new document can start from (see the surface).
     in property <[string]> template-names;
     callback new-from-template-requested(string);
     /// 前に出ている端末のタブの接続先を替える（追加要件 2026-09-07）。
-    callback tab-shell-chosen(int);
+    callback tab-shell-chosen(string);
+    callback panel-shell-chosen(string);
     /// 追加要件 Terminal: the strip along the foot of the pane. 0 nothing, 1 a
     /// shell under a document, 2 a draft under a shell.
     in property <int> below-kind: 0;
@@ -516,7 +517,6 @@ export component EditorPane inherits Rectangle {
     /// pointed at something, and pointing at a pane is asking about that pane.
     callback zoom-stepped(int);
     callback zoom-reset-requested();
-    callback close-active-tab();
     /// 追加要件 2026-09-06: a tab was held down, which means "change this
     /// file's name" (要件 5.2's rename, reached from the strip).
     callback tab-renamed(int, string);
@@ -1829,10 +1829,9 @@ export component EditorPane inherits Rectangle {
             spell-suggestions: root.spell-suggestions;
             spelling-at(a0, a1) => { root.spelling-at(a0, a1); }
             spelling-chosen(a0) => { root.spelling-chosen(a0); }
-            terminal-shells: root.terminal-shells;
-            default-shell: root.default-shell;
+            default-shell-name: root.default-shell-name;
             new-file-requested() => { root.new-file-requested(); }
-            new-terminal-requested(a0) => { root.new-terminal-requested(a0); }
+            new-terminal-requested => { root.new-terminal-requested(); }
             template-names: root.template-names;
             new-from-template-requested(a0) => { root.new-from-template-requested(a0); }
             below-kind: root.below-kind;
@@ -1938,7 +1937,6 @@ export component EditorPane inherits Rectangle {
             save-as-requested() => { root.save-as-requested(); }
             zoom-stepped(a0) => { root.zoom-stepped(a0); }
             zoom-reset-requested() => { root.zoom-reset-requested(); }
-            close-active-tab() => { root.close-active-tab(); }
             find-requested(a0) => { root.find-requested(a0); }
             goto-requested(a0) => { root.goto-requested(a0); }
             reopen-closed-requested() => { root.reopen-closed-requested(); }
@@ -2017,9 +2015,9 @@ export component EditorPane inherits Rectangle {
                                     close-policy: close-on-click-outside;
                                     MenuFrame { width: 240px;
                                         VerticalLayout { padding: 6px;
-                                            for shell[shell-index] in root.terminal-shells: MenuRow {
-                                                title: shell;
-                                                activated => { root.panel-action(12, shell-index); panel-shell-menu.close(); }
+                                            for shell in root.terminal-shells: MenuRow {
+                                                title: shell.name;
+                                                activated => { root.panel-shell-chosen(shell.profile-id); panel-shell-menu.close(); }
                                             }
                                         }
                                     }
@@ -2272,7 +2270,7 @@ export component EditorPane inherits Rectangle {
                                 root.zoom-stepped(-1);
                                 return accept;
                             }
-                            if event.text == "0" {
+                            if event.text == "0" && !event.modifiers.shift {
                                 root.zoom-reset-requested();
                                 return accept;
                             }
@@ -2582,8 +2580,8 @@ export component EditorPane inherits Rectangle {
 
                     MenuSep { }
 
-                    for shell[index] in root.terminal-shells: MenuRow {
-                        title: @tr("Switch to {}", shell);
+                    for shell in root.terminal-shells: MenuRow {
+                        title: @tr("Switch to {}", shell.name);
                         // **頼んでから閉じる。**`close`はこのメニューの木を捨てる
                         // ——そこにはこの行自身と、行を包む`for`と`if`が入っている。
                         // 捨てられた木の中から`root`へ登ろうとすると、生成された
@@ -2592,7 +2590,7 @@ export component EditorPane inherits Rectangle {
                         // 届いた形跡が1行も無かった）。浅い行が同じ書き方で
                         // 動いていたのは、登る段数が少ないからにすぎない。
                         activated => {
-                            root.tab-shell-chosen(index);
+                            root.tab-shell-chosen(shell.profile-id);
                             tab-menu.close();
                         }
                     }
@@ -2733,7 +2731,7 @@ export component EditorPane inherits Rectangle {
                 MenuRow {
                     enabled: MenuActions.allowed(MenuAction.new-terminal, MenuActions.generation);
                     title: @tr("New Terminal");
-                    shortcut: root.terminal-shells[root.default-shell];
+                    shortcut: root.default-shell-name;
                     activated => {
                         MenuActions.run(MenuAction.new-terminal);
                         strip-menu.close();

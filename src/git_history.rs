@@ -45,13 +45,16 @@ pub enum Kind {
     NewBranch { name: String },
     /// ブランチを消した（`sha`はその先端）。
     DeleteBranch { name: String, sha: String },
-    /// Stash All。`stash`は作られた Stash の Commit。
+    /// Stash All。`stash`は作られた Stash の Commit と reflog のメッセージ。
     StashAll {
         message: String,
-        stash: Option<String>,
+        stash: Option<git::CreatedStash>,
     },
-    /// Pop（いちばん新しい Stash）。
-    Pop { message: String },
+    /// Pop。`stash`は Undo で作り直した Stash。
+    Pop {
+        message: String,
+        stash: Option<git::CreatedStash>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,10 +76,18 @@ impl Entry {
     }
 }
 
-/// 今の HEAD とブランチが、Undo なら操作のあと・Redo なら操作の前のままか。
+/// 取り出す方向に、対象の Stash を特定する記録があるか。
+pub fn stash_identity_missing(entry: &Entry, redo: bool) -> bool {
+    matches!(
+        (&entry.kind, redo),
+        (Kind::StashAll { stash: None, .. }, false) | (Kind::Pop { stash: None, .. }, true)
+    )
+}
+
+/// HEAD・ブランチが記録どおりで、対象を特定できるか。
 pub fn usable(entry: &Entry, now: &Point, redo: bool) -> bool {
     let expected = if redo { &entry.before } else { &entry.after };
-    expected == now
+    expected == now && !stash_identity_missing(entry, redo)
 }
 
 fn short(sha: &str) -> String {
@@ -140,9 +151,31 @@ fn needs<'a>(value: &'a Option<String>) -> Result<&'a str, GitError> {
     })
 }
 
-/// Undo。通れば知らせる文。
-pub fn undo(root: &Path, entry: &Entry) -> Result<String, GitError> {
+#[derive(Debug)]
+pub struct HistorySuccess {
+    pub message: String,
+    pub created_stash: Option<git::CreatedStash>,
+}
+
+fn pop_expected_top(
+    root: &Path,
+    stash: Option<&git::CreatedStash>,
+    refusal: &str,
+) -> Result<(), GitError> {
+    let changed = || GitError::Failed(refusal.to_owned());
+    let expected = stash.ok_or_else(changed)?;
+    let stashes = git::stashes(root)?;
+    let selected = stashes
+        .first()
+        .filter(|current| expected.matches(current))
+        .ok_or_else(changed)?;
+    git::stash_apply(root, selected, true)
+}
+
+/// Undo。通れば知らせる文と、この操作で作った Stash。
+pub fn undo(root: &Path, entry: &Entry) -> Result<HistorySuccess, GitError> {
     let before = &entry.before;
+    let mut created_stash = None;
     match &entry.kind {
         Kind::Commit => git::plain(root, &["reset", "-q", "--soft", needs(&before.head)?])?,
         Kind::Checkout => go_to(root, before)?,
@@ -159,27 +192,28 @@ pub fn undo(root: &Path, entry: &Entry) -> Result<String, GitError> {
             git::plain(root, &["branch", "-D", name])?;
         }
         Kind::DeleteBranch { name, sha } => git::plain(root, &["branch", name, sha])?,
-        Kind::StashAll { stash, .. } => {
-            // 作った Stash がまだ一番上にあるときだけ取り出す。
-            if git::resolve(root, "refs/stash").as_ref() != stash.as_ref() {
-                return Err(GitError::Failed(
-                    crate::i18n::pick(
-                        "Stashが替わっているため戻せません",
-                        "The stash has changed, so it cannot be undone",
-                    )
-                    .to_owned(),
-                ));
-            }
-            git::stash_apply(root, "stash@{0}", true)?;
+        Kind::StashAll { stash, .. } => pop_expected_top(
+            root,
+            stash.as_ref(),
+            crate::i18n::pick(
+                "Stashが替わっているため戻せません",
+                "The stash has changed, so it cannot be undone",
+            ),
+        )?,
+        Kind::Pop { message, .. } => {
+            created_stash = git::stash_all(root, message)?;
         }
-        Kind::Pop { message } => git::stash_all(root, message)?,
     }
-    Ok(say!("{}を戻しました", "Undid {}", entry.label))
+    Ok(HistorySuccess {
+        message: say!("{}を戻しました", "Undid {}", entry.label),
+        created_stash,
+    })
 }
 
-/// Redo。通れば知らせる文。
-pub fn redo(root: &Path, entry: &Entry) -> Result<String, GitError> {
+/// Redo。通れば知らせる文と、この操作で作った Stash。
+pub fn redo(root: &Path, entry: &Entry) -> Result<HistorySuccess, GitError> {
     let after = &entry.after;
+    let mut created_stash = None;
     match &entry.kind {
         Kind::Commit => git::plain(root, &["reset", "-q", "--soft", needs(&after.head)?])?,
         Kind::Checkout => go_to(root, after)?,
@@ -190,16 +224,28 @@ pub fn redo(root: &Path, entry: &Entry) -> Result<String, GitError> {
             git::plain(root, &["reset", "-q", "--keep", needs(&after.head)?])?;
         }
         Kind::ResetKeep => git::plain(root, &["reset", "-q", "--mixed", needs(&after.head)?])?,
-        Kind::ResetDelete => git::plain(root, &["reset", "-q", "--hard", needs(&after.head)?])?,
+        Kind::ResetDelete => git::reset(root, needs(&after.head)?, true)?,
         Kind::NewBranch { name } => {
             git::plain(root, &["branch", name, needs(&after.head)?])?;
             git::plain(root, &["switch", "-q", name])?;
         }
         Kind::DeleteBranch { name, .. } => git::plain(root, &["branch", "-D", name])?,
-        Kind::StashAll { message, .. } => git::stash_all(root, message)?,
-        Kind::Pop { .. } => git::stash_apply(root, "stash@{0}", true)?,
+        Kind::StashAll { message, .. } => {
+            created_stash = git::stash_all(root, message)?;
+        }
+        Kind::Pop { stash, .. } => pop_expected_top(
+            root,
+            stash.as_ref(),
+            crate::i18n::pick(
+                "Stashが替わっているためやり直せません",
+                "The stash has changed, so it cannot be redone",
+            ),
+        )?,
     }
-    Ok(say!("{}をやり直しました", "Redid {}", entry.label))
+    Ok(HistorySuccess {
+        message: say!("{}をやり直しました", "Redid {}", entry.label),
+        created_stash,
+    })
 }
 
 /// 記録の名前（Tip に出す）。
@@ -365,29 +411,136 @@ mod tests {
     }
 
     #[test]
-    fn stash_all_and_pop_undo_each_other() {
+    fn stash_all_redo_returns_its_identity_for_the_next_undo() {
         let Some(scratch) = started("stash") else {
             return;
         };
         let root = &scratch.0;
         write(root, "a.md", "書きかけ\n");
         let before = point(root);
-        git::stash_all(root, "場面").unwrap();
-        let stashed = entry(
+        let stash = git::stash_all(root, "場面").unwrap();
+        let mut stashed = entry(
             "Stash All",
             Kind::StashAll {
                 message: "場面".into(),
-                stash: git::resolve(root, "refs/stash"),
+                stash,
             },
             before,
             point(root),
         );
-        undo(root, &stashed).unwrap();
+        assert!(undo(root, &stashed).unwrap().created_stash.is_none());
         assert_eq!(read(root, "a.md"), "書きかけ\n");
         assert!(git::stashes(root).unwrap().is_empty());
-        redo(root, &stashed).unwrap();
+        let recreated = redo(root, &stashed).unwrap().created_stash.unwrap();
         assert_eq!(read(root, "a.md"), "1\n");
-        assert_eq!(git::stashes(root).unwrap().len(), 1);
+        let stashes = git::stashes(root).unwrap();
+        assert_eq!(stashes.len(), 1);
+        assert!(recreated.matches(&stashes[0]));
+        let Kind::StashAll { stash, .. } = &mut stashed.kind else {
+            unreachable!()
+        };
+        *stash = Some(recreated);
+
+        write(root, "a.md", "外部\n");
+        git_ok(root, &["stash", "push", "-q", "-m", "external"]);
+        let with_external = git::stashes(root).unwrap();
+        assert!(undo(root, &stashed).is_err());
+        assert_eq!(git::stashes(root).unwrap(), with_external);
+        assert_eq!(read(root, "a.md"), "1\n");
+        git_ok(root, &["stash", "drop", "-q", "stash@{0}"]);
+        undo(root, &stashed).unwrap();
+        assert_eq!(read(root, "a.md"), "書きかけ\n");
+    }
+
+    #[test]
+    fn redo_pop_refuses_a_stash_inserted_after_undo() {
+        let Some(scratch) = started("pop-external") else {
+            return;
+        };
+        let root = &scratch.0;
+        write(root, "a.md", "取り出す内容\n");
+        git::stash_all(root, "場面").unwrap().unwrap();
+        let popped = git::stashes(root).unwrap().remove(0);
+        let before = point(root);
+        git::stash_apply(root, &popped, true).unwrap();
+        let mut recorded = entry(
+            "Pop stash@{0}",
+            Kind::Pop {
+                message: popped.message,
+                stash: None,
+            },
+            before,
+            point(root),
+        );
+        let recreated = undo(root, &recorded).unwrap().created_stash.unwrap();
+        assert!(recreated.matches(&git::stashes(root).unwrap()[0]));
+        let Kind::Pop { stash, .. } = &mut recorded.kind else {
+            unreachable!()
+        };
+        *stash = Some(recreated);
+
+        write(root, "a.md", "外部\n");
+        git_ok(root, &["stash", "push", "-q", "-m", "external"]);
+        let with_external = git::stashes(root).unwrap();
+        assert!(redo(root, &recorded).is_err());
+        assert_eq!(git::stashes(root).unwrap(), with_external);
+        assert_eq!(read(root, "a.md"), "1\n");
+        git_ok(root, &["stash", "drop", "-q", "stash@{0}"]);
+        assert!(redo(root, &recorded).unwrap().created_stash.is_none());
+        assert!(git::stashes(root).unwrap().is_empty());
+        assert_eq!(read(root, "a.md"), "取り出す内容\n");
+    }
+
+    #[test]
+    fn a_different_reflog_entry_for_the_same_object_does_not_match_history() {
+        let Some(scratch) = started("stash-relabelled") else {
+            return;
+        };
+        let root = &scratch.0;
+        write(root, "a.md", "元の内容\n");
+        let stash = git::stash_all(root, "original").unwrap().unwrap();
+        let oid = git::stashes(root).unwrap().remove(0).oid;
+        git_ok(root, &["stash", "drop", "-q", "stash@{0}"]);
+        git_ok(root, &["stash", "store", "-m", "replacement", &oid]);
+        let replacement = git::stashes(root).unwrap();
+        assert_eq!(replacement[0].oid, oid);
+        let recorded = entry(
+            "Stash All",
+            Kind::StashAll {
+                message: "original".into(),
+                stash: Some(stash),
+            },
+            point(root),
+            point(root),
+        );
+        assert!(undo(root, &recorded).is_err());
+        assert_eq!(git::stashes(root).unwrap(), replacement);
+        assert_eq!(read(root, "a.md"), "1\n");
+    }
+
+    #[test]
+    fn undo_pop_without_changes_disables_redo_even_with_an_external_stash() {
+        let Some(scratch) = started("pop-no-op") else {
+            return;
+        };
+        let root = &scratch.0;
+        write(root, "a.md", "外部\n");
+        git_ok(root, &["stash", "push", "-q", "-m", "external"]);
+        let external = git::stashes(root).unwrap();
+        let recorded = entry(
+            "Pop stash@{0}",
+            Kind::Pop {
+                message: "original".into(),
+                stash: None,
+            },
+            point(root),
+            point(root),
+        );
+        assert!(undo(root, &recorded).unwrap().created_stash.is_none());
+        assert!(!usable(&recorded, &point(root), true));
+        assert!(redo(root, &recorded).is_err());
+        assert_eq!(git::stashes(root).unwrap(), external);
+        assert_eq!(read(root, "a.md"), "1\n");
     }
 
     #[test]

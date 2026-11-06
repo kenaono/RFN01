@@ -16,7 +16,8 @@
 //! about that lock is a window that stops. Bytes go over a channel and the
 //! window applies them where it already owns everything else.
 
-use std::io::{BufWriter, Write};
+use std::cell::RefCell;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, channel, sync_channel};
@@ -29,9 +30,74 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 struct FileLog {
     path: PathBuf,
-    writer: BufWriter<std::fs::File>,
+    input: SyncSender<String>,
+    completion: Arc<LogCompletion>,
     pending: String,
     stamp: Option<Stamp>,
+}
+
+const FILE_LOG_SLOTS: usize = 8;
+const FILE_LOG_CHUNK_LIMIT: usize = 1024 * 1024;
+const FILE_LOG_WORKER_LIMIT: usize = 16;
+
+#[derive(Default)]
+struct LogCompletion {
+    tail: Mutex<String>,
+    finished: AtomicBool,
+    error: Mutex<Option<String>>,
+}
+
+struct LogWorker {
+    path: PathBuf,
+    completion: Arc<LogCompletion>,
+    thread: thread::JoinHandle<()>,
+}
+
+// The UI owns these workers even after a tab discards its TerminalSession.
+// Only application shutdown waits for writes, after the event loop returns.
+thread_local! {
+    static FILE_LOG_WORKERS: RefCell<Vec<LogWorker>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn file_log_paths() -> Vec<PathBuf> {
+    FILE_LOG_WORKERS.with(|workers| {
+        workers
+            .borrow()
+            .iter()
+            .filter(|worker| !worker.completion.finished.load(Ordering::Acquire))
+            .map(|worker| worker.path.clone())
+            .collect()
+    })
+}
+
+pub(crate) fn collect_file_log_errors() -> Vec<String> {
+    FILE_LOG_WORKERS.with(|workers| {
+        let mut errors = Vec::new();
+        workers.borrow_mut().retain(|worker| {
+            if !worker.completion.finished.load(Ordering::Acquire) {
+                return true;
+            }
+            errors.extend(worker.completion.error.lock().unwrap().take());
+            false
+        });
+        errors
+    })
+}
+
+pub(crate) fn wait_for_file_logs() -> Vec<String> {
+    let workers = FILE_LOG_WORKERS.with(|workers| workers.take());
+    workers
+        .into_iter()
+        .filter_map(|worker| {
+            if worker.thread.join().is_err() {
+                return Some(format!(
+                    "{}: Terminal log writer stopped unexpectedly",
+                    worker.path.display()
+                ));
+            }
+            worker.completion.error.lock().unwrap().take()
+        })
+        .collect()
 }
 
 use crate::pty::{OwnedHandle, Pty};
@@ -87,6 +153,12 @@ struct TerminalIo {
     wake: Arc<Wake>,
 }
 
+struct ShellLaunch {
+    profile: crate::TerminalShell,
+    directory: String,
+    windows_folder: Option<PathBuf>,
+}
+
 impl std::fmt::Debug for TerminalSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TerminalSession")
@@ -113,6 +185,7 @@ pub struct TerminalSession {
     /// RFN01-97: the last run's output, put on the screen just before the shell
     /// starts (so it is laid out at the width it is shown at).
     restored: Option<(Vec<String>, String)>,
+    pub(crate) saved_output: Option<String>,
     /// RFN01-99: the name the program had given this shell last run, shown
     /// until it gives one again.
     restored_title: Option<String>,
@@ -136,7 +209,7 @@ pub struct TerminalSession {
     /// RFN01-95/97: the shell this was started as, and the Windows folder it
     /// started in when one is known — where a file name it prints is looked
     /// for, and what a restart starts again.
-    profile: Option<(crate::TerminalShell, Option<std::path::PathBuf>)>,
+    launch: Option<ShellLaunch>,
 }
 
 impl TerminalSession {
@@ -187,6 +260,7 @@ impl TerminalSession {
             console: Some(console),
             idle: None,
             restored: None,
+            saved_output: None,
             restored_title: None,
             terminal: Terminal::new(columns, rows),
             output,
@@ -197,7 +271,7 @@ impl TerminalSession {
             mouse_at: None,
             keyboard: false,
             attention_seen: 0,
-            profile: None,
+            launch: None,
         })
     }
 
@@ -206,12 +280,12 @@ impl TerminalSession {
     /// (`when`), and starts the first time it is drawn.
     pub fn waiting(
         shell: crate::TerminalShell,
-        folder: Option<std::path::PathBuf>,
+        launch_directory: Option<String>,
         lines: Vec<String>,
         when: String,
     ) -> Self {
         let (idle, output) = channel::<Vec<u8>>();
-        Self {
+        let mut session = Self {
             name: shell.name.clone(),
             number: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
             file_log: None,
@@ -219,6 +293,7 @@ impl TerminalSession {
             console: None,
             idle: Some(idle),
             restored: Some((lines, when)),
+            saved_output: None,
             restored_title: None,
             terminal: Terminal::new(80, 24),
             output,
@@ -229,13 +304,33 @@ impl TerminalSession {
             mouse_at: None,
             keyboard: false,
             attention_seen: 0,
-            profile: Some((shell, folder)),
-        }
+            launch: None,
+        };
+        let directory = launch_directory.unwrap_or_else(|| shell.directory.clone());
+        session.set_profile(shell, directory);
+        session
     }
 
     /// RFN01-97: still waiting to be shown for the first time.
     pub fn is_waiting(&self) -> bool {
         self.idle.is_some() && !self.finished
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finish_output_for_test(&mut self, output: &[u8]) {
+        self.idle
+            .take()
+            .expect("a waiting session owns its output sender")
+            .send(output.to_vec())
+            .unwrap();
+        self.drain();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_for_test(&mut self) -> Receiver<Vec<u8>> {
+        let (input, queued) = sync_channel(1);
+        self.input = Some(input);
+        queued
     }
 
     pub fn needs_stop_confirmation(&mut self) -> bool {
@@ -252,7 +347,7 @@ impl TerminalSession {
         rows: usize,
         wake: impl Fn() + Send + 'static,
     ) -> windows::core::Result<()> {
-        let Some((shell, _)) = self.profile.clone() else {
+        let Some(launch) = &self.launch else {
             self.finished = true;
             return Ok(());
         };
@@ -262,6 +357,8 @@ impl TerminalSession {
         {
             self.terminal.feed(&restored_screen(&lines, &when));
         }
+        let mut shell = launch.profile.clone();
+        shell.directory.clone_from(&launch.directory);
         let (command, directory) = crate::terminal_shells::launch(&shell);
         let environment = crate::terminal_shells::wsl_shell_environment(&shell);
         let started = Pty::open_with(
@@ -304,6 +401,7 @@ impl TerminalSession {
         lines
     }
 
+    #[cfg(test)]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -386,47 +484,134 @@ impl TerminalSession {
     }
 
     pub fn file_log_path(&self) -> Option<&Path> {
-        self.file_log.as_ref().map(|log| log.path.as_path())
+        self.file_log
+            .as_ref()
+            .filter(|log| !log.completion.finished.load(Ordering::Acquire))
+            .map(|log| log.path.as_path())
     }
 
     pub fn take_log_error(&mut self) -> Option<String> {
         self.log_error.take()
     }
 
-    pub fn start_file_log(&mut self, path: PathBuf, file: std::fs::File, stamp: Option<Stamp>) {
+    pub fn start_file_log(
+        &mut self,
+        path: PathBuf,
+        stamp: Option<Stamp>,
+        wake: impl FnOnce() + Send + 'static,
+    ) {
+        let file = path.clone();
+        self.start_file_log_with(path, stamp, move || std::fs::File::create(file), wake);
+    }
+
+    fn start_file_log_with<W: Write>(
+        &mut self,
+        path: PathBuf,
+        stamp: Option<Stamp>,
+        open: impl FnOnce() -> io::Result<W> + Send + 'static,
+        wake: impl FnOnce() + Send + 'static,
+    ) {
+        if file_log_paths().len() >= FILE_LOG_WORKER_LIMIT {
+            self.log_error = Some(
+                crate::pick(
+                    "ファイルに保存中の Terminal ログが上限に達しました",
+                    "Too many Terminal logs are still writing",
+                )
+                .to_owned(),
+            );
+            return;
+        }
         self.drain_chunks(OUTPUT_SLOTS + 1);
+        self.finish_file_log();
+        let (input, output) = sync_channel::<String>(FILE_LOG_SLOTS);
+        let completion = Arc::new(LogCompletion::default());
+        let worker_completion = completion.clone();
+        let worker_path = path.clone();
+        let thread = thread::Builder::new()
+            .name("rfnedit-terminal-log".to_owned())
+            .spawn(move || {
+                let write = || -> io::Result<()> {
+                    let mut writer = open()?;
+                    for batch in output {
+                        writer.write_all(batch.as_bytes())?;
+                        writer.flush()?;
+                    }
+                    let tail = std::mem::take(&mut *worker_completion.tail.lock().unwrap());
+                    writer.write_all(tail.as_bytes())?;
+                    writer.flush()
+                };
+                if let Err(error) = write() {
+                    *worker_completion.error.lock().unwrap() =
+                        Some(format!("{}: {error}", worker_path.display()));
+                }
+                worker_completion.finished.store(true, Ordering::Release);
+                wake();
+            });
+        let thread = match thread {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.log_error = Some(format!("{}: {error}", path.display()));
+                return;
+            }
+        };
+        FILE_LOG_WORKERS.with(|workers| {
+            workers.borrow_mut().push(LogWorker {
+                path: path.clone(),
+                completion: completion.clone(),
+                thread,
+            })
+        });
         self.terminal.screen.start_file_capture(stamp.clone());
         self.file_log = Some(FileLog {
             path,
-            writer: BufWriter::new(file),
+            input,
+            completion,
             pending: String::new(),
             stamp,
         });
     }
 
     fn collect_file_log(&mut self) {
-        if self.file_log.is_none() {
+        if self.file_log_path().is_none() {
+            self.finish_file_log();
             return;
         }
         let Some((completed, pending)) = self.terminal.screen.file_capture_update() else {
             return;
         };
         let log = self.file_log.as_mut().unwrap();
-        log.pending = pending;
-        if let Err(error) = log
-            .writer
-            .write_all(completed.as_bytes())
-            .and_then(|_| log.writer.flush())
-        {
-            self.log_error = Some(format!("{}: {error}", log.path.display()));
+        let too_large =
+            completed.len() > FILE_LOG_CHUNK_LIMIT || pending.len() > FILE_LOG_CHUNK_LIMIT;
+        let delivery = if too_large {
+            Err(TrySendError::Full(completed))
+        } else if completed.is_empty() {
+            Ok(())
+        } else {
+            log.input.try_send(completed)
+        };
+        if let Err(error) = delivery {
+            if matches!(error, TrySendError::Full(_)) {
+                self.log_error = Some(format!(
+                    "{}: {}",
+                    log.path.display(),
+                    crate::pick(
+                        "保存待ちのログが上限に達しました",
+                        "Terminal log queue capacity exceeded",
+                    )
+                ));
+            }
             self.file_log = None;
             self.terminal.screen.stop_file_capture();
+        } else {
+            log.pending = pending;
         }
     }
 
     pub fn stop_file_log(&mut self) {
-        self.drain_chunks(OUTPUT_SLOTS + 1);
-        self.finish_file_log();
+        if self.file_log.is_some() {
+            self.drain_chunks(OUTPUT_SLOTS + 1);
+            self.finish_file_log();
+        }
     }
 
     fn finish_file_log(&mut self) {
@@ -436,13 +621,9 @@ impl TerminalSession {
             if let Some(stamp) = log.stamp.as_ref().filter(|_| !log.pending.is_empty()) {
                 log.pending.insert_str(0, &stamp.text());
             }
-            if let Err(error) = log
-                .writer
-                .write_all(log.pending.as_bytes())
-                .and_then(|_| log.writer.flush())
-            {
-                self.log_error = Some(format!("{}: {error}", log.path.display()));
-            }
+            // Dropping the sender finishes the accepted queue, then the worker
+            // appends this tail even when the queue was full.
+            *log.completion.tail.lock().unwrap() = log.pending;
             self.terminal.screen.stop_file_capture();
         }
     }
@@ -648,19 +829,36 @@ impl TerminalSession {
 
     /// The pane gained or lost the keyboard.
     /// RFN01-95/97: what this shell was started as, and where.
-    pub fn set_profile(&mut self, shell: crate::TerminalShell, folder: Option<std::path::PathBuf>) {
-        self.profile = Some((shell, folder));
+    pub fn set_profile(&mut self, profile: crate::TerminalShell, directory: String) {
+        let windows_folder = crate::terminal_shells::windows_folder(&directory);
+        self.launch = Some(ShellLaunch {
+            profile,
+            directory,
+            windows_folder,
+        });
     }
 
     pub fn profile(&self) -> Option<&crate::TerminalShell> {
-        self.profile.as_ref().map(|(shell, _)| shell)
+        self.launch.as_ref().map(|launch| &launch.profile)
+    }
+
+    pub fn uses_profile(&self, shell: &crate::TerminalShell) -> bool {
+        match self.profile() {
+            Some(profile) if profile.id != 0 => profile.id == shell.id,
+            Some(profile) => profile.name == shell.name && profile.command == shell.command,
+            None => self.name == shell.name,
+        }
     }
 
     /// RFN01-95: the Windows folder relative file names are read from.
     pub fn folder(&self) -> Option<&std::path::Path> {
-        self.profile
+        self.launch
             .as_ref()
-            .and_then(|(_, folder)| folder.as_deref())
+            .and_then(|launch| launch.windows_folder.as_deref())
+    }
+
+    pub fn launch_directory(&self) -> Option<&str> {
+        self.launch.as_ref().map(|launch| launch.directory.as_str())
     }
 
     /// RFN01-95: a bell or a notification arrived while the keyboard was
@@ -691,9 +889,9 @@ impl TerminalSession {
         self.send(&bytes);
     }
 
-    pub fn send_key(&mut self, key: Key, modifiers: Modifiers) {
+    pub fn send_key(&mut self, key: Key, modifiers: Modifiers) -> bool {
         let bytes = encode_key(key, modifiers, self.terminal.screen.modes());
-        self.send(&bytes);
+        self.send(&bytes)
     }
 
     /// Text the writer produced at the keyboard — a conversion committed, a
@@ -703,9 +901,9 @@ impl TerminalSession {
     /// key (bracketed paste is what tells it to), so a word committed out of an
     /// IME would arrive selected — which is what the writer saw. Typing is
     /// typing: the bytes go as they are.
-    pub fn type_text(&mut self, text: &str) {
+    pub fn type_text(&mut self, text: &str) -> bool {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        self.send(text.as_bytes());
+        self.send(text.as_bytes())
     }
 
     /// RFN01-104: Editor PanelのCtrl+Enter——打ったものとして送る（[`encode_typing`]）。
@@ -807,9 +1005,13 @@ fn start_io(mut pty: Pty, wake: impl Fn() + Send + 'static) -> windows::core::Re
     let size = Arc::new(Mutex::new((1, 1)));
     let requested = size.clone();
     let (resized, resize) = sync_channel(1);
+    let (start_console, receive_console) = sync_channel::<Pty>(1);
     thread::Builder::new()
         .name("rfnedit-terminal-console".to_owned())
         .spawn(move || {
+            let Ok(pty) = receive_console.recv() else {
+                return;
+            };
             while resize.recv().is_ok() {
                 let (columns, rows) = *requested.lock().unwrap();
                 let _ = pty.resize(columns, rows);
@@ -820,6 +1022,16 @@ fn start_io(mut pty: Pty, wake: impl Fn() + Send + 'static) -> windows::core::Re
         .map_err(|error| {
             windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
         })?;
+    // Keep the console until the thread has started. If spawning fails, the
+    // output receiver above is dropped before the console waits for its pipe.
+    if let Err(error) = start_console.send(pty) {
+        drop(output);
+        drop(input);
+        drop(error);
+        return Err(windows::core::Error::from(
+            windows::Win32::Foundation::E_FAIL,
+        ));
+    }
     Ok(TerminalIo {
         console: Console {
             process,
@@ -982,6 +1194,142 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    struct GateWriter {
+        gate: Option<(std::sync::mpsc::Sender<()>, Receiver<()>)>,
+        saved: Arc<Mutex<Vec<u8>>>,
+        fail_after: usize,
+    }
+
+    impl Write for GateWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if let Some((entered, resume)) = self.gate.take() {
+                entered.send(()).unwrap();
+                resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            let mut saved = self.saved.lock().unwrap();
+            if saved.len() >= self.fail_after {
+                return Err(io::Error::other("injected disk write failure"));
+            }
+            saved.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn delayed_file_log_keeps_keys_responsive_and_flushes_in_order() {
+        let mut session = TerminalSession::waiting(
+            crate::TerminalShell::built_in().remove(1),
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let (entered, entered_rx) = channel();
+        let (resume, resume_rx) = channel();
+        let writer = GateWriter {
+            gate: Some((entered, resume_rx)),
+            saved: saved.clone(),
+            fail_after: usize::MAX,
+        };
+        session.start_file_log_with("delayed.log".into(), None, move || Ok(writer), || {});
+        session.terminal.feed(b"first\r\n");
+        session.collect_file_log();
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let (input, keys) = sync_channel(2);
+        session.input = Some(input);
+        assert!(session.send_key(Key::Char('a'), Modifiers::none()));
+        assert!(session.type_text("確定"));
+        assert_eq!(keys.try_recv().unwrap(), b"a");
+        assert_eq!(keys.try_recv().unwrap(), "確定".as_bytes());
+        for at in 0..FILE_LOG_SLOTS {
+            session.terminal.feed(format!("batch {at}\r\n").as_bytes());
+            session.collect_file_log();
+        }
+        session.terminal.feed(b"final tail");
+        session.stop_file_log();
+        assert!(session.file_log_path().is_none());
+        assert_eq!(file_log_paths(), [PathBuf::from("delayed.log")]);
+        resume.send(()).unwrap();
+        assert!(wait_for_file_logs().is_empty());
+        let mut expected = String::from("first\n");
+        for at in 0..FILE_LOG_SLOTS {
+            expected.push_str(&format!("batch {at}\n"));
+        }
+        expected.push_str("final tail");
+        assert_eq!(*saved.lock().unwrap(), expected.as_bytes());
+    }
+
+    #[test]
+    fn terminal_file_log_reports_failure_after_session_is_dropped() {
+        let mut session = TerminalSession::waiting(
+            crate::TerminalShell::built_in().remove(1),
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let writer = GateWriter {
+            gate: None,
+            saved: saved.clone(),
+            fail_after: 1,
+        };
+        session.start_file_log_with("fail.log".into(), None, move || Ok(writer), || {});
+        session.terminal.feed(b"first\r\n");
+        session.collect_file_log();
+        session.terminal.feed(b"tail");
+        session.stop_file_log();
+        drop(session);
+        let errors = wait_for_file_logs();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("fail.log"));
+        assert!(errors[0].contains("injected disk write failure"));
+        assert_eq!(*saved.lock().unwrap(), b"first\n");
+    }
+
+    #[test]
+    fn overflowing_a_file_log_reports_the_gap_and_preserves_accepted_batches() {
+        let mut session = TerminalSession::waiting(
+            crate::TerminalShell::built_in().remove(1),
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let (entered, entered_rx) = channel();
+        let (resume, resume_rx) = channel();
+        let writer = GateWriter {
+            gate: Some((entered, resume_rx)),
+            saved: saved.clone(),
+            fail_after: usize::MAX,
+        };
+        session.start_file_log_with("full.log".into(), None, move || Ok(writer), || {});
+        session.terminal.feed(b"first\r\n");
+        session.collect_file_log();
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        for _ in 0..FILE_LOG_SLOTS {
+            session.terminal.feed(b"accepted\r\n");
+            session.collect_file_log();
+        }
+        session.terminal.feed(b"rejected\r\n");
+        session.collect_file_log();
+        assert!(
+            session
+                .take_log_error()
+                .is_some_and(|error| error.contains("full.log"))
+        );
+        assert!(session.file_log_path().is_none());
+        resume.send(()).unwrap();
+        assert!(wait_for_file_logs().is_empty());
+        assert_eq!(
+            *saved.lock().unwrap(),
+            format!("first\n{}", "accepted\n".repeat(FILE_LOG_SLOTS)).as_bytes()
+        );
+    }
+
     #[test]
     #[ignore = "starts a real Windows shell; run explicitly"]
     fn terminal_simultaneous_file_panel_independent_stop_and_failure() {
@@ -989,7 +1337,7 @@ mod tests {
         let mut session = TerminalSession::start("QA", "cmd.exe /Q /D /K", 100, 12, || {}).unwrap();
         session.wait(Duration::from_millis(300));
         session.start_capture(None);
-        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap(), None);
+        session.start_file_log(path.clone(), None, || {});
         let collect = |session: &mut TerminalSession, marker: &str| {
             session.type_text(&format!("echo {marker}\r"));
             let mut panel = String::new();
@@ -1007,35 +1355,42 @@ mod tests {
         };
         collect(&mut session, "RFN_BOTH");
         session.stop_file_log();
+        assert!(wait_for_file_logs().is_empty());
         let stopped = std::fs::read_to_string(&path).unwrap();
         assert!(stopped.contains("RFN_BOTH"));
         collect(&mut session, "RFN_PANEL_CONTINUES");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), stopped);
-        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap(), None);
+        session.start_file_log(path.clone(), None, || {});
         collect(&mut session, "RFN_RESTARTED");
         session.stop_capture();
         session.type_text("echo RFN_FILE_CONTINUES\r");
         let until = Instant::now() + Duration::from_secs(5);
         while Instant::now() < until {
             session.wait(Duration::from_millis(50));
-            if std::fs::read_to_string(&path)
-                .unwrap()
-                .contains("RFN_FILE_CONTINUES")
+            if std::fs::read_to_string(&path).is_ok_and(|text| text.contains("RFN_FILE_CONTINUES"))
             {
                 break;
             }
         }
         session.stop_file_log();
+        assert!(wait_for_file_logs().is_empty());
         assert!(
             std::fs::read_to_string(&path)
                 .unwrap()
                 .contains("RFN_FILE_CONTINUES")
         );
         session.start_capture(None);
-        session.start_file_log(path.clone(), std::fs::File::open(&path).unwrap(), None);
+        let read_only = path.clone();
+        session.start_file_log_with(
+            path.clone(),
+            None,
+            move || std::fs::File::open(read_only),
+            || {},
+        );
         collect(&mut session, "RFN_PANEL_AFTER_FILE_FAILURE");
+        session.stop_file_log();
         assert!(session.file_log_path().is_none());
-        assert!(session.take_log_error().is_some());
+        assert_eq!(wait_for_file_logs().len(), 1);
         session.stop_capture();
         std::fs::remove_file(path).unwrap();
     }
@@ -1047,26 +1402,19 @@ mod tests {
         let mut session = TerminalSession::start("QA", "cmd.exe /Q /D /K", 100, 12, || {}).unwrap();
         session.wait(Duration::from_millis(200));
         let stamp = Stamp::new("#yyyy-MM-dd HH:mm:ss.fff# ");
-        session.start_file_log(
-            path.clone(),
-            std::fs::File::create(&path).unwrap(),
-            Some(stamp),
-        );
+        session.start_file_log(path.clone(), Some(stamp), || {});
         session.type_text("echo RFN_STAMP_A& echo RFN_STAMP_B\r");
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             session.wait(Duration::from_millis(50));
             if std::fs::read_to_string(&path)
-                .unwrap()
-                .contains("\nRFN_STAMP_B")
-                || std::fs::read_to_string(&path)
-                    .unwrap()
-                    .contains("# RFN_STAMP_B")
+                .is_ok_and(|text| text.contains("\nRFN_STAMP_B") || text.contains("# RFN_STAMP_B"))
             {
                 break;
             }
         }
         session.stop_file_log();
+        assert!(wait_for_file_logs().is_empty());
         let saved = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = saved.lines().collect();
         assert!(
@@ -1097,19 +1445,17 @@ mod tests {
         let mut session = TerminalSession::start("QA", "cmd.exe /Q /D /K", 100, 12, || {}).unwrap();
         session.wait(Duration::from_millis(200));
         session.set_history_limit(0);
-        session.start_file_log(path.clone(), std::fs::File::create(&path).unwrap(), None);
+        session.start_file_log(path.clone(), None, || {});
         session.type_text("echo RFN_FILE_LINE\r");
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             session.wait(Duration::from_millis(50));
-            if std::fs::read_to_string(&path)
-                .unwrap()
-                .contains("RFN_FILE_LINE")
-            {
+            if std::fs::read_to_string(&path).is_ok_and(|text| text.contains("RFN_FILE_LINE")) {
                 break;
             }
         }
         session.stop_file_log();
+        assert!(wait_for_file_logs().is_empty());
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("RFN_FILE_LINE"));
         assert!(!saved.contains("[20"), "no timestamps were asked for");
@@ -1118,14 +1464,20 @@ mod tests {
         session.stop_file_log();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
         // A read-only handle exercises failure without changing permissions.
-        session.start_file_log(path.clone(), std::fs::File::open(&path).unwrap(), None);
+        let read_only = path.clone();
+        session.start_file_log_with(
+            path.clone(),
+            None,
+            move || std::fs::File::open(read_only),
+            || {},
+        );
         session.type_text("echo RFN_KEEP_ON_FAILURE\r");
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && session.file_log_path().is_some() {
             session.wait(Duration::from_millis(50));
         }
         assert!(session.file_log_path().is_none());
-        assert!(session.take_log_error().is_some());
+        assert_eq!(wait_for_file_logs().len(), 1);
         assert!(
             session
                 .screen()
@@ -1489,6 +1841,32 @@ mod running_a_program {
 mod backpressure_tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn input_reports_backpressure_and_sends_control_replies_before_user_input() {
+        let mut session = TerminalSession::waiting(
+            crate::TerminalShell::built_in().remove(1),
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        let (input, queued) = sync_channel(1);
+        session.input = Some(input);
+        assert!(session.send_key(Key::Char('A'), Modifiers::none()));
+        assert!(!session.send_key(Key::Backspace, Modifiers::none()));
+        assert!(!session.type_text("確定"));
+        assert!(!session.paste("paste"));
+        session.pending_replies = b"control reply".to_vec();
+        assert_eq!(queued.try_recv().unwrap(), b"A");
+        assert!(!session.send_key(Key::Char('B'), Modifiers::none()));
+        assert_eq!(queued.try_recv().unwrap(), b"control reply");
+        assert!(session.type_text("確定"));
+        assert_eq!(queued.try_recv().unwrap(), "確定".as_bytes());
+        drop(queued);
+        assert!(!session.send_key(Key::Backspace, Modifiers::none()));
+        assert!(!session.type_text("確定"));
+        assert!(!session.paste("paste"));
+    }
 
     #[test]
     #[ignore = "starts real ConPTY processes; run explicitly"]

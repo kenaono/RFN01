@@ -1,5 +1,5 @@
 //! RFN01-67: `git.rs`の試験。**本物のGitで、一時フォルダに本物のリポジトリを作って**確かめる。
-//! Gitの無いPCでは、リポジトリを作れないので何もせずに通す（`git_version`の試験と同じ）。
+//! Git が見つからないときだけ fixture を省略する。起動できた Git の初期化失敗はテスト失敗。
 use super::*;
 use std::cell::RefCell;
 
@@ -41,8 +41,17 @@ pub(crate) fn git_ok(folder: &Path, arguments: &[&str]) {
 
 /// 名前とメールを入れたリポジトリ。Gitが無ければ`None`。
 pub(crate) fn repository(folder: &Path) -> Option<()> {
-    if !run(folder, &["init", "-q", "-b", "main"], None).ok()?.ok {
-        return None;
+    match run(folder, &["init", "-q", "-b", "main"], None) {
+        Err(GitError::Missing) => {
+            eprintln!("Git fixture skipped: git executable not found");
+            return None;
+        }
+        Err(error) => panic!("cannot launch Git for fixture at {folder:?}: {error}"),
+        Ok(output) => assert!(
+            output.ok,
+            "git init failed at {folder:?}: {}",
+            output.stderr
+        ),
     }
     git_ok(folder, &["config", "user.name", "t"]);
     git_ok(folder, &["config", "user.email", "t@t"]);
@@ -64,6 +73,150 @@ fn read(folder: &Path, name: &str) -> String {
 fn a_machine_without_git_says_so() {
     let error = without_git(|| status(&std::env::temp_dir()).err());
     assert_eq!(error, Some(GitError::Missing));
+}
+
+#[test]
+fn fixture_skips_missing_git_but_reports_failed_init() {
+    let scratch = Scratch::new("fixture-init");
+    assert_eq!(without_git(|| repository(&scratch.0)), None);
+    let file = scratch.0.join("not-a-directory");
+    std::fs::write(&file, "fixture").unwrap();
+    if repository(&scratch.0).is_some() {
+        let failed = std::panic::catch_unwind(|| repository(&file));
+        assert!(
+            failed.is_err(),
+            "an available Git failed to initialize the fixture"
+        );
+    }
+}
+
+#[cfg(windows)]
+fn pipe_owner_command(marker: &Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--ignored",
+            "--exact",
+            "git::tests::git_pipe_owner_fixture",
+            "--nocapture",
+        ])
+        .env("RFN_GIT_TEST_PIPE_OWNER", marker);
+    command
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "child process fixture"]
+fn git_pipe_owner_fixture() {
+    let Some(marker) = std::env::var_os("RFN_GIT_TEST_PIPE_OWNER") else {
+        return;
+    };
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "git::tests::git_pipe_writer_fixture",
+            "--nocapture",
+        ])
+        .spawn()
+        .unwrap();
+    std::fs::write(marker, child.id().to_string()).unwrap();
+    if std::env::var_os("RFN_GIT_TEST_PIPE_CANCEL").is_some() {
+        child.wait().unwrap();
+    }
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "child process fixture"]
+fn git_pipe_writer_fixture() {
+    if std::env::var_os("RFN_GIT_TEST_PIPE_OWNER").is_some() {
+        println!("holding inherited stdout");
+        std::thread::sleep(Duration::from_secs(20));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn git_parent_exit_releases_inherited_pipes() {
+    let scratch = Scratch::new("pipe-parent-exit");
+    let marker = scratch.0.join("helper");
+    let command = pipe_owner_command(&marker);
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || send.send(run_command(command, None, None)).unwrap());
+    let output = receive
+        .recv_timeout(Duration::from_secs(5))
+        .expect("pipe cleanup stalled")
+        .unwrap();
+    assert!(output.ok, "test pipe owner failed: {}", output.stderr);
+    assert!(marker.is_file(), "the pipe-holding helper was started");
+}
+
+#[cfg(windows)]
+#[test]
+fn git_cancel_stops_the_parent_and_pipe_holder() {
+    let scratch = Scratch::new("pipe-cancel");
+    let marker = scratch.0.join("helper");
+    let mut command = pipe_owner_command(&marker);
+    command.env("RFN_GIT_TEST_PIPE_CANCEL", "1");
+    let cancel = Cancel::default();
+    let worker_cancel = cancel.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        send.send(run_command(command, None, Some(&worker_cancel)))
+            .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !marker.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    cancel.cancel();
+    assert!(marker.is_file(), "the pipe-holding helper was started");
+    assert!(matches!(
+        receive.recv_timeout(Duration::from_secs(5)),
+        Ok(Err(GitError::Cancelled))
+    ));
+}
+
+#[test]
+fn hard_reset_refuses_overlaps_with_untracked_and_ignored_paths() {
+    let scratch = Scratch::new("reset-untracked");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    for (target, local, ignored) in [
+        ("note.md", "note.md", false),
+        ("note.md", "note.md/local.txt", false),
+        ("folder/target.md", "folder", false),
+        ("note.md", "note.md", true),
+    ] {
+        let target_path = root.join(target);
+        std::fs::create_dir_all(target_path.parent().unwrap()).unwrap();
+        write(root, target, "tracked\n");
+        git_ok(root, &["add", "--", target]);
+        git_ok(root, &["commit", "-qm", "tracked"]);
+        let wanted = head_sha(root).unwrap();
+        git_ok(root, &["rm", "-q", "--", target]);
+        git_ok(root, &["commit", "-qm", "removed"]);
+        let head = head_sha(root).unwrap();
+        let local_path = root.join(local);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        if ignored {
+            write(root, ".git/info/exclude", "/note.md\n");
+        }
+        write(root, local, "untracked\n");
+        assert!(matches!(
+            reset(root, &wanted, true),
+            Err(GitError::Failed(_))
+        ));
+        assert_eq!(head_sha(root), Some(head));
+        assert_eq!(read(root, local), "untracked\n");
+        std::fs::remove_file(&local_path).unwrap();
+        if local_path.parent() != Some(root.as_path()) {
+            std::fs::remove_dir(local_path.parent().unwrap()).unwrap();
+        }
+    }
 }
 
 #[test]
@@ -203,20 +356,17 @@ fn a_conflicting_stash_is_undone_and_kept() {
     write(root, "a.md", "3\n");
     // 変更があるうちは取り出さない。
     assert!(matches!(
-        stash_apply(root, "stash@{0}", true),
+        stash_apply(root, &list[0], true),
         Err(GitError::Failed(_))
     ));
     commit(root, "3", true, false).unwrap();
-    assert_eq!(
-        stash_apply(root, "stash@{0}", true),
-        Err(GitError::Conflict)
-    );
+    assert_eq!(stash_apply(root, &list[0], true), Err(GitError::Conflict));
     assert_eq!(read(root, "a.md"), "3\n");
     assert!(!root.join("extra.md").exists());
     let clean = status(root).unwrap();
     assert!(clean.staged.is_empty() && clean.changes.is_empty());
     assert_eq!(stashes(root).unwrap().len(), 1);
-    stash_drop(root, "stash@{0}").unwrap();
+    stash_drop(root, &list[0]).unwrap();
     assert!(stashes(root).unwrap().is_empty());
 }
 
@@ -231,9 +381,363 @@ fn a_stash_pops_back_into_a_clean_tree() {
     commit(root, "1", true, false).unwrap();
     write(root, "a.md", "2\n");
     stash_all(root, "").unwrap();
-    stash_apply(root, "stash@{0}", true).unwrap();
+    stash_apply(root, &stashes(root).unwrap()[0], true).unwrap();
     assert_eq!(read(root, "a.md"), "2\n");
     assert!(stashes(root).unwrap().is_empty());
+}
+
+#[test]
+fn a_new_stash_does_not_become_the_target_of_an_older_drop() {
+    let scratch = Scratch::new("stash-confirmation");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    write(root, "a.md", "selected\n");
+    stash_all(root, "selected").unwrap();
+    let selected = stashes(root).unwrap().remove(0);
+    write(root, "a.md", "new entry\n");
+    stash_all(root, "new entry").unwrap();
+    let before = stashes(root).unwrap();
+    assert!(stash_drop(root, &selected).is_err());
+    assert!(stash_apply(root, &selected, true).is_err());
+    assert_eq!(stashes(root).unwrap(), before);
+    assert_eq!(read(root, "a.md"), "base\n");
+}
+
+#[test]
+fn a_stash_removed_after_apply_is_not_replaced_as_the_drop_target() {
+    let scratch = Scratch::new("stash-after-apply");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    write(root, "a.md", "older\n");
+    stash_all(root, "older").unwrap();
+    let older = stashes(root).unwrap().remove(0);
+    write(root, "a.md", "selected\n");
+    stash_all(root, "selected").unwrap();
+    let selected = stashes(root).unwrap().remove(0);
+    let result = stash_apply_with(root, &selected, true, || {
+        git_ok(root, &["stash", "drop", "-q", "stash@{0}"]);
+    });
+    assert!(result.is_err());
+    assert_eq!(stash_oids(root), [older.oid]);
+    assert_eq!(read(root, "a.md"), "selected\n");
+}
+
+fn add_stash(root: &Path, draft: &str) -> Stash {
+    write(root, "a.md", draft);
+    stash_all(root, draft).unwrap();
+    stashes(root).unwrap().remove(0)
+}
+
+fn stash_oids(root: &Path) -> Vec<String> {
+    stashes(root)
+        .unwrap()
+        .into_iter()
+        .map(|stash| stash.oid)
+        .collect()
+}
+
+#[test]
+fn stash_drop_holds_the_native_git_lock_across_linked_worktrees() {
+    let scratch = Scratch::new("stash-linked-lock");
+    let root = scratch.0.join("main");
+    let linked = scratch.0.join("linked");
+    std::fs::create_dir(&root).unwrap();
+    if repository(&root).is_none() {
+        return;
+    }
+    write(&root, "a.md", "base\n");
+    commit(&root, "base", true, false).unwrap();
+    git_ok(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let older = add_stash(&root, "older");
+    let selected = add_stash(&root, "selected");
+    let before = stash_oids(&root);
+    assert_eq!(stash_oids(&linked), before);
+
+    stash::drop_locked(&linked, &selected, || {
+        for arguments in [
+            vec!["stash", "store", "-m", "external store", &older.oid],
+            vec!["stash", "drop", "-q", "stash@{1}"],
+        ] {
+            let mut git_arguments = vec!["-c", "core.filesRefLockTimeout=0"];
+            git_arguments.extend(arguments);
+            let output = run(&root, &git_arguments, None).unwrap();
+            assert!(
+                !output.ok && output.stderr.contains("lock ref 'refs/stash'"),
+                "external {git_arguments:?} must contend on the common Git lock: {}",
+                output.stderr
+            );
+        }
+        assert_eq!(stash_oids(&linked), before);
+    })
+    .unwrap();
+
+    assert_eq!(stash_oids(&root), [older.oid.clone()]);
+    assert_eq!(stash_oids(&linked), [older.oid.clone()]);
+    assert_eq!(resolve(&linked, "refs/stash"), Some(older.oid));
+}
+
+#[test]
+fn stash_drop_reconnects_the_non_tip_entry_and_updates_only_a_removed_tip() {
+    let scratch = Scratch::new("stash-reflog-order");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    let oldest = add_stash(root, "oldest");
+    let middle = add_stash(root, "middle");
+    let newest = add_stash(root, "newest");
+    let list = stashes(root).unwrap();
+    assert_eq!(list[1].oid, middle.oid);
+
+    stash_drop(root, &list[1]).unwrap();
+    assert_eq!(stash_oids(root), [newest.oid.clone(), oldest.oid.clone()]);
+    assert_eq!(resolve(root, "refs/stash"), Some(newest.oid.clone()));
+    let log = read(root, ".git/logs/refs/stash");
+    assert_eq!(log.lines().count(), 2);
+    assert_eq!(
+        log.lines().nth(1).unwrap().split_ascii_whitespace().next(),
+        Some(oldest.oid.as_str()),
+        "the remaining tip's predecessor must point to the retained entry"
+    );
+
+    stash_drop(root, &newest).unwrap();
+    assert_eq!(stash_oids(root), [oldest.oid.clone()]);
+    assert_eq!(resolve(root, "refs/stash"), Some(oldest.oid));
+}
+
+#[test]
+fn stash_drop_deletes_the_last_entry_when_its_reference_is_packed() {
+    let scratch = Scratch::new("stash-packed-last");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    let selected = add_stash(root, "selected");
+    git_ok(root, &["pack-refs", "--all", "--prune"]);
+    assert!(!root.join(".git/refs/stash").exists());
+    assert!(read(root, ".git/packed-refs").contains(&format!("{} refs/stash", selected.oid)));
+
+    stash_drop(root, &selected).unwrap();
+
+    assert!(stashes(root).unwrap().is_empty());
+    assert_eq!(resolve(root, "refs/stash"), None);
+    assert!(!root.join(".git/logs/refs/stash").exists());
+    assert!(!read(root, ".git/packed-refs").contains(" refs/stash"));
+    let new = add_stash(root, "new after removal");
+    assert_eq!(stash_oids(root), [new.oid]);
+}
+
+#[test]
+fn stash_drop_refuses_duplicate_entries_even_for_the_current_tip() {
+    let scratch = Scratch::new("stash-duplicate-oid");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    let selected = add_stash(root, "selected");
+    add_stash(root, "other");
+    git_ok(root, &["stash", "store", "-m", "duplicate", &selected.oid]);
+    let before = stashes(root).unwrap();
+    assert_eq!(before.len(), 3);
+    assert_eq!(
+        before
+            .iter()
+            .filter(|entry| entry.oid == selected.oid)
+            .count(),
+        2
+    );
+
+    assert!(stash_drop(root, &before[0]).is_err());
+    assert_eq!(stashes(root).unwrap(), before);
+}
+
+#[test]
+fn stash_drop_refuses_a_recreated_entry_with_the_same_oid_and_a_different_label() {
+    let scratch = Scratch::new("stash-recreated");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    let selected = add_stash(root, "selected");
+    git_ok(root, &["stash", "drop", "-q", "stash@{0}"]);
+    git_ok(
+        root,
+        &["stash", "store", "-m", "replacement label", &selected.oid],
+    );
+    let before = stashes(root).unwrap();
+    assert_eq!(before[0].oid, selected.oid);
+    assert_ne!(before[0].message, selected.message);
+    assert!(stash_drop(root, &selected).is_err());
+    assert_eq!(stashes(root).unwrap(), before);
+}
+
+#[test]
+fn stash_drop_refuses_a_recreated_entry_with_the_same_oid_and_label() {
+    let scratch = Scratch::new("stash-recreated-date");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    let selected = add_stash(root, "selected");
+    git_ok(root, &["stash", "drop", "-q", "stash@{0}"]);
+    let mut git = command(root);
+    git.env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z").args([
+        "stash",
+        "store",
+        "-m",
+        &selected.message,
+        &selected.oid,
+    ]);
+    assert!(run_command(git, None, None).unwrap().ok);
+    let before = stashes(root).unwrap();
+    assert_eq!(before[0].oid, selected.oid);
+    assert_eq!(before[0].message, selected.message);
+    assert_ne!(before[0].reflog_date, selected.reflog_date);
+    assert!(stash_drop(root, &selected).is_err());
+    assert_eq!(stashes(root).unwrap(), before);
+}
+
+#[test]
+fn stash_push_records_its_own_ref_update_and_ignores_no_op_pushes() {
+    let scratch = Scratch::new("stash-push-identity");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    write(root, "untracked.md", "draft\n");
+    let created = stash_all(root, "書きかけ  下書き\n続き").unwrap().unwrap();
+    let before = stashes(root).unwrap();
+    assert!(created.matches(&before[0]));
+    assert!(before[0].message.ends_with("書きかけ 下書き 続き"));
+    assert!(!root.join("untracked.md").exists());
+    assert!(stash_all(root, "no changes").unwrap().is_none());
+    assert_eq!(stashes(root).unwrap(), before);
+}
+
+#[test]
+#[cfg(windows)]
+fn stash_drop_restores_the_reflog_if_publishing_the_new_tip_fails() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+    let scratch = Scratch::new("stash-ref-write-failure");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    add_stash(root, "older");
+    let selected = add_stash(root, "selected");
+    let before = stashes(root).unwrap();
+    let log = read(root, ".git/logs/refs/stash");
+    let mut held = None;
+    let result = stash::drop_locked(root, &selected, || {
+        // Allow reads and writes, but make Windows refuse replacing this ref.
+        held = Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+                .open(root.join(".git/refs/stash"))
+                .unwrap(),
+        );
+    });
+    assert!(result.is_err());
+    drop(held);
+    assert_eq!(read(root, ".git/logs/refs/stash"), log);
+    assert_eq!(stashes(root).unwrap(), before);
+    assert_eq!(resolve(root, "refs/stash"), Some(selected.oid));
+}
+
+#[test]
+fn stash_drop_leaves_reftable_untouched() {
+    let scratch = Scratch::new("stash-reftable");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    let output = run(root, &["refs", "migrate", "--ref-format=reftable"], None).unwrap();
+    if !output.ok {
+        assert!(
+            output.stderr.contains("not a git command"),
+            "{}",
+            output.stderr
+        );
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    add_stash(root, "older");
+    let selected = add_stash(root, "selected");
+    let before = stashes(root).unwrap();
+    assert!(stash_drop(root, &selected).is_err());
+    assert!(stash_apply(root, &selected, true).is_err());
+    assert_eq!(read(root, "a.md"), "base\n");
+    assert_eq!(stashes(root).unwrap(), before);
+    stash_apply(root, &selected, false).unwrap();
+    assert_eq!(read(root, "a.md"), "selected");
+    assert_eq!(stashes(root).unwrap(), before);
+}
+
+#[test]
+fn stash_drop_refuses_a_replaced_ordinal_even_when_the_tip_returns_to_its_old_oid() {
+    let scratch = Scratch::new("stash-same-tip-aba");
+    let root = &scratch.0;
+    if repository(root).is_none() {
+        return;
+    }
+    write(root, "a.md", "base\n");
+    commit(root, "base", true, false).unwrap();
+    let outside = add_stash(root, "outside replacement");
+    git_ok(root, &["stash", "drop", "-q", "stash@{0}"]);
+    let oldest = add_stash(root, "oldest");
+    let wanted = add_stash(root, "wanted");
+    let newest = add_stash(root, "newest");
+    let selected = stashes(root).unwrap().remove(1);
+    assert_eq!(selected.oid, wanted.oid);
+
+    git_ok(root, &["stash", "drop", "-q", "stash@{1}"]);
+    git_ok(root, &["stash", "drop", "-q", "stash@{0}"]);
+    git_ok(
+        root,
+        &["stash", "store", "-m", "different middle", &outside.oid],
+    );
+    git_ok(root, &["stash", "store", "-m", "same tip", &newest.oid]);
+    assert_eq!(resolve(root, "refs/stash"), Some(newest.oid.clone()));
+    let before = stash_oids(root);
+    assert_eq!(before, [newest.oid, outside.oid, oldest.oid]);
+
+    assert!(stash_drop(root, &selected).is_err());
+    assert_eq!(stash_oids(root), before);
 }
 
 #[test]
@@ -475,10 +979,21 @@ fn merge_resolution_reads_index_versions_and_continues_with_the_staged_result() 
     let stopped = merge_state(root).unwrap().unwrap();
     assert_eq!(stopped.head, head);
     assert_eq!(stopped.incoming, [incoming.clone()]);
-    let conflict = stopped.conflicts.iter().find(|file| file.path == text).unwrap();
-    for (version, expected) in conflict.versions.iter().zip(["base\n", "ours\n", "theirs\n"]) {
+    let conflict = stopped
+        .conflicts
+        .iter()
+        .find(|file| file.path == text)
+        .unwrap();
+    for (version, expected) in conflict
+        .versions
+        .iter()
+        .zip(["base\n", "ours\n", "theirs\n"])
+    {
         let actual = conflict_blob(root, version.as_ref().unwrap()).unwrap();
-        assert_eq!(std::str::from_utf8(&actual).unwrap().replace("\r\n", "\n"), expected);
+        assert_eq!(
+            std::str::from_utf8(&actual).unwrap().replace("\r\n", "\n"),
+            expected
+        );
     }
     assert!(resolve_merge(root, &stopped, None, Resolution::Continue).is_err());
     assert!(resolve_merge(root, &stopped, Some(text), Resolution::Stage).is_err());
@@ -495,7 +1010,13 @@ fn merge_resolution_reads_index_versions_and_continues_with_the_staged_result() 
     let stale = worktree_stamp(&path);
     write(root, deleted, "an externally edited version\n");
     assert!(resolve_merge(root, &state, Some(deleted), Resolution::Delete(stale)).is_err());
-    resolve_merge(root, &state, Some(deleted), Resolution::Delete(worktree_stamp(&path))).unwrap();
+    resolve_merge(
+        root,
+        &state,
+        Some(deleted),
+        Resolution::Delete(worktree_stamp(&path)),
+    )
+    .unwrap();
     assert!(!path.exists());
 
     let ready = merge_state(root).unwrap().unwrap();
@@ -563,7 +1084,10 @@ fn linked_worktrees_share_commits_but_keep_their_own_indexes_and_heads() {
     let trees = worktrees(&root).unwrap();
     assert_eq!(trees.len(), 2);
     assert_eq!(trees[1].branch.as_deref(), Some("draft"));
-    assert_eq!(check_worktree(&root, &linked).unwrap(), linked.canonicalize().unwrap());
+    assert_eq!(
+        check_worktree(&root, &linked).unwrap(),
+        linked.canonicalize().unwrap()
+    );
     assert!(add_worktree(&root, &scratch.0, folder, "another", &head).is_err());
 
     write(&root, "note.md", "main edits\n");

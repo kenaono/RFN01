@@ -51,6 +51,7 @@ pub struct SharedText {
     /// these two moments; see [`work_copy_due`].
     pub changed_at: Cell<Instant>,
     pub pending_since: Cell<Option<Instant>>,
+    revision: Cell<u64>,
     /// How many characters the text holds, once somebody has asked (RFN01-6
     /// D). **Forgotten by every edit** — they all come through
     /// [`Self::borrow_mut`] — and told again by the one edit that knows what it
@@ -70,6 +71,7 @@ impl SharedText {
             edited: Cell::new(false),
             changed_at: Cell::new(Instant::now()),
             pending_since: Cell::new(None),
+            revision: Cell::new(0),
             characters: Cell::new(None),
             events,
         }
@@ -102,6 +104,7 @@ impl SharedText {
     /// Borrowing the text to write *is* the edit.
     pub fn borrow_mut(&self) -> RefMut<'_, String> {
         let now = Instant::now();
+        self.revision.set(self.revision.get().wrapping_add(1));
         self.changed_at.set(now);
         if self.pending_since.get().is_none() {
             self.pending_since.set(Some(now));
@@ -134,6 +137,10 @@ impl SharedText {
 
     pub fn changed_at(&self) -> Instant {
         self.changed_at.get()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision.get()
     }
 
     /// A work copy has caught up with the text.

@@ -522,7 +522,11 @@ export component Field inherits Rectangle {
             root.edited();
         }
         key-pressed(event) => {
-            if event.text == Key.F10 && self.preedit-text == "" { MenuInput.open-menu(); return accept; }
+            if event.text == Key.F10 && self.preedit-text == ""
+                && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift {
+                MenuInput.open-menu();
+                return accept;
+            }
             if event.text == Key.Escape && self.preedit-text == "" && MenuInput.dismiss-menu() { return accept; }
             if (event.text == Key.Escape) {
                 root.escaped();

@@ -18,7 +18,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -82,6 +82,7 @@ pub const DRAFT_HISTORY_LIMIT: usize = 10;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionTab {
     pub origin: Option<PathBuf>,
+    pub encoding: Option<file_io::Encoding>,
     pub untitled: u32,
     /// The four modes of 要件 7.2, kept per tab.
     pub vertical: bool,
@@ -143,9 +144,11 @@ pub struct SessionTab {
 /// [`TERMINAL_OUTPUT_DIRECTORY`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionShell {
+    pub profile_id: u64,
     pub name: String,
     pub command: String,
     pub directory: String,
+    pub launch_directory: Option<String>,
     pub output: Option<String>,
     /// RFN01-99: what the program running there had named it, shown on the
     /// tab until it names it again.
@@ -201,27 +204,45 @@ pub fn read_terminal_output(directory: &Path, name: &str) -> Option<(String, Vec
     decode_terminal_output(&raw)
 }
 
-/// RFN01-97: write these outputs, and remove every other one — **a closed tab's
-/// output, or one cleared, does not outlive it.** `outputs` is `(file name,
-/// when, lines)`.
-pub fn replace_terminal_outputs(
+pub fn write_terminal_output(
     directory: &Path,
-    outputs: &[(String, String, Vec<String>)],
+    name: &str,
+    when: &str,
+    lines: &[String],
+) -> io::Result<()> {
+    if !is_output_name(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid Terminal history name",
+        ));
+    }
+    let folder = directory.join(TERMINAL_OUTPUT_DIRECTORY);
+    fs::create_dir_all(&folder)?;
+    file_io::write_atomically(
+        &folder.join(name),
+        encode_terminal_output(when, lines).as_bytes(),
+    )
+    .map(|_| ())
+}
+
+pub fn prune_terminal_outputs(
+    directory: &Path,
+    kept: &std::collections::HashSet<String>,
 ) -> io::Result<()> {
     let folder = directory.join(TERMINAL_OUTPUT_DIRECTORY);
-    if outputs.is_empty() && !folder.exists() {
-        return Ok(());
-    }
-    fs::create_dir_all(&folder)?;
-    for (name, when, lines) in outputs {
-        if is_output_name(name) {
-            fs::write(folder.join(name), encode_terminal_output(when, lines))?;
-        }
-    }
-    for entry in fs::read_dir(&folder)?.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !outputs.iter().any(|(kept, _, _)| *kept == name) {
-            let _ = fs::remove_file(entry.path());
+    let entries = match fs::read_dir(&folder) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        result => result?,
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(name) = name.to_str()
+            && is_output_name(name)
+            && !kept.contains(name)
+            && entry.file_type()?.is_file()
+        {
+            fs::remove_file(entry.path())?;
         }
     }
     Ok(())
@@ -440,6 +461,9 @@ pub fn encode_session(session: &Session) -> String {
             if let Some(origin) = &tab.origin {
                 out.push_str(&format!("origin: {}\n", origin.display()));
             }
+            if let Some(encoding) = tab.encoding {
+                out.push_str(&format!("encoding: {}\n", encoding.as_str()));
+            }
             if let Some(caret) = tab.caret {
                 out.push_str(&format!("caret: {caret}\n"));
             }
@@ -494,8 +518,14 @@ fn encode_shell(out: &mut String, key: &str, shell: &SessionShell) {
     let line = |value: &str| value.replace(['\n', '\r'], "");
     out.push_str(&format!("{key}: {}\n", line(&shell.name)));
     out.push_str(&format!("{key}-command: {}\n", line(&shell.command)));
+    if shell.profile_id != 0 {
+        out.push_str(&format!("{key}-profile: {}\n", shell.profile_id));
+    }
     if !shell.directory.is_empty() {
         out.push_str(&format!("{key}-folder: {}\n", line(&shell.directory)));
+    }
+    if let Some(directory) = &shell.launch_directory {
+        out.push_str(&format!("{key}-launch: {}\n", line(directory)));
     }
     if let Some(output) = &shell.output {
         out.push_str(&format!("{key}-output: {}\n", line(output)));
@@ -612,6 +642,15 @@ pub fn decode_session(raw: &str) -> Option<Session> {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
                 tab.origin = Some(PathBuf::from(value));
             }
+            "encoding" => {
+                if let Some(tab) = session
+                    .panes
+                    .last_mut()
+                    .and_then(|pane| pane.tabs.last_mut())
+                {
+                    tab.encoding = read_encoding(value);
+                }
+            }
             "caret" => {
                 let tab = session.panes.last_mut()?.tabs.last_mut()?;
                 tab.caret = value.parse().ok();
@@ -659,11 +698,15 @@ pub fn decode_session(raw: &str) -> Option<Session> {
             }
             "shell-command"
             | "shell-folder"
+            | "shell-profile"
+            | "shell-launch"
             | "shell-output"
             | "shell-title"
             | "below-shell-title"
             | "below-shell-command"
             | "below-shell-folder"
+            | "below-shell-profile"
+            | "below-shell-launch"
             | "below-shell-output" => {
                 // **A stray line is dropped, not the session**: the layout is
                 // worth more than one shell.
@@ -679,6 +722,8 @@ pub fn decode_session(raw: &str) -> Option<Session> {
                     match key.rsplit('-').next() {
                         Some("command") => shell.command = value.to_owned(),
                         Some("folder") => shell.directory = value.to_owned(),
+                        Some("profile") => shell.profile_id = value.parse().unwrap_or_default(),
+                        Some("launch") => shell.launch_directory = Some(value.to_owned()),
                         Some("title") => shell.title = Some(value.to_owned()),
                         _ => shell.output = Some(value.to_owned()),
                     }
@@ -1016,8 +1061,63 @@ pub fn write_workspace_tabs(directory: &Path, workspace: u64, session: &Session)
 
 /// RFN01-106: このWorkspaceで覚えた画面の並び。無ければ`None`。
 pub fn read_workspace_tabs(directory: &Path, workspace: u64) -> Option<Session> {
-    let raw = fs::read_to_string(workspace_tabs_path(directory, workspace)).ok()?;
+    read_workspace_tabs_checked(directory, workspace)
+        .ok()
+        .flatten()
+}
+
+pub fn read_workspace_tabs_checked(
+    directory: &Path,
+    workspace: u64,
+) -> io::Result<Option<Session>> {
+    let raw = match fs::read_to_string(workspace_tabs_path(directory, workspace)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        result => result?,
+    };
     decode_session(&raw)
+        .map(Some)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid Workspace session"))
+}
+
+pub fn remove_workspace_tabs(directory: &Path, workspace: u64) -> io::Result<()> {
+    for directory in session_directories(directory)? {
+        match fs::remove_file(workspace_tabs_path(&directory, workspace)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+    }
+    Ok(())
+}
+
+pub fn remove_all_workspace_tabs(directory: &Path) -> io::Result<()> {
+    for directory in session_directories(directory)? {
+        clear_workspace_tabs(&directory)?;
+    }
+    Ok(())
+}
+
+fn clear_workspace_tabs(directory: &Path) -> io::Result<()> {
+    let directory = directory.join(WORKSPACE_TABS_DIRECTORY);
+    let entries = match fs::read_dir(&directory) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        result => result?,
+    };
+    for entry in entries {
+        let entry = entry?;
+        if let Some(id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_suffix(".rfnsession"))
+            .and_then(|name| name.parse::<u64>().ok())
+            && entry.file_name() == OsStr::new(&format!("{id}.rfnsession"))
+        {
+            match fs::remove_file(entry.path()) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                result => result?,
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What the last run left, if anything readable.
@@ -1031,6 +1131,9 @@ pub fn read_session(directory: &Path) -> Option<Session> {
 pub struct WorkCopy {
     /// The file being edited, when there is one.
     pub origin: Option<PathBuf>,
+    pub identity: Option<PathBuf>,
+    /// The saved file format and whether the writer chose its encoding.
+    pub form: Option<(file_io::TextForm, bool)>,
     /// Which untitled buffer this is, when there is no file (要件 8.4).
     pub untitled: u32,
     /// Where the caret was, so a restored document opens where it was left.
@@ -1053,6 +1156,53 @@ pub struct WorkCopy {
 ///
 /// **時刻が無いことも書く**（`-`）。ファイルシステムが更新時刻を答えなかった
 /// ときで、長さだけは比べられる。
+fn read_encoding(name: &str) -> Option<file_io::Encoding> {
+    use file_io::Encoding::*;
+    [Utf8, Utf16Le, Utf16Be, Cp932]
+        .into_iter()
+        .find(|encoding| encoding.as_str() == name)
+}
+
+fn write_form(form: file_io::TextForm, explicit: bool) -> String {
+    use file_io::Newline::*;
+    let newline = match form.newline {
+        Lf => "lf",
+        Crlf => "crlf",
+        Cr => "cr",
+    };
+    format!(
+        "{}|{newline}|{}|{}|{}",
+        form.encoding.as_str(),
+        u8::from(form.byte_order_mark),
+        u8::from(form.mixed_newlines),
+        u8::from(explicit),
+    )
+}
+
+fn read_form(value: &str) -> Option<(file_io::TextForm, bool)> {
+    let mut fields = value.split('|');
+    let encoding = read_encoding(fields.next()?)?;
+    let newline = match fields.next()? {
+        "lf" => file_io::Newline::Lf,
+        "crlf" => file_io::Newline::Crlf,
+        "cr" => file_io::Newline::Cr,
+        _ => return None,
+    };
+    let mut flag = || match fields.next()? {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    };
+    let form = file_io::TextForm {
+        encoding,
+        newline,
+        byte_order_mark: flag()?,
+        mixed_newlines: flag()?,
+    };
+    let explicit = flag()?;
+    fields.next().is_none().then_some((form, explicit))
+}
+
 fn write_stamp(stamp: &file_io::FileStamp) -> String {
     let since = stamp
         .modified
@@ -1296,9 +1446,81 @@ pub fn app_directory() -> Option<PathBuf> {
     }
 }
 
-/// Where work copies go.
+const INSTANCE_DIRECTORY: &str = "instances";
+const INSTANCE_SLOTS: usize = 64;
+
+struct InstanceStorage {
+    directory: PathBuf,
+    // Closing the handle, including after a process crash, releases the slot.
+    _lock: fs::File,
+}
+
+fn claim_instance(directory: &Path) -> io::Result<InstanceStorage> {
+    for slot in 0..INSTANCE_SLOTS {
+        let directory = if slot == 0 {
+            directory.to_path_buf()
+        } else {
+            directory.join(INSTANCE_DIRECTORY).join(slot.to_string())
+        };
+        fs::create_dir_all(&directory)?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join("instance.lock"))?;
+        match lock.try_lock() {
+            Ok(()) => {
+                return Ok(InstanceStorage {
+                    directory,
+                    _lock: lock,
+                });
+            }
+            Err(fs::TryLockError::WouldBlock) => {}
+            Err(fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
+    Err(io::Error::other("No available RFN Edit session slot"))
+}
+
+fn session_directories(directory: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut directories = vec![directory.to_path_buf()];
+    let entries = match fs::read_dir(directory.join(INSTANCE_DIRECTORY)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(directories),
+        result => result?,
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if entry.file_type()?.is_dir()
+            && (1..INSTANCE_SLOTS).any(|slot| name == OsStr::new(&slot.to_string()))
+        {
+            directories.push(entry.path());
+        }
+    }
+    Ok(directories)
+}
+
+/// The current instance owns its session and work copies. The lowest free
+/// slot is reused on restart; slot zero keeps the original on-disk layout.
+pub fn session_directory() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        app_directory()
+    }
+    #[cfg(not(test))]
+    {
+        static INSTANCE: std::sync::OnceLock<Option<InstanceStorage>> = std::sync::OnceLock::new();
+        INSTANCE
+            .get_or_init(|| claim_instance(&app_directory()?).ok())
+            .as_ref()
+            .map(|instance| instance.directory.clone())
+    }
+}
+
+/// Where this instance's work copies go.
 pub fn work_directory() -> Option<PathBuf> {
-    Some(app_directory()?.join(WORK_FOLDER))
+    Some(session_directory()?.join(WORK_FOLDER))
 }
 
 // Integration tests must never write the user's session or work copies.
@@ -1310,12 +1532,10 @@ thread_local! {
 /// FNV-1a over the path's text.
 ///
 /// Not a security question: the name only has to be the same for the same file
-/// and different for different ones, and short enough to be a file name. Lower
-/// cased first, because two Windows paths differing only in case are one file.
+/// and different for different ones, and short enough to be a file name.
 fn path_key(path: &Path) -> u64 {
-    let text = path.to_string_lossy().to_lowercase();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in text.as_bytes() {
+    for byte in path.as_os_str().as_encoded_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -1330,8 +1550,11 @@ fn path_key(path: &Path) -> u64 {
 pub fn work_file_name(copy: &WorkCopy) -> String {
     match &copy.origin {
         Some(path) => {
-            let key = path_key(path);
-            format!("file-{key:016x}.{WORK_EXTENSION}")
+            let key = copy.identity.as_deref().map_or_else(
+                || path_key(&file_io::document_path_identity(path)),
+                path_key,
+            );
+            format!("file-v2-{key:016x}.{WORK_EXTENSION}")
         }
         None => {
             let number = copy.untitled;
@@ -1361,6 +1584,12 @@ pub fn encode_with_protection(copy: &WorkCopy, protected: bool) -> String {
     if let Some(origin) = &copy.origin {
         out.push_str(&format!("origin: {}\n", origin.display()));
     }
+    if let Some(identity) = &copy.identity {
+        out.push_str(&format!("identity: {}\n", identity.display()));
+    }
+    if let Some((form, explicit)) = copy.form {
+        out.push_str(&format!("form: {}\n", write_form(form, explicit)));
+    }
     if let Some(caret) = copy.caret {
         out.push_str(&format!("caret: {caret}\n"));
     }
@@ -1381,27 +1610,41 @@ pub fn decode(raw: &str) -> Option<WorkCopy> {
     decode_record(raw).map(|(copy, _)| copy)
 }
 
-/// [`decode`] and whether the copy was written as protected
-/// ([`encode_with_protection`]) — **the header is read once**, here.
+#[cfg(test)]
 fn decode_record(raw: &str) -> Option<(WorkCopy, bool)> {
-    let mut lines = raw.split('\n');
+    let (header, text) = raw.split_once("\n\n")?;
+    let (mut copy, protected) = decode_work_header(header)?;
+    copy.text = text.to_owned();
+    Some((copy, protected))
+}
+
+fn decode_work_header(header: &str) -> Option<(WorkCopy, bool)> {
+    let mut lines = header.lines();
     if lines.next()? != WORK_MAGIC {
         return None;
     }
     let mut copy = WorkCopy::default();
-    let mut protected = false;
-    let mut consumed = WORK_MAGIC.len() + 1;
+    let mut protected = None;
+    let mut untitled = None;
     for line in lines {
-        consumed += line.len() + 1;
-        if line.is_empty() {
-            copy.text = raw.get(consumed..)?.to_owned();
-            return Some((copy, protected));
-        }
         let (key, value) = line.split_once(": ")?;
         match key {
-            "protected" => protected = value == "1",
-            "untitled" => copy.untitled = value.parse().ok()?,
-            "origin" => copy.origin = Some(PathBuf::from(value)),
+            "protected" if protected.is_none() => {
+                protected = Some(match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return None,
+                });
+            }
+            "protected" => return None,
+            "untitled" if untitled.is_none() => untitled = Some(value.parse().ok()?),
+            "untitled" => return None,
+            "origin" if !value.is_empty() && copy.origin.is_none() => {
+                copy.origin = Some(PathBuf::from(value));
+            }
+            "origin" => return None,
+            "identity" => copy.identity = Some(PathBuf::from(value)),
+            "form" => copy.form = read_form(value),
             "caret" => copy.caret = value.parse().ok(),
             // **読めなければ`None`のまま**——「比べる相手を持たない」に倒れる
             // ので、古いコピーと同じ扱いになる。
@@ -1411,7 +1654,11 @@ fn decode_record(raw: &str) -> Option<(WorkCopy, bool)> {
             _ => {}
         }
     }
-    None
+    copy.untitled = untitled?;
+    if copy.origin.is_none() && copy.untitled == 0 {
+        return None;
+    }
+    Some((copy, protected.unwrap_or(false)))
 }
 
 /// Write one document's work copy, replacing any earlier one for it.
@@ -1435,25 +1682,72 @@ pub fn read_all_in(directory: &Path) -> Vec<WorkCopy> {
         .collect()
 }
 
-/// Read the purpose and body together; old work copies are ordinary backups.
-pub fn read_records_in(directory: &Path) -> Vec<(WorkCopy, bool)> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    let mut copies = Vec::new();
-    for entry in entries.flatten() {
+fn open_work_records(
+    directory: &Path,
+) -> impl Iterator<Item = (String, WorkCopy, bool, BufReader<fs::File>)> {
+    let mut entries = fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().extension() == Some(OsStr::new(WORK_EXTENSION)))
+        .collect::<Vec<_>>();
+    // Prefer current-format copies over legacy aliases if both name a file.
+    entries.sort_by_key(|entry| !entry.file_name().to_string_lossy().starts_with("file-v2-"));
+    entries.into_iter().filter_map(|entry| {
         let path = entry.path();
-        if path.extension() != Some(OsStr::new(WORK_EXTENSION)) {
-            continue;
+        let name = entry.file_name().into_string().ok()?;
+        let mut reader = BufReader::new(fs::File::open(&path).ok()?);
+        let (copy, protected) = read_work_header(&mut reader)?;
+        Some((name, copy, protected, reader))
+    })
+}
+
+fn read_work_header(reader: &mut impl BufRead) -> Option<(WorkCopy, bool)> {
+    // A Windows extended-length path can use up to 32,767 UTF-16 units.
+    // Bound the header even when a damaged file has no separating blank line.
+    let mut reader = reader.take(256 * 1024);
+    let mut header = String::new();
+    loop {
+        let start = header.len();
+        if reader.read_line(&mut header).ok()? == 0 {
+            return None;
         }
-        let Ok(raw) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Some(record) = decode_record(&raw) {
-            copies.push(record);
+        if &header[start..] == "\n" {
+            return decode_work_header(header.strip_suffix("\n\n")?);
         }
     }
-    copies
+}
+
+pub fn work_headers_in(directory: &Path) -> impl Iterator<Item = (String, WorkCopy, bool)> {
+    open_work_records(directory).map(|(name, copy, protected, _)| (name, copy, protected))
+}
+
+pub fn may_discard_work_path(path: &Path) -> bool {
+    match fs::File::open(path) {
+        Ok(file) => {
+            read_work_header(&mut BufReader::new(file)).is_some_and(|(_, protected)| !protected)
+        }
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+    }
+}
+
+pub fn restore_work_records(
+    directory: &Path,
+    include_ordinary: bool,
+) -> impl Iterator<Item = (String, WorkCopy, bool)> {
+    open_work_records(directory)
+        .filter(move |(_, _, protected, _)| include_ordinary || *protected)
+        .filter_map(|(name, mut copy, protected, mut reader)| {
+            reader.read_to_string(&mut copy.text).ok()?;
+            Some((name, copy, protected))
+        })
+}
+
+#[cfg(test)]
+pub fn read_records_in(directory: &Path) -> Vec<(WorkCopy, bool)> {
+    restore_work_records(directory, true)
+        .map(|(_, copy, protected)| (copy, protected))
+        .collect()
 }
 
 /// Drop a work copy that is no longer needed (要件 8.2).
@@ -1479,6 +1773,91 @@ mod tests {
         TEST_DIRECTORY.with(|held| *held.borrow_mut() = None);
         assert_eq!(app_directory(), None);
         assert_eq!(work_directory(), None);
+    }
+
+    const INSTANCE_PROBE_DIRECTORY: &str = "RFNEDIT_TEST_INSTANCE_DIRECTORY";
+
+    #[test]
+    fn child_instance_storage_probe() {
+        let Some(directory) = std::env::var_os(INSTANCE_PROBE_DIRECTORY).map(PathBuf::from) else {
+            return;
+        };
+        let instance = claim_instance(&directory).unwrap();
+        assert_ne!(instance.directory, directory);
+        let work = instance.directory.join(WORK_FOLDER);
+        write_into(&work, &untitled_copy("child draft")).unwrap();
+        fs::write(directory.join("ready"), b"child ready").unwrap();
+        // Keep the slot until the parent terminates this process.
+        std::thread::sleep(Duration::from_secs(8));
+    }
+
+    #[test]
+    fn independent_processes_keep_their_copies_and_reuse_a_crashed_slot() {
+        let directory = scratch_directory("instance-locks");
+        let primary = claim_instance(&directory).unwrap();
+        let work = primary.directory.join(WORK_FOLDER);
+        let copy = untitled_copy("primary draft");
+        write_into(&work, &copy).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "app_data::tests::child_instance_storage_probe"])
+            .env(INSTANCE_PROBE_DIRECTORY, &directory)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let ready = directory.join("ready");
+        let started = std::time::Instant::now();
+        while !ready.exists()
+            && child.try_wait().unwrap().is_none()
+            && started.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ready = ready.exists();
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(ready, "the child claimed a different session slot");
+        assert_eq!(read_all_in(&work), [copy.clone()]);
+        discard_in(&work, &copy).unwrap();
+        let restarted = claim_instance(&directory).unwrap();
+        assert_ne!(restarted.directory, primary.directory);
+        assert_eq!(
+            read_all_in(&restarted.directory.join(WORK_FOLDER)),
+            [untitled_copy("child draft")]
+        );
+        drop(restarted);
+        drop(primary);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn header_scan_leaves_large_bodies_and_malformed_protection_unread() {
+        let mut raw = format!("{WORK_MAGIC}\nuntitled: 1\nprotected: 1\n\n").into_bytes();
+        let body = raw.len();
+        raw.resize(body + 1024 * 1024, 0xff);
+        let mut reader = io::Cursor::new(raw);
+        let (copy, protected) = read_work_header(&mut reader).unwrap();
+        assert!(protected);
+        assert!(copy.text.is_empty());
+        assert_eq!(reader.position(), body as u64);
+        let invalid = format!("{WORK_MAGIC}\nprotected: broken\n\nbody");
+        assert!(read_work_header(&mut io::Cursor::new(invalid.as_bytes())).is_none());
+        let incomplete = format!("{WORK_MAGIC}\nprotected: 1\n");
+        assert!(read_work_header(&mut io::Cursor::new(incomplete.as_bytes())).is_none());
+    }
+
+    #[test]
+    fn a_copy_that_appears_after_scanning_is_checked_before_cleanup() {
+        let directory = scratch_directory("copy-created-after-scan");
+        assert_eq!(work_headers_in(&directory).count(), 0);
+        let copy = untitled_copy("newly arrived ordinary write");
+        let path = directory.join(work_file_name(&copy));
+        assert!(may_discard_work_path(&path));
+        fs::write(&path, encode(&copy)).unwrap();
+        assert!(may_discard_work_path(&path));
+        fs::write(&path, encode_with_protection(&copy, true)).unwrap();
+        assert!(!may_discard_work_path(&path));
+        fs::write(&path, format!("{WORK_MAGIC}\nprotected: 1\n")).unwrap();
+        assert!(!may_discard_work_path(&path));
     }
     use super::*;
 
@@ -1631,6 +2010,7 @@ mod tests {
     #[test]
     fn shells_round_trip_with_their_output() {
         let shell = |name: &str, output: Option<&str>| SessionShell {
+            profile_id: 42,
             name: name.to_owned(),
             command: format!("{name}.exe -l"),
             directory: if name == "WSL" {
@@ -1638,6 +2018,7 @@ mod tests {
             } else {
                 String::new()
             },
+            launch_directory: (name == "cmd").then(|| "D:\\原稿".into()),
             output: output.map(str::to_owned),
             title: output.map(|_| format!("ken@KN01: /mnt/d/{name}")),
         };
@@ -1675,12 +2056,8 @@ mod tests {
             "x",
         )
         .unwrap();
-        let kept = vec![(
-            "new-1.txt".to_owned(),
-            "now".to_owned(),
-            vec!["a".to_owned()],
-        )];
-        replace_terminal_outputs(&directory, &kept).unwrap();
+        write_terminal_output(&directory, "new-1.txt", "now", &["a".to_owned()]).unwrap();
+        prune_terminal_outputs(&directory, &["new-1.txt".to_owned()].into()).unwrap();
         assert_eq!(
             read_terminal_output(&directory, "new-1.txt"),
             Some(("now".to_owned(), vec!["a".to_owned()]))
@@ -1762,6 +2139,8 @@ mod tests {
     fn untitled_copy(text: &str) -> WorkCopy {
         WorkCopy {
             origin: None,
+            identity: None,
+            form: None,
             untitled: 1,
             caret: Some(3),
             stamp: None,
@@ -2011,6 +2390,15 @@ mod tests {
         let copy = WorkCopy {
             origin: Some(PathBuf::from("D:\\原稿\\note.md")),
             untitled: 0,
+            identity: Some(PathBuf::from("D:\\原稿\\note.md")),
+            form: Some((
+                file_io::TextForm {
+                    encoding: file_io::Encoding::Cp932,
+                    newline: file_io::Newline::Crlf,
+                    ..Default::default()
+                },
+                true,
+            )),
             caret: Some(120),
             stamp: None,
             text: "本文".to_owned(),
@@ -2031,6 +2419,8 @@ mod tests {
         let copy = WorkCopy {
             origin: Some(PathBuf::from("D:\\原稿\\note.md")),
             untitled: 0,
+            identity: None,
+            form: None,
             caret: Some(1),
             stamp: Some(stamp),
             text: "本文".to_owned(),
@@ -2081,18 +2471,17 @@ mod tests {
         assert_eq!(work_file_name(&copy), work_file_name(&copy.clone()));
     }
 
-    /// Two Windows paths differing only in case are one file.
     #[test]
-    fn a_path_names_the_same_copy_whatever_its_case() {
+    fn case_is_preserved_when_the_paths_cannot_be_resolved() {
         let lower = WorkCopy {
-            origin: Some(PathBuf::from("d:\\notes\\a.md")),
+            origin: Some(PathBuf::from("rfn-nonexistent-directory/a.md")),
             ..WorkCopy::default()
         };
         let upper = WorkCopy {
-            origin: Some(PathBuf::from("D:\\Notes\\A.md")),
+            origin: Some(PathBuf::from("rfn-nonexistent-directory/A.md")),
             ..WorkCopy::default()
         };
-        assert_eq!(work_file_name(&lower), work_file_name(&upper));
+        assert_ne!(work_file_name(&lower), work_file_name(&upper));
     }
 
     #[test]

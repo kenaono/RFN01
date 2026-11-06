@@ -4367,7 +4367,11 @@ fn apply_typography(
 ) -> Result<()> {
     let spacing = typography.character_spacing;
     let has_spacing = spacing.abs() > f32::EPSILON;
-    if !has_spacing && runs.is_empty() && typography.decorations[0] & 7 == 0 && !typography.underline {
+    if !has_spacing
+        && runs.is_empty()
+        && typography.decorations[0] & 7 == 0
+        && !typography.underline
+    {
         return Ok(());
     }
     let layout1 = if has_spacing {
@@ -13736,7 +13740,7 @@ pub mod cells {
             };
             // SAFETY: the factory outlives this struct and the name outlives the call.
             let format = unsafe {
-                self.dwrite.CreateTextFormat(
+                let format = self.dwrite.CreateTextFormat(
                     &family,
                     None,
                     weight,
@@ -13748,7 +13752,10 @@ pub mod cells {
                     DWRITE_FONT_STRETCH_NORMAL,
                     size,
                     w!("ja-JP"),
-                )?
+                )?;
+                // The terminal grid already decides where each row ends.
+                format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                format
             };
             self.cell_formats.insert(key, format.clone());
             Ok(format)
@@ -13950,9 +13957,6 @@ pub mod cells {
                         brush.SetColor(&colour(foreground));
                         let utf16 = run.text.encode_utf16().collect::<Vec<u16>>();
                         let format = if run.attrs.bold { &bold } else { &plain };
-                        // **A cell is not a line box.** The rectangle is the run's
-                        // own columns, so a glyph wider than its cell is clipped to
-                        // where the grid says it ends rather than pushing the row.
                         target.DrawText(
                             &utf16,
                             format,
@@ -14162,6 +14166,49 @@ mod terminal_tests {
         );
     }
 
+    #[test]
+    fn colored_terminal_runs_stay_on_their_grid_row_at_120_percent() {
+        let look = TerminalLook {
+            // At 120% of the default size, a run can be just wider than
+            // its box in the grid because the coordinates are fractional.
+            font_size: 16.8,
+            ..TerminalLook::default()
+        };
+        let cell = terminal_cell_size(&look).expect("measure the cell");
+        let host = "user@dev:";
+        let path = "/mnt/d/Projects/Example/Folder";
+        let filename = "20_World";
+        let filename_column = 54;
+        let padding = " ".repeat(filename_column - host.len() - path.len());
+        let mut it = Terminal::new(80, 2);
+        it.feed(
+            format!(
+                "\x1b[32m{host}\x1b[1;38;2;16;32;64m{path}\x1b[0m{padding}\x1b[1;32m{filename}\x1b[0m"
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            it.screen.row_text(0),
+            format!("{host}{path}{padding}{filename}")
+        );
+        assert!(it.screen.row_text(1).is_empty());
+
+        let (pixels, width, _) = draw(&it, &look, cell);
+        let row_height = cell.line as u32;
+        let last_column = filename_column + filename.len() - 1;
+        let last_glyph_left = (last_column as f32 * cell.advance).floor() as u32;
+        assert!(
+            ink_columns(&pixels, width, 0..row_height)
+                .last()
+                .is_some_and(|&(_, right)| right >= last_glyph_left),
+            "the last character of the filename is visible on the first row"
+        );
+        assert!(
+            ink_columns(&pixels, width, row_height..2 * row_height).is_empty(),
+            "the empty terminal row has no ink from the first row"
+        );
+    }
+
     /// 追加要件 Terminal: 選んだセルは色が入れ替わる。
     #[test]
     fn a_selected_cell_swaps_its_colours() {
@@ -14255,5 +14302,101 @@ mod terminal_tests {
             blue < 140 && green < 140 && red < 140,
             "the cell behind reversed spaces is still paper ({red},{green},{blue})"
         );
+    }
+
+    #[test]
+    #[ignore = "Windows render timing; run explicitly in release mode"]
+    fn windows_performance_terminal_render() {
+        use std::time::Instant;
+
+        const COLUMNS: usize = 120;
+        const BAND_ROWS: usize = 8;
+        let look = TerminalLook {
+            font_size: 16.8, // Default Terminal size at 120% zoom.
+            ..TerminalLook::default()
+        };
+        let cell = terminal_cell_size(&look).expect("measure the cell");
+        let width = (COLUMNS as f32 * cell.advance).ceil() as u32;
+        let band_height = (BAND_ROWS as f32 * cell.line).ceil() as u32;
+        let row_bytes = (width * cell.line as u32 * 4) as usize;
+        let mut pixels = vec![0; (width * band_height * 4) as usize];
+
+        for (case, rows, mixed) in [
+            ("terminal_plain_band", BAND_ROWS, false),
+            ("terminal_mixed_band", BAND_ROWS, true),
+            ("terminal_mixed_viewport", 5 * BAND_ROWS, true),
+        ] {
+            let mut terminal = Terminal::new(COLUMNS, rows);
+            for row in 0..rows {
+                if row > 0 {
+                    terminal.feed(b"\r\n");
+                }
+                let text = if mixed {
+                    match row % 4 {
+                        0 => format!(
+                            "\x1b[1;32muser@dev\x1b[0m:\x1b[1;34m/mnt/d/Projects/Example/Folder\x1b[0m$ printf 'row {row:02}'"
+                        ),
+                        1 => format!(
+                            "\x1b[1;34m10_Characters  20_World\x1b[0m  \x1b[33mguide_{row:02}.md\x1b[0m  drafts  notes"
+                        ),
+                        2 => format!("╭─ 文書 {row:02} ── 文字幅と表示を確認 ──╮  確認済み"),
+                        _ => format!(
+                            "\x1b[7m {row:02} \x1b[0m  \x1b[4mready\x1b[0m  waiting for the next command"
+                        ),
+                    }
+                } else {
+                    format!(
+                        "row {row:02}: [info] resolved dependencies, compiled sources, and checked build output"
+                    )
+                };
+                terminal.feed(text.as_bytes());
+            }
+            assert!(terminal.screen.scrollback().is_empty());
+            let cursor = terminal.screen.cursor();
+            let draw = |pixels: &mut [u8]| {
+                for (band, lines) in terminal.screen.lines().chunks(BAND_ROWS).enumerate() {
+                    let first = band * BAND_ROWS;
+                    let caret = (first..first + lines.len())
+                        .contains(&cursor.row)
+                        .then(|| (cursor.row - first, cursor.column));
+                    draw_terminal(
+                        lines,
+                        &[],
+                        caret,
+                        "",
+                        &look,
+                        cell,
+                        pixels,
+                        width,
+                        band_height,
+                    )
+                    .expect("draw a terminal band");
+                }
+            };
+            for _ in 0..8 {
+                draw(&mut pixels);
+            }
+            assert!(
+                pixels[..row_bytes]
+                    .chunks_exact(4)
+                    .filter(|pixel| pixel[..3].iter().all(|&value| value < 160))
+                    .count()
+                    > 50,
+                "{case} must draw readable text above the cursor"
+            );
+            assert_ne!(&pixels[..row_bytes], &pixels[row_bytes..2 * row_bytes]);
+
+            // Measure DirectWrite/Direct2D rasterization and WIC's pixel copy
+            // for each eight-row band, with warmed formats and a reused
+            // buffer. ANSI parsing, band reuse, Slint and presentation are
+            // outside this measurement.
+            let mut samples = Vec::with_capacity(40);
+            for _ in 0..40 {
+                let started = Instant::now();
+                draw(&mut pixels);
+                samples.push(started.elapsed());
+            }
+            crate::performance_tests::report(case, "draw", &mut samples);
+        }
     }
 }

@@ -84,11 +84,25 @@ impl FileWriter {
     /// A failure here is not fatal: the caller writes on its own thread
     /// instead, which is what the editor did before this existed.
     pub fn start() -> Self {
+        Self::start_with(|| {})
+    }
+
+    #[cfg(test)]
+    pub fn start_paused(ready: Receiver<()>) -> Self {
+        Self::start_with(move || {
+            let _ = ready.recv();
+        })
+    }
+
+    fn start_with(before_run: impl FnOnce() + Send + 'static) -> Self {
         let (job_sender, job_receiver) = channel::<WriteJob>();
         let (result_sender, result_receiver) = channel::<WriteResult>();
         let spawned = thread::Builder::new()
             .name("rfnedit-writer".to_owned())
-            .spawn(move || run(&job_receiver, &result_sender));
+            .spawn(move || {
+                before_run();
+                run(&job_receiver, &result_sender);
+            });
         let (jobs, worker) = match spawned {
             Ok(handle) => (Some(job_sender), Some(handle)),
             Err(_) => (None, None),
@@ -144,6 +158,10 @@ impl FileWriter {
         done
     }
 
+    pub fn is_idle(&self) -> bool {
+        self.handed_over.get() == self.answered.get()
+    }
+
     /// Wait until everything handed over has been answered, or the time is up
     /// (追加要件 2026-09-09).
     ///
@@ -152,9 +170,8 @@ impl FileWriter {
     /// ければならない——`finish`は送り口を落とすので、そのあと書き直すことが
     /// できない。こちらは行列をそのまま残すので、失敗を見て**もう一度頼める**。
     ///
-    /// **上限を切ってあるのは、閉じられない窓を作らないため。**時間切れは
-    /// 失敗ではない（まだ書いている最中かもしれない）ので、呼び出し側は
-    /// 「失敗したものは無い」として先へ進み、残りは`finish`が待ち切る。
+    /// 時間内に結果が届いた処理を返す。到着しなかった書き込みは呼び出し側で
+    /// 追跡番号を保持し、次の待機や通常のポーリングで照合できる。
     pub fn settle(&self, longest: Duration) -> Vec<WriteResult> {
         let mut done = self.drain();
         let until = Instant::now() + longest;

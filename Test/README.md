@@ -12,7 +12,9 @@ cargo test --locked --offline --manifest-path Test/wsl/Cargo.toml --target-dir t
 
 ## Windows でアプリ全体の Cargo テストを実行する
 
-`cargo test --locked --offline` を基本とする。並列度はリポジトリ設定の4本を使う。
+`run_check.bat` はスクリプトがあるチェックアウトで Git の有無、書式、ビルド、通常テストを順に確認する。最初に失敗したコマンドの終了コードを返し、同じフォルダの `check_output.txt` にコミット、実行範囲、結果を残す。個別実行対象の一覧は記録する。
+
+通常テストだけを実行するときは `cargo test --locked --offline` を使う。並列度はリポジトリ設定の4本を使う。Git が PATH にない場合はスクリプトが失敗する。直接 Cargo を呼び出した場合に限り、Git が見つからなければ Git の fixture を省略する。Git の初期化やジャンクションの作成が失敗したときは、対象パスとエラーを確認する。権限不足が原因のケースは、必要な権限がある環境で実行して別に結果を記録する。
 
 | 領域 | 要件定義の参照先 | 自動テストで区別すること |
 | --- | --- | --- |
@@ -35,6 +37,7 @@ cargo test --locked --offline read_aloud_tests:: -- --ignored --test-threads=1
 
 ## Windows の実画面で確認すること
 
+- [Windows 性能テスト](Windows性能テスト.md)で、大きな Markdown、長い段落、Terminal 描画を共通の Release 手順で計測する。自動計測と Computer Use での実画面シナリオがある。
 - [Windows実画面のシナリオ](RFN01-116_Windows実画面.md)で、Windowsのファイルダイアログ、IME、印刷ダイアログとの境界を確認する。
 - [ファイルツリーのフォーカス](RFN01-115_ファイルツリーのフォーカス.md)で、連続したキー操作と確認画面からの復帰を確認する。
 

@@ -51,6 +51,8 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Console",
     "Win32_System_Pipes",
     "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
     # `CreatePipe` and `CreateProcessW` both take security attributes, so the
     # bindings for them are behind this even when nothing is passed.
     "Win32_Security",

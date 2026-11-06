@@ -180,7 +180,10 @@ fn a_failed_import_backup_leaves_settings_and_presets_untouched() {
 
     assert!(settings_transfer::import(window, &r.live, incoming).is_err());
     assert_eq!(snapshot(), before);
-    assert_eq!(app_data::read_settings(&directory).unwrap(), settings_before);
+    assert_eq!(
+        app_data::read_settings(&directory).unwrap(),
+        settings_before
+    );
     assert!(backup.is_dir());
 }
 

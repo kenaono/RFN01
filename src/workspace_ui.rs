@@ -13,9 +13,9 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::bookmarks;
 use crate::file_io;
 use crate::workspace::{self, LoadStatus, Registry, RegistryError, WorkspaceId};
+use crate::{app_data, bookmarks};
 
 /// Why [`Runtime::registry`] may not be trusted for editing yet.
 ///
@@ -143,6 +143,7 @@ impl Runtime {
         // them. A failed cleanup leaves the damaged registry blocked.
         clear_all_view_state(&self.appdata_dir)?;
         bookmarks::remove_all(&self.appdata_dir)?;
+        app_data::remove_all_workspace_tabs(&self.appdata_dir)?;
         self.bookmarks.clear();
         let empty = Registry::new();
         workspace::save(&self.appdata_dir, &empty)?;
@@ -314,8 +315,9 @@ impl Runtime {
         self.expanded.remove(&id);
         self.reset_generation.remove(&id);
         self.bookmarks.remove(&id);
-        let cleanup =
-            remove_expanded(&self.appdata_dir, id).and(bookmarks::remove(&self.appdata_dir, id));
+        let cleanup = remove_expanded(&self.appdata_dir, id)
+            .and(bookmarks::remove(&self.appdata_dir, id))
+            .and(app_data::remove_workspace_tabs(&self.appdata_dir, id));
         if self.active == Some(id) {
             self.active = None;
         }
@@ -750,6 +752,9 @@ mod tests {
         expanded.insert(PathBuf::from("/x"));
         let _ = runtime.switch_active(None, expanded);
         assert!(load_expanded(&directory, a).is_some());
+        app_data::write_workspace_tabs(&directory, a, &app_data::Session::default()).unwrap();
+        let second_instance = directory.join("instances").join("1");
+        app_data::write_workspace_tabs(&second_instance, a, &app_data::Session::default()).unwrap();
 
         fs::write(
             directory.join("workspaces.rfnworkspaces"),
@@ -761,6 +766,28 @@ mod tests {
         reopened.reset_after_read_error().unwrap();
 
         assert!(load_expanded(&directory, a).is_none());
+        assert!(app_data::read_workspace_tabs(&directory, a).is_none());
+        assert!(app_data::read_workspace_tabs(&second_instance, a).is_none());
+    }
+
+    #[test]
+    fn forgetting_one_workspace_removes_only_its_tab_snapshot() {
+        let directory = scratch_directory("tabs-forget-only-one");
+        let mut runtime = Runtime::open(directory.clone());
+        let (a, b) = runtime
+            .edit(|registry| {
+                Ok((
+                    registry.create_workspace("A".into())?,
+                    registry.create_workspace("B".into())?,
+                ))
+            })
+            .unwrap();
+        for id in [a, b] {
+            app_data::write_workspace_tabs(&directory, id, &app_data::Session::default()).unwrap();
+        }
+        runtime.forget_workspace(a).unwrap();
+        assert!(app_data::read_workspace_tabs(&directory, a).is_none());
+        assert!(app_data::read_workspace_tabs(&directory, b).is_some());
     }
 
     #[test]

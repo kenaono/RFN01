@@ -51,6 +51,7 @@ mod folder_replace;
 #[cfg(test)]
 mod folder_replace_ui_tests;
 mod git;
+mod git_catalog_ui;
 mod git_change_diff;
 mod git_file_history;
 mod git_graph;
@@ -59,9 +60,8 @@ mod git_hunks;
 mod git_merge_ui;
 mod git_repo_ui;
 mod git_ui;
-mod git_worktree_ui;
-mod git_catalog_ui;
 mod git_version;
+mod git_worktree_ui;
 mod i18n;
 #[cfg(test)]
 mod image_ui_tests;
@@ -83,10 +83,12 @@ mod link_ui_tests;
 #[cfg(test)]
 mod memo_ui_tests;
 mod menu_commands;
-mod panel_actions;
 mod open_document;
 mod pane_layout;
+mod panel_actions;
 mod panel_source;
+#[cfg(test)]
+mod performance_tests;
 mod pictures;
 #[cfg(test)]
 mod print_tests;
@@ -183,10 +185,12 @@ use i18n::pick;
 use kill_ring::{KillAction, KillRing};
 use open_document::{Change, OpenDocument, replace_source_range};
 use pane_layout::{Layout, Rect, Split, Towards, neighbour};
+#[cfg(test)]
+use saving::flush_work_copies;
 use saving::{
-    check_external_change, collect_write_results, discard_all_work_copies, discard_work_copy,
-    flush_work_copies, keep_work_copies_again, reload_from_file, reopen_as, restore_tabs, save_all,
-    save_document, work_identity, write_work_copy_if_due, write_work_copy_now, write_work_copy_of,
+    check_external_change, collect_write_results, discard_work_copy, reload_from_file, reopen_as,
+    restore_tabs, save_all, save_document, work_identity, write_work_copy_if_due,
+    write_work_copy_now, write_work_copy_of,
 };
 use searcher::{NeverSuperseded, SearchJob, SearchOutcome, Searcher};
 use session::{open_session, restore_window_place, write_session};
@@ -304,33 +308,12 @@ impl TerminalShell {
     }
 }
 
-/// The shells this machine actually has, out of the ones it is set to offer.
-///
-/// **A row that opens nothing looks exactly like a row that is broken**, so a
-/// shell that is not installed is not offered. If the search finds nothing at
-/// all — a `PATH` this cannot read — the whole list is offered rather than none
-/// of it, because a message the writer can read beats a menu with no rows.
+/// The registered profiles this machine can start.
 fn offered_shells(window: &AppWindow) -> Vec<TerminalShell> {
-    let configured = configured_shells(window);
-    let distributions = window.get_wsl_distributions().iter().map(|name| name.to_string()).collect::<Vec<_>>();
-    let complete = window.get_wsl_discovery_complete();
-    let mut found: Vec<TerminalShell> = configured
-        .iter()
-        .filter(|shell| {
-            on_path(shell.program()) && (!complete || match terminal_shells::wsl_distribution(&shell.command) {
-                Some(Some(name)) => distributions.iter().any(|installed| installed.eq_ignore_ascii_case(&name)),
-                Some(None) => !distributions.is_empty(),
-                None => true,
-            })
-        })
-        .cloned()
-        .collect();
-    if found.is_empty() && complete {
-        found.extend(TerminalShell::built_in().into_iter().filter(|shell| {
-            !terminal_shells::is_wsl(shell) && on_path(shell.program())
-        }));
-    }
-    if found.is_empty() && !complete { configured } else { found }
+    configured_shells(window)
+        .into_iter()
+        .filter(|shell| terminal_shells::unavailable_reason(window, shell).is_none())
+        .collect()
 }
 
 /// The whole list the settings file names, whether or not this machine has it.
@@ -382,33 +365,71 @@ fn hold_shells(window: &AppWindow, shells: &[TerminalShell]) {
     window.set_terminal_shell_lines(ModelRc::new(VecModel::from(lines)));
 }
 
-/// The shell a number from a menu names. **Anything unexpected is the first
-/// one**, for the reason every other number arriving from the window is bounded
-/// rather than trusted.
-fn shell_at(window: &AppWindow, index: i32) -> TerminalShell {
+fn default_shell_id(window: &AppWindow) -> u64 {
+    window
+        .get_default_shell_id()
+        .parse()
+        .unwrap_or_else(|_| configured_shells(window)[0].id)
+}
+
+fn default_shell(window: &AppWindow) -> TerminalShell {
     let offered = offered_shells(window);
-    let first = || TerminalShell::built_in().remove(1);
-    match offered.get(index.max(0) as usize) {
-        Some(shell) => shell.clone(),
-        None => offered.first().cloned().unwrap_or_else(first),
+    let wanted = default_shell_id(window);
+    if let Some(shell) = offered
+        .iter()
+        .find(|shell| shell.id == wanted)
+        .or_else(|| offered.first())
+    {
+        return shell.clone();
+    }
+    let mut fallback = TerminalShell::built_in()
+        .into_iter()
+        .find(|shell| terminal_shells::unavailable_reason(window, shell).is_none())
+        .unwrap_or_else(|| TerminalShell::built_in().remove(1));
+    fallback.id = 0;
+    fallback
+}
+
+fn selected_shell(window: &AppWindow, profile_id: u64) -> Option<TerminalShell> {
+    let selected = configured_shells(window)
+        .into_iter()
+        .find(|shell| shell.id == profile_id);
+    match selected {
+        Some(shell) => {
+            if let Some(reason) = terminal_shells::unavailable_reason(window, &shell) {
+                window.tell(format!("{}: {reason}", shell.name).into());
+                None
+            } else {
+                Some(shell)
+            }
+        }
+        None => {
+            window.tell(
+                pick(
+                    "選んだシェルは登録されていません",
+                    "The selected shell profile is no longer registered",
+                )
+                .into(),
+            );
+            None
+        }
     }
 }
 
 /// Put the shells the writer may open in front of them (追加要件 Terminal).
-///
-/// **Called wherever the list can have changed**: once at startup, and again
-/// when a settings file has been read. The default is held inside the list, so
-/// a file naming a shell this machine does not have opens the first one it has.
 fn publish_shells(window: &AppWindow) {
     let offered = offered_shells(window);
-    let most = offered.len().saturating_sub(1) as i32;
     window.set_terminal_shells(ModelRc::new(VecModel::from(
         offered
-            .iter()
-            .map(|shell| SharedString::from(shell.name.clone()))
+            .into_iter()
+            .map(|shell| TerminalShellRow {
+                name: shell.name.into(),
+                profile_id: shell.id.to_string().into(),
+            })
             .collect::<Vec<_>>(),
     )));
-    window.set_default_shell(window.get_default_shell().clamp(0, most));
+    window.set_default_shell_name(default_shell(window).name.into());
+    terminal_shells::publish_profile_names(window);
 }
 
 /// 端末の見た目を、設定から一つ作る（追加要件 2026-09-08、要件 6.8）。
@@ -432,7 +453,9 @@ fn terminal_look(window: &AppWindow) -> cells::TerminalLook {
 /// that costs a process.
 fn on_path(program: &str) -> bool {
     let program = Path::new(program);
-    let exists = |path: &Path| path.is_file() || (path.extension().is_none() && path.with_extension("exe").is_file());
+    let exists = |path: &Path| {
+        path.is_file() || (path.extension().is_none() && path.with_extension("exe").is_file())
+    };
     if program.is_absolute() {
         return exists(program);
     }
@@ -1755,7 +1778,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // **Read before the panes are published** (2026-09-06). It is the session
     // that says how many panes there are, and a row nobody wrote is a pane
     // nobody can be in.
-    let mut session = app_data::app_directory()
+    let mut session = app_data::session_directory()
         .as_deref()
         .and_then(app_data::read_session);
     // RFN01-110（書き手と合意 2026-11-05）: **ファイルやフォルダを指定した起動は、前回の並びを
@@ -1814,6 +1837,27 @@ fn main() -> Result<(), slint::PlatformError> {
     // own text rather than something they have to clear away first.
     let restored = restore_tabs(&window);
     let was_restored = !restored.is_empty();
+    let workspace_runtime = app_data::app_directory().map(workspace_ui::Runtime::open);
+    let starting_workspace = workspace_runtime
+        .as_ref()
+        .and_then(|runtime| startup_workspace(runtime.registry(), last_workspace));
+    let startup_roots = workspace_runtime
+        .as_ref()
+        .zip(starting_workspace)
+        .map(|(runtime, workspace)| runtime.roots_of(workspace));
+    // Recovered work outside the registered roots opens in Explorer, where it
+    // can still be saved. Saved tabs continue to use the Workspace boundary.
+    let starting_workspace = starting_workspace.filter(|_| {
+        startup_roots.as_ref().is_none_or(|roots| {
+            restored.iter().all(|(document, _)| {
+                document
+                    .file
+                    .borrow()
+                    .path()
+                    .is_none_or(|path| workspace_boundary::existing_file_allowed(roots, path))
+            })
+        })
+    });
     // 要件 7.7: what was opened most recently, carried across runs with the
     // rest of the arrangement.
     let remembered = match &session {
@@ -1835,7 +1879,7 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     // 要件 5.1, 8.5: the folder the writer was working in, and which of its
     // folders they had open. A folder that has since gone is simply not there.
-    let work_folder = match &session {
+    let mut work_folder = match &session {
         Some(session) => WorkFolder {
             creating: None,
             root: session.folder.clone().filter(|folder| folder.is_dir()),
@@ -1859,6 +1903,7 @@ fn main() -> Result<(), slint::PlatformError> {
         },
         None => WorkFolder::default(),
     };
+    work_folder.tree_watcher = Some(tree_watch::Watcher::default());
     window.set_tree_open(session.as_ref().is_none_or(|session| session.tree_shown));
     if let Some(session) = &session {
         window.set_format_toolbar_open(session.format_toolbar);
@@ -1915,7 +1960,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // over (RFN01-40). The native pass puts the client back exactly.
     let saved_place = session.as_ref().and_then(|session| session.place);
     let saved_maximized = session.as_ref().is_some_and(|session| session.maximized);
-    let (tabs, arrangement) = open_session(&window, session, restored);
+    let (tabs, arrangement) = open_session(&window, session, restored, startup_roots.as_deref());
     let opening = tabs
         .of(focused_pane(&window))
         .current()
@@ -2011,13 +2056,11 @@ fn main() -> Result<(), slint::PlatformError> {
             window.invoke_folder_search_finished();
         });
     };
-    // 要件 12: the quick draft's window, once it has been asked for. **Held
-    // here rather than by the window itself**, so that asking twice brings the
-    // one that is open forward.
     // 要件 11.6: the editor's own list of strings, kept apart from Windows'
     // clipboard. It belongs to the run rather than to a document, because a
     // kill taken from one document is worth putting into another.
     let kill_ring: Rc<RefCell<Kills>> = Rc::default();
+    // Quick Draft を保持し、再度開く操作で既存のウィンドウを前面へ出す（要件 12）。
     let draft = Rc::new(RefCell::new(quick_draft::QuickDraftWindow::default()));
     let live = Live {
         closed_tabs: Rc::default(),
@@ -2140,7 +2183,6 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(root) = restored {
         remember_folder(&live, &root);
     }
-    publish_folder_history(&window, &live);
 
     // Workspace設計.md: the ledger is opened, and the Workspace the last run
     // closed in (or, when that is not known, the default) becomes the active
@@ -2154,11 +2196,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // same case every other AppData-backed feature already treats as
     // "quietly do nothing") leaves `folder.workspace` at `None` — Workspaces
     // are unavailable for this run, not silently reset to empty.
-    if let Some(directory) = app_data::app_directory() {
-        let runtime = workspace_ui::Runtime::open(directory);
-        let starting = startup_workspace(runtime.registry(), last_workspace);
+    if let Some(runtime) = workspace_runtime {
         live.folder.borrow_mut().workspace = Some(Rc::new(RefCell::new(runtime)));
-        if starting.is_some() {
+        if starting_workspace.is_some() {
             // 2026-09-22: 閉じた時のWorkspaceで再開する。前回Workspace2で編集中の
             // まま閉じても、TABと未保存文書はその範囲に収まり、Workspaceなしへ
             // 逃がす必要も、開き直す時の保存確認も起きない。`switch_workspace`
@@ -2166,7 +2206,7 @@ fn main() -> Result<(), slint::PlatformError> {
             // roots. With none, this must leave the legacy single-folder
             // session restored above exactly as it is (仕様
             // "Workspaceなしは所属を推測しない").
-            switch_workspace(&window, &live, starting);
+            switch_workspace(&window, &live, starting_workspace);
         } else {
             publish_workspace_switcher(&window, &live);
         }
@@ -2247,6 +2287,8 @@ fn main() -> Result<(), slint::PlatformError> {
             return;
         };
         collect_layout_results(&window, &layout_live.states, &layout_live.cache);
+        collect_tree_refresh(&window, &layout_live);
+        folder_replace::collect(&window, &layout_live);
     });
 
     // 要件 8.3: another program writing the open file has to be noticed rather
@@ -2254,7 +2296,6 @@ fn main() -> Result<(), slint::PlatformError> {
     let watch_timer = Timer::default();
     let weak = window.as_weak();
     let watch_live = live.clone();
-    let mut tree_watcher = tree_watch::Watcher::new().ok();
     let rounds = (EXTERNAL_CHECK_TICK.as_millis() / READ_ONLY_CHECK_TICK.as_millis()) as u32;
     let mut tick = 0u32;
     watch_timer.start(TimerMode::Repeated, READ_ONLY_CHECK_TICK, move || {
@@ -2273,25 +2314,8 @@ fn main() -> Result<(), slint::PlatformError> {
             // RFN01-75: not over a search — its rows are the found files, drawn
             // again whenever the search answers, and the plain tree read here
             // would put the whole tree back under the search field.
-            if window.get_tree_open()
-                && matches!(window.get_left_tab(), 0 | 4)
-                && !window.get_tree_searching()
-                && !window.get_tree_refresh_blocked()
-                && !window.get_question_open()
-                && !window.get_diff_active()
-            {
-                let (roots, multi) = tree_roots(&watch_live.folder.borrow());
-                let request = (!roots.is_empty()).then(|| tree_watch::Request {
-                    roots,
-                    multi,
-                    expanded: watch_live.folder.borrow().expanded.clone(),
-                    displayed_paths: watch_live.tree_paths.borrow().clone(),
-                });
-                if let (Some(watcher), Some(request)) = (tree_watcher.as_mut(), request)
-                    && let Some(rows) = watcher.poll(&request)
-                {
-                    publish_tree_rows(&window, &watch_live, rows);
-                }
+            if tree_refresh_visible(&window) {
+                request_tree_refresh(&window, &watch_live);
             }
         }
     });
@@ -2680,19 +2704,20 @@ fn main() -> Result<(), slint::PlatformError> {
     // 追加要件 2026-09-07: **走っているタブの接続先を替える。**タブはそのまま、
     // 中のシェルだけが別のものになる——走っていたものは終わる（端末のタブを
     // 閉じるのと同じ重さで、書き手がそう言ったのだからそうする）。
-    window.on_pane_switch_shell(move |pane, shell| {
-        if let Some(window) = weak.upgrade() {
-            let chosen = shell_at(&window, shell);
+    window.on_pane_switch_shell(move |pane, profile_id| {
+        if let Some(window) = weak.upgrade()
+            && let Ok(profile_id) = profile_id.parse()
+            && let Some(chosen) = selected_shell(&window, profile_id)
+        {
             switch_shell(&window, &switch_live, PaneId::from_index(pane), chosen);
         }
     });
 
     let weak = window.as_weak();
-    window.on_pane_new_terminal(move |pane, shell| {
+    window.on_pane_new_terminal(move |pane| {
         if let Some(window) = weak.upgrade() {
             let id = PaneId::from_index(pane);
-            let chosen = shell_at(&window, shell);
-            open_terminal(&window, &answer_live, id, chosen);
+            open_terminal(&window, &answer_live, id, default_shell(&window));
         }
     });
 
@@ -3125,7 +3150,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 // difference is the bracketed-paste markers, and a shell shows
                 // what arrives between them highlighted until the next key.
                 if committed {
-                    session.borrow_mut().type_text(text);
+                    if !session.borrow_mut().type_text(text) {
+                        terminal_workflow::tell_send_busy(&window);
+                    }
                 } else {
                     terminal_workflow::input(&window, &typed_live, session.clone(), text, None);
                 }
@@ -3736,17 +3763,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // other new tab: which pane is the writer's business and they said it by
     // clicking.
     let terminal_live = live.clone();
-    let weak = window.as_weak();
-    let default_cache = render_cache.clone();
-    // 追加要件 2026-09-07: which shell everything that does not ask opens.
-    window.on_default_shell_chosen(move |shell| {
-        if let Some(window) = weak.upgrade() {
-            let most = offered_shells(&window).len().saturating_sub(1) as i32;
-            window.set_default_shell(shell.clamp(0, most));
-            window.invoke_shell_profile_action(0, window.get_shell_profile_index());
-            save_settings(&window, &default_cache);
-        }
-    });
 
     // 追加要件 2026-09-08: 自動退避のOn/Off（要件 8.1）。**切った瞬間に、
     // 置いてあるものを全部持っていく**——「Offの場合は状態を維持しない」の
@@ -3763,11 +3779,7 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_autosave_toggled(move |wanted| {
         if let Some(window) = weak.upgrade() {
             window.set_autosave(wanted);
-            if wanted {
-                keep_work_copies_again(&autosave_live);
-            } else {
-                discard_all_work_copies(&autosave_live);
-            }
+            saving::apply_autosave_transition(&autosave_live, wanted);
             save_settings(&window, &autosave_cache);
         }
     });
@@ -3817,10 +3829,14 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = window.as_weak();
-    window.on_terminal_requested(move |shell| {
+    window.on_terminal_requested(move || {
         if let Some(window) = weak.upgrade() {
-            let chosen = shell_at(&window, shell);
-            open_terminal(&window, &terminal_live, focused_pane(&window), chosen);
+            open_terminal(
+                &window,
+                &terminal_live,
+                focused_pane(&window),
+                default_shell(&window),
+            );
         }
     });
 
@@ -4032,7 +4048,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             if committed {
-                session.borrow_mut().type_text(text.as_str());
+                if !session.borrow_mut().type_text(text.as_str()) {
+                    terminal_workflow::tell_send_busy(&window);
+                }
             } else {
                 terminal_workflow::input(
                     &window,
@@ -4168,6 +4186,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(window) = weak.upgrade() else {
             return CloseRequestResponse::HideWindow;
         };
+        if !folder_replace::close_allowed(&window) {
+            return CloseRequestResponse::KeepWindowShown;
+        }
         let live = &closing_live;
         if live.folder.borrow().link_move_job.is_some() {
             window.tell(
@@ -4195,43 +4216,12 @@ fn main() -> Result<(), slint::PlatformError> {
         if terminal_workflow::ask_window_close(&window, live) {
             return CloseRequestResponse::KeepWindowShown;
         }
-        if ask_about_the_last_work_copy(&window, live) {
+        if ask_about_the_last_work_copy(&window, live)
+            || ask_about_unprotected_documents(&window, live)
+        {
             return CloseRequestResponse::KeepWindowShown;
         }
-        if window.get_autosave() {
-            return CloseRequestResponse::HideWindow;
-        }
-        let unsaved = open_documents(live)
-            .iter()
-            .filter(|document| {
-                document.text.edited()
-                    && (!document.protective_recovery.get() || document.recovery_failed.get())
-            })
-            .count();
-        if unsaved == 0 {
-            return CloseRequestResponse::HideWindow;
-        }
-        live.cache
-            .borrow_mut()
-            .log_diag("work", &format!("close asked unsaved={unsaved}"));
-        ask_question(
-            &window,
-            live,
-            Question::CloseWindow,
-            say!(
-                "保存していない文書が{unsaved}件あります。\n\n\
-                 自動退避を切ってあるので、閉じると元に戻せません。",
-                "{unsaved} documents are not saved.\n\n\
-                 Automatic backup is off, so closing cannot be undone."
-            ),
-            &[
-                pick("すべて保存して閉じる", "Save All and Close"),
-                pick("破棄して閉じる", "Discard and Close"),
-                cancel(),
-            ],
-            1,
-        );
-        CloseRequestResponse::KeepWindowShown
+        CloseRequestResponse::HideWindow
     });
 
     menu_commands::install(&window, &live);
@@ -4456,10 +4446,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // `×`を押すと、そのぶんだけがどこにも書かれないまま消えていた。ここで
     // 一度に書けば、時計が回りきらなかったぶんが行列に乗る。
     write_work_copy_now(&window, &live);
-    // RFN01-97: what the shells printed, for the next run to put back. **Before
-    // the shells are let go** and only here, at the close.
+    // Save history before publishing new references, then clean up files no
+    // saved session uses.
     session::write_terminal_outputs(&window, &live);
     write_session(&window, &live);
+    session::prune_terminal_outputs(&window, &live);
     // 要件 12.4: and the draft, which is otherwise waiting on a two-second
     // timer that the end of the process will not let run.
     draft.borrow().store_now();
@@ -5881,7 +5872,7 @@ fn open_external_snapshot(window: &AppWindow, live: &Live, path: &Path) {
 fn document_at(live: &Live, path: &Path) -> Option<Rc<OpenDocument>> {
     open_documents(live)
         .into_iter()
-        .find(|document| document.file.borrow().path() == Some(path))
+        .find(|document| document.file.borrow().is_at(path))
 }
 
 /// 2つの文書を1つへ合流させる（要件 7.6、書き手のレビュー 2026-09-11）。
@@ -7010,26 +7001,25 @@ fn replace_all_in_pane(window: &AppWindow, live: &Live) {
             return;
         }
     };
-    let (next, replaced) = search.replace_all(&source, &replacement);
+    let Some((next, replaced)) =
+        search.replace_all_with_limit(&source, &replacement, MAX_DOCUMENT_CHARACTERS)
+    else {
+        say_in_bar(
+            window,
+            id,
+            say!(
+                "置換後の本文が文書の上限{MAX_DOCUMENT_CHARACTERS}文字を超えます",
+                "The replacement would exceed the document limit of {MAX_DOCUMENT_CHARACTERS} characters"
+            ),
+        );
+        return;
+    };
     if replaced == 0 {
         say_in_bar(
             window,
             id,
             say!("「{needle}」は見つかりません", "\"{needle}\" not found"),
         );
-        return;
-    }
-    // 2026-09-08: **置換も上限の内側にいる。**打鍵も貼り付けも
-    // `fits_document_limit`を通るのに、ここだけが結果をそのまま代入していた
-    // ——短い語を長い語へ一括で置き換えれば文書は上限を越え、**保存はできて
-    // 開き直せないファイル**になる（読み込み側は同じ上限で断る）。
-    // **確定の前に測る**ので、断るときは何も起きていない。
-    if next.chars().count() > MAX_DOCUMENT_CHARACTERS {
-        let told = say!(
-            "文書の上限{MAX_DOCUMENT_CHARACTERS}文字を超えるため、{replaced}件の置換を取り消しました",
-            "Undid {replaced} replacements: the document would exceed {MAX_DOCUMENT_CHARACTERS} characters"
-        );
-        say_in_bar(window, id, told);
         return;
     }
     // E1の④: 全置換も「探して直した」1回である。**ここまで来たら確かに起きる**
@@ -7120,6 +7110,9 @@ fn editor_area(window: &AppWindow) -> Rect {
 /// The work folder, and which of its folders the writer has opened.
 #[derive(Default)]
 struct WorkFolder {
+    tree_watcher: Option<tree_watch::Watcher>,
+    tree_scope_drawn: Option<(Vec<PathBuf>, bool)>,
+    tree_reveal_after_read: bool,
     /// RFN01-75: while the tree is searched, which result each drawn row is —
     /// a found file's row or one of its lines — and `None` for a folder.
     /// Empty when the tree is not searched.
@@ -7434,6 +7427,14 @@ struct ResultRow {
     /// Where clicking it goes.
     path: PathBuf,
     at: usize,
+    query: Rc<ResultQuery>,
+}
+
+#[derive(Debug)]
+struct ResultQuery {
+    needle: String,
+    rules: find::Rules,
+    roots: Vec<PathBuf>,
 }
 
 /// Publish the active left-pane view. If a Workspace is active, route
@@ -8075,36 +8076,29 @@ fn open_result(window: &AppWindow, live: &Live, index: usize) {
     let Some(found) = live.results.borrow().get(index).cloned() else {
         return;
     };
+    if !found
+        .query
+        .roots
+        .iter()
+        .any(|root| file_tree::is_within(root, &found.path))
+    {
+        return;
+    }
     open_path_in_focused_pane(window, live, &found.path, Opening::Peeked);
     let id = focused_pane(window);
     let document = live.states.document(id);
-    let showing = document.file.borrow().path() == Some(found.path.as_path());
+    let showing = document
+        .file
+        .borrow()
+        .path()
+        .is_some_and(|path| file_tree::path_key(path) == file_tree::path_key(&found.path));
     if !showing {
         return;
     }
-    let needle = window.get_folder_needle().to_string();
     let source = document.text.borrow().clone();
-    // 書き手の求め 2026-09-23: `tag:`の検索は、残りの語があればそれを、無ければタグを
-    // 探し直す（`searcher::tag_hits`と同じ分け方）。
-    let (tag_keys, words) = tags::split_query(&needle);
-    if !tag_keys.is_empty() && words.is_empty() {
-        let found_tag = tags::tags_in(&source).into_iter().find(|tag| {
-            tag.at + tag.len > found.at
-                && tag_keys.iter().any(|query| tags::matches(&tag.name, query))
-        });
-        if let Some(tag) = found_tag {
-            show_source_range(window, live, id, &source, tag.at, tag.at + tag.len);
-        }
-        return;
-    }
-    let needle = if tag_keys.is_empty() { needle } else { words };
-    // **一覧を作ったのと同じ探し方で探し直す**（RFN01-70: 検索パネルの3つの切り替え）
-    // ——同じ規則で指し直すのでなければ、一覧の行と本文の位置が食い違う。切り替えれば
-    // 一覧も探し直すので、いまの切り替えが一覧の規則である。
-    let Ok(search) = find::Search::new(&needle, folder_rules(window)) else {
-        return;
-    };
-    let Some((start, end)) = search.next(&source, found.at, true) else {
+    let Some((start, end)) =
+        searcher::locate_hit(&source, &found.query.needle, found.query.rules, found.at)
+    else {
         return;
     };
     show_source_range(window, live, id, &source, start, end);
@@ -8190,23 +8184,6 @@ fn offered_folders(live: &Live) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Draw the folders the writer has worked in (要件 5.1).
-///
-/// **The count is logged**, because "the menu is empty" and "the menu is not
-/// there" look the same from the outside and are two different faults.
-fn publish_folder_history(window: &AppWindow, live: &Live) {
-    let folders = offered_folders(live);
-    let drawn = folders
-        .iter()
-        .map(|path| SharedString::from(remembered_name(path)))
-        .collect::<Vec<_>>();
-    let count = drawn.len();
-    let held = live.recent_folders.borrow().len();
-    window.set_recent_folders(ModelRc::new(VecModel::from(drawn)));
-    let mut cache = live.cache.borrow_mut();
-    cache.log_diag("folder", &format!("history held={held} offered={count}"));
-}
-
 /// Work in a folder (要件 5.1).
 ///
 /// **One folder to a window**, so the one that was open goes — and with it
@@ -8235,7 +8212,6 @@ fn open_work_folder(window: &AppWindow, live: &Live, chosen: &Path) {
     // switch to "なし".
     publish_workspace_switcher(window, live);
     remember_folder(live, chosen);
-    publish_folder_history(window, live);
     publish_left(window, live);
     write_session(window, live);
     let mut cache = live.cache.borrow_mut();
@@ -8247,17 +8223,39 @@ fn open_work_folder(window: &AppWindow, live: &Live, chosen: &Path) {
 /// **A folder that is no longer there is dropped rather than opened.** Nothing
 /// watches the history — a folder can be renamed or unplugged between two runs
 /// — so the answer to picking one that has gone is to stop offering it.
-fn go_to_remembered_folder(window: &AppWindow, live: &Live, index: usize) {
-    let Some(path) = offered_folders(live).into_iter().nth(index) else {
-        return;
-    };
-    if path.is_dir() {
-        open_work_folder(window, live, &path);
-        return;
+fn go_to_remembered_folder(window: &AppWindow, live: &Live, path: &Path) {
+    match path.metadata() {
+        Ok(info) if info.is_dir() => {
+            open_work_folder(window, live, path);
+            return;
+        }
+        Err(error)
+            if !matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            window.tell(
+                say!(
+                    "最近のフォルダを確認できません: {error}",
+                    "Cannot check the recent folder: {error}"
+                )
+                .into(),
+            );
+            return;
+        }
+        _ => {}
     }
-    forget_folder(live, &path);
-    publish_folder_history(window, live);
+    forget_folder(live, path);
     write_session(window, live);
+    window.tell(
+        say!(
+            "最近のフォルダが見つかりません: {}",
+            "Recent folder was not found: {}",
+            path.display()
+        )
+        .into(),
+    );
     let mut cache = live.cache.borrow_mut();
     cache.log_diag("folder", &format!("gone path={}", path.display()));
 }
@@ -8268,22 +8266,6 @@ const SEARCHED_FILES: usize = 5_000;
 const REPORTED_HITS: usize = 500;
 const HITS_PER_FILE: usize = 50;
 
-/// Search every file in the work folder (要件 7.7).
-///
-/// **Asked for here and answered somewhere else.** This is the one place the
-/// editor reads many files at once, and 要件 2 wants that off the UI thread —
-/// so what happens here is that a question is written down and handed over.
-/// The answer comes back through [`collect_search`], turns of the event loop
-/// later, and may be for a word the writer has already stopped typing.
-///
-/// The bounds stay. They were the whole defence when this ran on the UI thread
-/// and they are still what makes a work folder somebody dropped a repository
-/// into merely unhelpful: a list of ten thousand lines is no better than a
-/// wait, whichever thread built it.
-///
-/// **The old way is still here**, for a run where the thread could not be
-/// started. It is the same search on the same data; only who waits for it
-/// differs.
 /// RFN01-70: 検索パネルの探し方。本文の検索帯と同じ3つ（範囲内検索は無い）。
 fn folder_rules(window: &AppWindow) -> find::Rules {
     find::Rules {
@@ -8306,6 +8288,8 @@ fn folder_search_roots(live: &Live, needle: &str) -> Vec<PathBuf> {
     }
 }
 
+/// 対象フォルダの検索をワーカーに依頼し、結果は collect_search で受け取る。
+/// ワーカーに送れない場合は、その場で同じ検索を実行する。
 fn search_work_folder(window: &AppWindow, live: &Live) {
     // RFN01-75: the tree's search never reaches outside the tree. The Search
     // panel's may — that is what narrowing it to a folder is for.
@@ -8413,6 +8397,11 @@ fn collect_search(window: &AppWindow, live: &Live) {
 /// inside a folder. The thread hands over matches; what a row says is decided
 /// here, where the pane is.
 fn show_search(window: &AppWindow, live: &Live, outcome: &SearchOutcome) {
+    let query = Rc::new(ResultQuery {
+        needle: outcome.needle.clone(),
+        rules: outcome.rules,
+        roots: outcome.roots.clone(),
+    });
     let mut rows: Vec<ResultRow> = Vec::new();
     for file in &outcome.files {
         let Some(first) = file.hits.first() else {
@@ -8423,6 +8412,7 @@ fn show_search(window: &AppWindow, live: &Live, outcome: &SearchOutcome) {
             under_file: false,
             path: file.path.clone(),
             at: first.at,
+            query: query.clone(),
         });
         for hit in &file.hits {
             rows.push(ResultRow {
@@ -8430,6 +8420,7 @@ fn show_search(window: &AppWindow, live: &Live, outcome: &SearchOutcome) {
                 under_file: true,
                 path: file.path.clone(),
                 at: hit.at,
+                query: query.clone(),
             });
         }
     }
@@ -8499,6 +8490,7 @@ fn reveal_in_tree(window: &AppWindow, live: &Live, path: &Path) {
             folder.expanded.insert(parent.to_owned());
         }
         folder.selected = Some(path.to_owned());
+        folder.tree_reveal_after_read = folder.tree_watcher.is_some();
     }
     publish_tree(window, live);
     window.set_tree_reveal_generation(window.get_tree_reveal_generation().wrapping_add(1));
@@ -8510,7 +8502,13 @@ fn explorer_command(window: &AppWindow, live: &Live, pane: PaneId, command: i32)
     }
     match command {
         0 => {
-            let path = live.states.document(pane).file.borrow().path().map(Path::to_owned);
+            let path = live
+                .states
+                .document(pane)
+                .file
+                .borrow()
+                .path()
+                .map(Path::to_owned);
             if let Some(path) = path {
                 reveal_in_tree(window, live, &path);
             } else {
@@ -8586,6 +8584,13 @@ fn new_from_template(window: &AppWindow, live: &Live, id: PaneId, name: &str) {
         );
         return;
     };
+    create_from_template(window, live, id, &found.path);
+}
+
+fn create_from_template(window: &AppWindow, live: &Live, id: PaneId, path: &Path) {
+    let Some(text) = read_current_template(window, live, path) else {
+        return;
+    };
     let asking = live
         .tabs
         .borrow()
@@ -8597,7 +8602,7 @@ fn new_from_template(window: &AppWindow, live: &Live, id: PaneId, name: &str) {
     } else {
         new_file_tab(window, live, id);
     }
-    insert_template(window, live, id, &found.path);
+    apply_template(window, live, id, &text);
 }
 
 fn publish_tree_now(window: &AppWindow, live: &Live) {
@@ -8605,6 +8610,12 @@ fn publish_tree_now(window: &AppWindow, live: &Live) {
     window.set_tree_filter(folder.tree_filter.clone().into());
     let (roots, multi) = tree_roots(&folder);
     if roots.is_empty() {
+        drop(folder);
+        let mut folder = live.folder.borrow_mut();
+        folder.tree_scope_drawn = None;
+        if let Some(watcher) = folder.tree_watcher.as_mut() {
+            watcher.cancel();
+        }
         window.set_work_folder(SharedString::new());
         window.set_tree_multi_root(false);
         window.set_tree_root_row_count(0);
@@ -8621,6 +8632,11 @@ fn publish_tree_now(window: &AppWindow, live: &Live) {
         publish_tree_rows(window, live, rows);
         return;
     }
+    if folder.tree_watcher.is_some() && folder.creating.is_none() {
+        drop(folder);
+        request_tree_refresh(window, live);
+        return;
+    }
     let rows = if multi {
         file_tree::multi_rows(&roots, &folder.expanded, &file_tree::read_folder)
     } else {
@@ -8629,6 +8645,76 @@ fn publish_tree_now(window: &AppWindow, live: &Live) {
     drop(folder);
     live.folder.borrow_mut().search_rows.clear();
     publish_tree_rows(window, live, rows);
+}
+
+fn tree_refresh_visible(window: &AppWindow) -> bool {
+    window.get_tree_open()
+        && matches!(window.get_left_tab(), 0 | 4)
+        && (!window.get_tree_searching() || window.get_folder_needle().is_empty())
+        && !window.get_tree_refresh_blocked()
+        && !window.get_question_open()
+        && !window.get_diff_active()
+}
+
+fn tree_refresh_request(live: &Live) -> tree_watch::Request {
+    let folder = live.folder.borrow();
+    let (roots, multi) = tree_roots(&folder);
+    tree_watch::Request {
+        roots,
+        multi,
+        expanded: folder.expanded.clone(),
+        displayed_paths: live.tree_paths.borrow().clone(),
+    }
+}
+
+fn request_tree_refresh(window: &AppWindow, live: &Live) {
+    let mut request = tree_refresh_request(live);
+    if request.roots.is_empty() {
+        return;
+    }
+    let scope = (request.roots.clone(), request.multi);
+    let new_scope = {
+        let mut folder = live.folder.borrow_mut();
+        if folder.creating.is_some() || folder.tree_watcher.is_none() {
+            return;
+        }
+        let was_search = !folder.search_rows.is_empty();
+        folder.search_rows.clear();
+        folder.tree_scope_drawn.replace(scope.clone()).as_ref() != Some(&scope) || was_search
+    };
+    if new_scope {
+        publish_tree_rows(window, live, Vec::new());
+        request.displayed_paths.clear();
+    }
+    if let Some(watcher) = live.folder.borrow_mut().tree_watcher.as_mut() {
+        watcher.request(request);
+    }
+}
+
+fn collect_tree_refresh(window: &AppWindow, live: &Live) {
+    if !tree_refresh_visible(window)
+        || !live
+            .folder
+            .borrow()
+            .tree_watcher
+            .as_ref()
+            .is_some_and(tree_watch::Watcher::working)
+    {
+        return;
+    }
+    let request = tree_refresh_request(live);
+    let rows = live
+        .folder
+        .borrow_mut()
+        .tree_watcher
+        .as_mut()
+        .and_then(|watcher| watcher.collect(&request));
+    if let Some(rows) = rows {
+        publish_tree_rows(window, live, rows);
+        if std::mem::take(&mut live.folder.borrow_mut().tree_reveal_after_read) {
+            window.set_tree_reveal_generation(window.get_tree_reveal_generation().wrapping_add(1));
+        }
+    }
 }
 
 /// RFN01-75: the tree as the search over it shows it — the folders holding
@@ -9178,16 +9264,15 @@ fn workspace_clone_requested(window: &AppWindow, live: &Live) {
     window.set_workspace_clone_url_checking(false);
     window.set_question_name("".into());
     window.set_workspace_clone_destination("".into());
-    ask_question(
+    show_question(
         window,
         live,
         Question::CloneWorkspaceUrl,
         pick("リポジトリを取得", "Clone Repository").into(),
         &[pick("取得", "Clone"), cancel()],
         -1,
+        true,
     );
-    window.set_question_asks_name(true);
-    window.set_question_generation(window.get_question_generation() + 1);
 }
 
 fn workspace_clone_url_edited(window: &AppWindow, live: &Live) {
@@ -9440,6 +9525,9 @@ fn workspace_path_allowed(live: &Live, path: &Path, saving: bool) -> bool {
 }
 
 fn admit_workspace_path(window: &AppWindow, live: &Live, path: &Path, saving: bool) -> bool {
+    if !folder_replace::path_available(window, path) {
+        return false;
+    }
     if workspace_path_allowed(live, path, saving) {
         return true;
     }
@@ -9518,8 +9606,15 @@ fn continue_workspace_change(
     target: Option<workspace::WorkspaceId>,
 ) {
     let repository_destination = git_catalog_ui::workspace_destination(live);
+    let stopping_terminal = closing_workspace_tabs(live, target)
+        .iter()
+        .any(|tab| terminal_workflow::needs_close(window, tab));
+    let stop_message = pick(
+        "実行中のシェルとログ取り込みは停止します。",
+        "Running shells and log capture will stop.",
+    );
     if closing_has_unsaved(live, target) {
-        let text = if let Some(name) = repository_destination {
+        let mut text = if let Some(name) = repository_destination {
             say!(
                 "「{name}」に切り替えると、現在開いているタブを閉じます。\n\n未保存の文書があります。保存するか破棄するか選んでください。",
                 "Switching to “{name}” closes the currently open tabs.\n\nThere are unsaved documents. Choose whether to save or discard them."
@@ -9530,6 +9625,10 @@ fn continue_workspace_change(
                 "Changing Workspace closes the current tabs (a Workspace's tabs come back when it is opened again). There are unsaved documents. Cancel keeps the current tabs and Workspace."
             )
         };
+        if stopping_terminal {
+            text.push_str("\n\n");
+            text.push_str(stop_message);
+        }
         ask_question(
             window,
             live,
@@ -9541,6 +9640,21 @@ fn continue_workspace_change(
                 cancel(),
             ],
             1,
+        );
+    } else if stopping_terminal {
+        ask_question(
+            window,
+            live,
+            Question::ConfirmWorkspaceTerminalStop(target),
+            format!(
+                "{}\n\n{stop_message}",
+                pick(
+                    "Terminalを停止してWorkspaceを切り替えますか？",
+                    "Stop terminals and switch Workspace?",
+                )
+            ),
+            &[pick("閉じて切り替える", "Close Tabs and Switch"), cancel()],
+            -1,
         );
     } else if let (Some(target), Some(name)) = (target, repository_destination)
         && window.get_workspace_active()
@@ -9648,7 +9762,26 @@ fn closing_documents(live: &Live, target: Option<workspace::WorkspaceId>) -> Vec
 fn closing_has_unsaved(live: &Live, target: Option<workspace::WorkspaceId>) -> bool {
     closing_documents(live, target).iter().any(|doc| {
         doc.text.edited() || (doc.file.borrow().path().is_none() && !doc.text.borrow().is_empty())
-    })
+    }) || closing_workspace_tabs(live, target)
+        .iter()
+        .flat_map(|tab| &tab.below.entries)
+        .any(|entry| terminal_workflow::panel_needs_save(&entry.borrow()))
+}
+
+fn closing_workspace_tabs(live: &Live, target: Option<workspace::WorkspaceId>) -> Vec<PaneTab> {
+    let carried = carried_into(live, target);
+    live.tabs
+        .borrow()
+        .panes
+        .iter()
+        .flat_map(|strip| &strip.tabs)
+        .filter(|tab| {
+            !carried
+                .iter()
+                .any(|kept| Rc::ptr_eq(&kept.identity, &tab.identity))
+        })
+        .cloned()
+        .collect()
 }
 
 fn finish_workspace_change_confirmed(
@@ -9656,12 +9789,41 @@ fn finish_workspace_change_confirmed(
     live: &Live,
     target: Option<workspace::WorkspaceId>,
 ) {
+    if folder_replace::closed_write_in_progress() {
+        live.folder.borrow_mut().pending_workspace_cleanup = None;
+        window.tell(
+            pick(
+                "一括置換でファイルを更新中です",
+                "Replace All is updating a file",
+            )
+            .into(),
+        );
+        return;
+    }
     if !git_catalog_ui::check_workspace_destination(window, live) {
         return;
+    }
+    for tab in closing_workspace_tabs(live, target) {
+        if !terminal_panels::stop_entries_for_close(window, live, &tab.below.entries) {
+            live.folder.borrow_mut().pending_workspace_cleanup = None;
+            return;
+        }
+        for shell in tab.terminal.iter().chain(tab.below.shell.iter()) {
+            terminal_panels::stop_file(window, shell);
+        }
     }
     // RFN01-106: 今のWorkspaceの並びを、閉じる前に覚える。RFN01-110: Explorerから入るなら、
     // そのWorkspaceの中のファイルは開いたまま持って入る（前に出ていたものを前に）。
     sync_active_tab(window, live);
+    if live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .is_some_and(|runtime| runtime.borrow().active_workspace().is_some())
+    {
+        session::write_terminal_outputs(window, live);
+    }
     session::remember_workspace_tabs(live, &session::capture_session(window, live));
     let carried = carried_into(live, target);
     let front = live
@@ -9673,7 +9835,7 @@ fn finish_workspace_change_confirmed(
     // **入る前に読む。**`switch_workspace`は記録を書き、そのとき入った先の並びとして空のTABを
     // 書いてしまう——後で読むと、覚えていた並びが消えている。
     let stored = target.and_then(|target| {
-        app_data::app_directory()
+        app_data::session_directory()
             .as_deref()
             .and_then(|directory| app_data::read_workspace_tabs(directory, target))
     });
@@ -9755,21 +9917,39 @@ fn restore_workspace_tabs(
         live.cache.borrow_mut().add_pane(WritingMode::Horizontal);
         publish_panes(window, PaneId::count(window) + 1);
     }
-    let (mut tabs, layout) = open_session(window, Some(stored), Vec::new());
+    let roots = live
+        .folder
+        .borrow()
+        .workspace
+        .as_ref()
+        .map(|runtime| runtime.borrow().active_roots());
+    let (mut tabs, layout) = open_session(window, Some(stored), Vec::new(), roots.as_deref());
     let focused = PaneId::from_index(window.get_focused_pane());
     let mut front_at: Option<(usize, usize)> = None;
     for tab in carried {
         let path = tab.document.file.borrow().path().map(Path::to_path_buf);
-        let found = tabs.panes.iter().enumerate().find_map(|(pane, strip)| {
-            strip
-                .tabs
-                .iter()
-                .position(|held| held.document.file.borrow().path() == path.as_deref())
-                .map(|at| (pane, at))
-        });
+        let mut found = None;
+        for (pane, strip) in tabs.panes.iter_mut().enumerate() {
+            for (at, held) in strip.tabs.iter_mut().enumerate() {
+                let matches = held.terminal.is_none()
+                    && path
+                        .as_deref()
+                        .is_some_and(|path| held.document.file.borrow().is_at(path));
+                if matches {
+                    held.document = tab.document.clone();
+                    if found.is_none() || (pane == focused.index() as usize && at == strip.active) {
+                        found = Some((pane, at));
+                    }
+                }
+            }
+        }
         let place = match found {
             Some((pane, at)) => {
-                tabs.panes[pane].tabs[at].document = tab.document.clone();
+                // This carried view still owns its live shells and panels.
+                // The remaining restored views keep their own stored panels.
+                if tab.below.open || tab.below.shell.is_some() || !tab.below.entries.is_empty() {
+                    tabs.panes[pane].tabs[at].below = tab.below.clone();
+                }
                 (pane, at)
             }
             None => {
@@ -10513,10 +10693,13 @@ fn activate_tree_row(window: &AppWindow, live: &Live, index: usize) {
     };
     // Whatever was clicked is what the file commands act on (要件 5.2).
     live.folder.borrow_mut().selected = Some(path.clone());
-    if is_registered_root(live, &path) {
+    let Some(row) = window.get_left_rows().row_data(index) else {
+        return;
+    };
+    if row.is_root {
         return;
     }
-    if path.is_dir() {
+    if row.folder {
         {
             let mut folder = live.folder.borrow_mut();
             if !folder.expanded.remove(&path) {
@@ -11792,13 +11975,13 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, o
         let held = strip
             .tabs
             .get(strip.active)
-            .filter(|tab| tab.document.file.borrow().path() == Some(path))
+            .filter(|tab| tab.document.file.borrow().is_at(path))
             .map(|_| strip.active)
             .or_else(|| {
                 strip
                     .tabs
                     .iter()
-                    .position(|tab| tab.document.file.borrow().path() == Some(path))
+                    .position(|tab| tab.document.file.borrow().is_at(path))
             });
         // **場所を譲るタブは1枚だけ**（書き手の報告 2026-09-07、追加要件
         // 2026-09-07）。位置は毎回数え直す——タブは並び替えられるし閉じられるので、
@@ -11823,9 +12006,7 @@ fn open_path_in_pane(window: &AppWindow, live: &Live, id: PaneId, path: &Path, o
     }
     // Open somewhere else in the window is still the same document, and 要件 7.6
     // wants one text however many panes are showing it.
-    let elsewhere = open_documents(live)
-        .into_iter()
-        .find(|document| document.file.borrow().path() == Some(path));
+    let elsewhere = document_at(live, path);
     let shown = path.display().to_string();
     let document = match elsewhere {
         Some(document) => document,
@@ -12743,7 +12924,7 @@ fn delete_entry_with(
 /// stops a window being divided further. This only keeps a session file that
 /// says something impossible from asking for a million rows before anything
 /// has had a chance to look at it.
-const MAX_PANES: usize = 64;
+const MAX_PANES: usize = pane_layout::MAX_PANES;
 
 /// How narrow and how wide the left pane may be dragged (追加要件 2026-09-06).
 ///
@@ -13721,6 +13902,7 @@ fn open_settings(window: &AppWindow, live: &Live) {
         window.set_focused_pane(focused_pane(window).screen(window).panel_owner);
     }
     window.invoke_shell_profile_action(0, window.get_shell_profile_index());
+    terminal_shells::discover_distributions(window);
     if window.get_panel_defaults().row_count() != 3 {
         window.set_panel_defaults(ModelRc::new(VecModel::from(
             (0..3)
@@ -13885,13 +14067,13 @@ enum Question {
     TerminalInput(terminal_workflow::Input),
     TerminalSwitch {
         identity: Rc<()>,
-        shell: TerminalShell,
+        profile_id: u64,
     },
     TerminalClose(Rc<()>, bool),
     PanelSwitch {
         pane: PaneId,
         entry: Rc<RefCell<terminal_panels::PanelDocument>>,
-        shell: TerminalShell,
+        profile_id: u64,
     },
     PanelClose {
         pane: PaneId,
@@ -13908,6 +14090,7 @@ enum Question {
     ChooseRepositoryRegistration(Vec<git_catalog_ui::Member>),
     UnregisterRepository(git_catalog_ui::Removal),
     ConfirmRepositoryWorkspace(workspace::WorkspaceId),
+    ConfirmWorkspaceTerminalStop(Option<workspace::WorkspaceId>),
     ChangeWorkspace(Option<workspace::WorkspaceId>),
     /// RFN01-110: Explorerから入るWorkspaceの外のファイルが開いている。0で閉じて開く。
     OutsideForWorkspace(workspace::WorkspaceId),
@@ -14062,6 +14245,7 @@ impl Question {
             Self::ChooseRepositoryRegistration(..) => "ChooseRepositoryRegistration",
             Self::UnregisterRepository(..) => "UnregisterRepository",
             Self::ConfirmRepositoryWorkspace(..) => "ConfirmRepositoryWorkspace",
+            Self::ConfirmWorkspaceTerminalStop(..) => "ConfirmWorkspaceTerminalStop",
             Self::ChangeWorkspace(..) => "ChangeWorkspace",
             Self::OutsideForWorkspace(..) => "OutsideForWorkspace",
             Self::About => "About",
@@ -14111,9 +14295,7 @@ impl Question {
 /// about it (追加要件 2026-09-09、残り2).
 ///
 /// **True when a question is now standing**, which is what tells the caller to
-/// keep the window open. False means there was nothing to report — either the
-/// copies landed, or the writer thread ran out of time and the join after
-/// `run()` will wait the rest out.
+/// keep the window open. False means that each required copy has landed.
 ///
 /// 要件 8.1 は「入力の2秒後に退避する」という約束で、その最後の1回だけは
 /// **窓が閉じたあと**に判定されていた。書けなかったときログに1行残るだけで、
@@ -14122,7 +14304,8 @@ impl Question {
 fn ask_about_the_last_work_copy(window: &AppWindow, live: &Live) -> bool {
     observe_folder_autosave(window, live);
     let engine = live.folder.borrow().folder_autosave.clone();
-    let lost = engine.borrow().force_flush(window, live) + flush_work_copies(window, live);
+    let status = engine.borrow().force_flush(window, live);
+    let lost = status.unconfirmed();
     if lost == 0 {
         return false;
     }
@@ -14134,8 +14317,10 @@ fn ask_about_the_last_work_copy(window: &AppWindow, live: &Live) -> bool {
         live,
         Question::LastWorkCopyFailed,
         say!(
-            "最後の自動退避を{lost}件書けませんでした。\n\nこのまま閉じると、退避していない変更は戻せません。",
-            "The last automatic backup failed for {lost}.\n\nClosing now loses the changes that were not backed up."
+            "最後の自動退避を{lost}件確認できませんでした（失敗{}件、処理中{}件）。",
+            "Could not confirm the last automatic backup for {lost} document(s) ({} failed, {} pending).",
+            status.failed,
+            status.pending,
         ),
         &[
             pick("もう一度試す", "Try Again"),
@@ -14143,6 +14328,38 @@ fn ask_about_the_last_work_copy(window: &AppWindow, live: &Live) -> bool {
             pick("閉じない", "Don't Close"),
         ],
         -1,
+    );
+    true
+}
+
+fn ask_about_unprotected_documents(window: &AppWindow, live: &Live) -> bool {
+    if window.get_autosave() {
+        return false;
+    }
+    let unsaved = open_documents(live)
+        .iter()
+        .filter(|document| document.text.edited() && !document.protective_recovery.get())
+        .count();
+    if unsaved == 0 {
+        return false;
+    }
+    live.cache
+        .borrow_mut()
+        .log_diag("work", &format!("close asked unsaved={unsaved}"));
+    ask_question(
+        window,
+        live,
+        Question::CloseWindow,
+        say!(
+            "保存していない文書が{unsaved}件あります。\n\n自動退避を切ってあるので、閉じると元に戻せません。",
+            "{unsaved} documents are not saved.\n\nAutomatic backup is off, so closing cannot be undone."
+        ),
+        &[
+            pick("すべて保存して閉じる", "Save All and Close"),
+            pick("破棄して閉じる", "Discard and Close"),
+            cancel(),
+        ],
+        1,
     );
     true
 }
@@ -14207,6 +14424,18 @@ fn ask_question(
     choices: &[&str],
     danger: i32,
 ) {
+    show_question(window, live, question, text, choices, danger, false);
+}
+
+fn show_question(
+    window: &AppWindow,
+    live: &Live,
+    question: Question,
+    text: String,
+    choices: &[&str],
+    danger: i32,
+    asks_name: bool,
+) {
     // Described before it is handed over: a question carries a path now, so
     // storing it moves it.
     let described = question.diagnostic_name();
@@ -14235,7 +14464,8 @@ fn ask_question(
     window.set_question_detail(detail.into());
     window.set_question_choices(ModelRc::new(VecModel::from(named)));
     window.set_question_danger(danger);
-    window.set_question_asks_name(false);
+    window.set_question_asks_name(asks_name);
+    window.set_question_generation(window.get_question_generation() + 1);
     window.set_question_open(true);
     live.cache.borrow_mut().log_diag("ask", described);
 }
@@ -14254,17 +14484,15 @@ fn ask_for_name(
     suggested_name: &str,
 ) {
     window.set_question_name(suggested_name.into());
-    ask_question(
+    show_question(
         window,
         live,
         question,
         text,
         &[pick("決定", "OK"), cancel()],
         -1,
+        true,
     );
-    window.set_question_asks_name(true);
-    let asked = window.get_question_generation();
-    window.set_question_generation(asked + 1);
 }
 
 /// Act on the answer to the question that was standing.
@@ -14284,22 +14512,30 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
     };
     if matches!(&question, Question::ChangeWorkspace(_) if choice >= 2)
         || matches!(&question, Question::ConfirmRepositoryWorkspace(_) if choice != 0)
+        || matches!(&question, Question::ConfirmWorkspaceTerminalStop(_) if choice != 0)
         || matches!(&question, Question::DiscardForWorkspace(_) if choice != 0)
         || matches!(&question, Question::OutsideForWorkspace(_) if choice != 0)
     {
         live.folder.borrow_mut().pending_workspace_cleanup = None;
     }
+    let return_to_tree = window.get_question_return_to_tree();
     window.set_question_open(false);
-    // The question took the keyboard away from the pane to ask (6.14).
-    if window.get_question_return_to_tree() {
-        tree_actions::restore_focus(window);
-    } else if git_catalog_ui::visible(window) {
-        git_catalog_ui::regain_focus(window);
-    } else if window.get_git_repo_active() && !window.get_diff_active() {
-        git_repo_ui::regain_focus(window);
-    } else {
-        restore_editor_focus(window);
+    apply_question_answer(window, live, question, choice);
+    // A follow-up question owns the keyboard until its own answer.
+    if !window.get_question_open() {
+        if return_to_tree {
+            tree_actions::restore_focus(window);
+        } else if git_catalog_ui::visible(window) {
+            git_catalog_ui::regain_focus(window);
+        } else if window.get_git_repo_active() && !window.get_diff_active() {
+            git_repo_ui::regain_focus(window);
+        } else {
+            restore_editor_focus(window);
+        }
     }
+}
+
+fn apply_question_answer(window: &AppWindow, live: &Live, question: Question, choice: i32) {
     live.cache.borrow_mut().log_diag(
         "answer",
         &format!("{} choice={choice}", question.diagnostic_name()),
@@ -14320,13 +14556,28 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         choice
     };
     match (question, choice) {
-        (Question::PanelSwitch { pane, entry, shell }, 0) => {
-            terminal_panels::switch_confirmed(window, live, pane, &entry, shell)
+        (
+            Question::PanelSwitch {
+                pane,
+                entry,
+                profile_id,
+            },
+            0,
+        ) => {
+            if let Some(shell) = selected_shell(window, profile_id) {
+                terminal_panels::switch_confirmed(window, live, pane, &entry, shell);
+            }
         }
         (Question::PanelLogStamp { pane, source }, choice @ 0..=1) => {
             terminal_panels::start_panel(window, live, pane, source, choice == 0)
         }
-        (Question::TerminalSwitch { identity, shell }, 0) => {
+        (
+            Question::TerminalSwitch {
+                identity,
+                profile_id,
+            },
+            0,
+        ) => {
             let found = live
                 .tabs
                 .borrow()
@@ -14340,7 +14591,9 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
                         .position(|t| Rc::ptr_eq(&t.identity, &identity))
                         .map(|at| (PaneId::from_index(p as i32), at))
                 });
-            if let Some((id, index)) = found {
+            if let Some((id, index)) = found
+                && let Some(shell) = selected_shell(window, profile_id)
+            {
                 switch_to_tab(window, live, id, index);
                 switch_shell_confirmed(window, live, id, shell);
             }
@@ -14390,12 +14643,18 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             continue_workspace_change(window, live, Some(target));
         }
         (Question::ChooseRepositoryWorkspace(targets), choice) => {
-            if let Some(target) = usize::try_from(choice).ok().and_then(|index| targets.get(index)) {
+            if let Some(target) = usize::try_from(choice)
+                .ok()
+                .and_then(|index| targets.get(index))
+            {
                 git_catalog_ui::open(window, live, target.clone());
             }
         }
         (Question::ChooseRepositoryRegistration(members), choice) => {
-            if let Some(member) = usize::try_from(choice).ok().and_then(|index| members.get(index)) {
+            if let Some(member) = usize::try_from(choice)
+                .ok()
+                .and_then(|index| members.get(index))
+            {
                 git_catalog_ui::confirm_removal(window, live, member);
             }
         }
@@ -14409,8 +14668,24 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
                 finish_workspace_change(window, live, Some(target));
             }
         }
+        (Question::ConfirmWorkspaceTerminalStop(target), 0) => {
+            if closing_has_unsaved(live, target) {
+                continue_workspace_change(window, live, target);
+            } else {
+                finish_workspace_change_confirmed(window, live, target);
+            }
+        }
         (Question::ChangeWorkspace(target), 0) => {
-            saving::save_all_for_workspace(window, live);
+            for tab in closing_workspace_tabs(live, target) {
+                for entry in &tab.below.entries {
+                    let dirty = terminal_workflow::panel_needs_save(&entry.borrow());
+                    if dirty && !terminal_panels::save_for_close(window, live, entry) {
+                        live.folder.borrow_mut().pending_workspace_cleanup = None;
+                        return;
+                    }
+                }
+            }
+            saving::save_all_for_workspace(window, live, closing_documents(live, target));
             if closing_has_unsaved(live, target) {
                 live.folder.borrow_mut().pending_workspace_cleanup = None;
                 window.tell(
@@ -14565,7 +14840,9 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
         // **どれも勝手には閉じない**——閉じてよいと決められるのは、書けた
         // ことを確かめたときだけである。
         (Question::LastWorkCopyFailed, 0) => {
-            if !ask_about_the_last_work_copy(window, live) {
+            if !ask_about_the_last_work_copy(window, live)
+                && !ask_about_unprotected_documents(window, live)
+            {
                 window.hide().ok();
             }
         }
@@ -14700,7 +14977,9 @@ fn answer_question(window: &AppWindow, live: &Live, choice: i32) {
             git_ui::unsaved_answered(window, live, pending, choice)
         }
         (Question::GitConfirm(pending), 0) => git_ui::confirmed(window, live, pending),
-        (Question::GitOpenWorktree(request), 0) => git_worktree_ui::open_worktree(window, live, request),
+        (Question::GitOpenWorktree(request), 0) => {
+            git_worktree_ui::open_worktree(window, live, request)
+        }
         (Question::GitNewBranch(root, at), 0) => {
             let name = window.get_question_name().trim().to_owned();
             git_ui::branch_named(window, live, root, name, at);
@@ -15149,6 +15428,13 @@ fn reopen_closed_tab(window: &AppWindow, live: &Live) {
             return;
         };
         let path = tab.document.file.borrow().path().map(Path::to_owned);
+        if path
+            .as_deref()
+            .is_some_and(|p| !folder_replace::path_available(window, p))
+        {
+            live.closed_tabs.borrow_mut().push(tab);
+            return;
+        }
         if path
             .as_ref()
             .is_some_and(|p| !workspace_path_allowed(live, p, false))
@@ -16763,7 +17049,7 @@ fn take_word_modes(window: &AppWindow, live: &Live, stored: app_data::StoredWord
     WORD_NEXT_ID.with(|next| next.set(stored.next_id.max(1)));
     WORD_NOTES.with(|notes| *notes.borrow_mut() = stored.notes.clone());
     let modes = stored.modes.iter().map(mode_from_stored).collect();
-    hold_word_modes(window, live, modes, true);
+    hold_word_modes(window, live, modes, false);
     publish_word_mode_of(window, live);
 }
 
@@ -17412,14 +17698,10 @@ fn settings_values(window: &AppWindow) -> Vec<(String, String)> {
         SHELL_NEXT_ID_SETTING.to_owned(),
         next_shell_id(window).to_string(),
     ));
-    // 追加要件 2026-09-08: **既定は名前で書く。**番号は一覧が変われば別の
-    // シェルを指し、その一覧はいまや書き手のものである。
+    // RFN01-164: 実際に使った代替候補ではなく、設定上の既定を保存する。
     values.push((
         DEFAULT_SHELL_SETTING.to_owned(),
-        offered_shells(window)
-            .get(window.get_default_shell().max(0) as usize)
-            .map(|shell| shell.name.clone())
-            .unwrap_or_default(),
+        format!("id:{}", default_shell_id(window)),
     ));
     values.push((
         AUTOSAVE_SETTING.to_owned(),
@@ -17657,16 +17939,17 @@ fn apply_settings(
         hold_shells(window, &read);
     }
     for (written, value) in values {
-        // 追加要件 2026-09-07: the default shell, which belongs to neither
-        // sheet. **Held to the shells this machine offers**, so a file naming
-        // one it does not have opens the first one it does.
         if written == DEFAULT_SHELL_SETTING {
-            let offered = offered_shells(window);
-            let at = offered
+            let id = value
+                .trim()
+                .strip_prefix("id:")
+                .and_then(|id| id.parse::<u64>().ok());
+            let shells = configured_shells(window);
+            let wanted = shells
                 .iter()
-                .position(|shell| shell.name == value.trim())
-                .map_or(0, |at| at as i32);
-            window.set_default_shell(at);
+                .find(|shell| id.map_or(shell.name == value.trim(), |id| shell.id == id))
+                .unwrap_or(&shells[0]);
+            window.set_default_shell_id(wanted.id.to_string().into());
             continue;
         }
         // 追加要件 2026-09-08: **`0`だけがOff。**読めない値は書いた覚えの
@@ -17690,7 +17973,7 @@ fn apply_settings(
             continue;
         }
         if written == BACKUP_NAME_SETTING {
-            let format = if backup::check_format(value).is_ok() {
+            let format = if backup::check_legacy_format(value).is_ok() {
                 value.as_str()
             } else {
                 backup::DEFAULT_NAME_FORMAT
@@ -20193,7 +20476,7 @@ fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShel
     if current
         .terminal
         .as_ref()
-        .is_some_and(|s| s.borrow().name() == shell.name)
+        .is_some_and(|s| s.borrow().uses_profile(&shell))
     {
         return;
     }
@@ -20203,7 +20486,7 @@ fn switch_shell(window: &AppWindow, live: &Live, id: PaneId, shell: TerminalShel
             .as_ref()
             .is_some_and(|s| !s.borrow().finished())
     {
-        ask_question(window, live, Question::TerminalSwitch { identity: current.identity, shell },
+        ask_question(window, live, Question::TerminalSwitch { identity: current.identity, profile_id: shell.id },
             pick("シェルを切り替えますか？\n\n現在のシェルとログ取り込みは終了します。Panelの文書は残ります。", "Switch shells?\n\nThe current shell and log capture will stop. Panel documents remain.").into(),
             &[pick("切り替える", "Switch"), cancel()], 0);
         return;
@@ -20223,7 +20506,7 @@ fn switch_shell_confirmed(window: &AppWindow, live: &Live, id: PaneId, shell: Te
     let running = live.tabs.borrow().of(id).current().is_some_and(|tab| {
         tab.terminal
             .as_ref()
-            .is_some_and(|s| s.borrow().name() != shell.name)
+            .is_some_and(|s| !s.borrow().uses_profile(&shell))
     });
     if !running {
         return;
@@ -20380,7 +20663,12 @@ fn start_shell(
             session.set_history_limit(window.get_terminal_history_limit().max(0) as usize);
             session.set_profile(
                 shell.clone(),
-                terminal_shells::windows_folder(&shell.directory),
+                directory
+                    .as_deref()
+                    .and_then(|path| std::path::absolute(path).ok())
+                    .map_or(started.directory, |path| {
+                        path.to_string_lossy().into_owned()
+                    }),
             );
             live.cache.borrow_mut().log_diag(
                 "terminal",
@@ -20439,6 +20727,19 @@ fn send_terminal_key(
         );
         return;
     };
+    if spot == TerminalSpot::Front
+        && control
+        && !alt
+        && !shift
+        && matches!(text, "w" | "W" | "\u{17}")
+    {
+        let mut session = session.borrow_mut();
+        session.drain();
+        if session.finished() {
+            terminal_workflow::request_close(window, live, id, spot);
+            return;
+        }
+    }
     // 要件 11.2. **`Ctrl+Shift+C`, because `Ctrl+C` is the interrupt** — the one
     // chord a shell cannot be asked to give up. The pair is what every terminal
     // uses, and pasting comes back the other way: `Ctrl+V` is left to the pane's
@@ -20474,17 +20775,20 @@ fn send_terminal_key(
         alt,
         control,
     };
-    let sent = {
+    let (sent, modes) = {
         let mut session = session.borrow_mut();
-        session.send_key(key, modifiers);
-        session.screen().modes()
+        let sent = session.send_key(key, modifiers);
+        (sent, session.screen().modes())
     };
+    if !sent {
+        terminal_workflow::tell_send_busy(window);
+    }
     live.cache.borrow_mut().log_diag(
         "terminal",
         &format!(
             "key pane={} spot={spot:?} ctrl={control} alt={alt} shift={shift} app_keys={}",
             id.log_name(),
-            sent.application_cursor_keys
+            modes.application_cursor_keys
         ),
     );
     refresh_terminal(window, &live.cache, id, spot);
@@ -20922,7 +21226,7 @@ fn open_below_shell(window: &AppWindow, live: &Live, id: PaneId) -> bool {
     // 追加要件 2026-09-07: **the writer's default**, not WSL because WSL was
     // first. The strip has no room to ask and no name to show, so the one thing
     // it can be right about is being the same shell as everything else.
-    let shell = shell_at(window, window.get_default_shell());
+    let shell = default_shell(window);
     let Some(session) = start_shell(window, live, id, &shell, height) else {
         return false;
     };
@@ -23054,7 +23358,7 @@ fn paste_targets(
     window: &AppWindow,
     live: &Live,
     aimed: &str,
-    resolved: &mut Vec<(PaneId, usize)>,
+    resolved: &mut Vec<(PaneId, Rc<()>)>,
 ) -> quick_draft::TabList {
     resolved.clear();
     let mut rows = Vec::new();
@@ -23078,8 +23382,8 @@ fn paste_targets(
     for (place, id) in arranged.into_iter().enumerate() {
         let tabs = live.tabs.borrow();
         let strip = tabs.of(id);
-        for (index, tab) in strip.tabs.iter().enumerate() {
-            if tab.document.read_only() {
+        for tab in &strip.tabs {
+            if !draft_can_paste_to(tab) {
                 continue;
             }
             let file = tab.document.file.borrow();
@@ -23093,7 +23397,7 @@ fn paste_targets(
             if tab_name(id, &file) == aimed {
                 target = rows.len() as i32 - 1;
             }
-            resolved.push((id, index));
+            resolved.push((id, tab.identity.clone()));
         }
     }
     // 要件 12.4: with nothing remembered, a click sends to the first tab —
@@ -23143,14 +23447,47 @@ fn tab_name(id: PaneId, file: &DocumentFile) -> String {
 /// **The tab is brought forward first.** Text put into a tab nobody is looking
 /// at is text nobody has been told about — and the caret it lands at is that
 /// tab's own, which only the tab in front of the pane has.
-fn paste_into_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, text: &str) -> String {
+fn draft_can_paste_to(tab: &PaneTab) -> bool {
+    !tab.document.read_only()
+        && !tab.view.state.viewer
+        && !tab.settings
+        && tab.terminal.is_none()
+        && !tab.empty
+}
+
+fn paste_into_tab(
+    window: &AppWindow,
+    live: &Live,
+    id: PaneId,
+    identity: &Rc<()>,
+    text: &str,
+) -> Option<String> {
+    if !id.is_shown(window) {
+        return None;
+    }
+    let index = live
+        .tabs
+        .borrow()
+        .of(id)
+        .tabs
+        .iter()
+        .position(|tab| Rc::ptr_eq(identity, &tab.identity) && draft_can_paste_to(tab))?;
     // **The pane the tab is in becomes the one the keyboard is in.** The caret
     // the text landed at is that pane's, and a writer sent somewhere is a
     // writer who is now there.
     window.set_focused_pane(id.index());
     switch_to_tab(window, live, id, index);
+    if !live
+        .tabs
+        .borrow()
+        .of(id)
+        .current()
+        .is_some_and(|tab| Rc::ptr_eq(identity, &tab.identity))
+    {
+        return None;
+    }
     let document = live.states.document(id);
-    insert_pane_text(
+    if !insert_pane_text(
         window,
         id,
         &document,
@@ -23158,12 +23495,14 @@ fn paste_into_tab(window: &AppWindow, live: &Live, id: PaneId, index: usize, tex
         &live.cache,
         text,
         false,
-    );
+    ) {
+        return None;
+    }
     window.window().set_minimized(false);
     let _ = window.show();
     restore_editor_focus(window);
     // What to call this tab next time, which is what the button will say.
-    tab_name(id, &document.file.borrow())
+    Some(tab_name(id, &document.file.borrow()))
 }
 
 /// Insert text at a pane's caret, replacing whatever it has selected.
@@ -23181,7 +23520,7 @@ fn insert_pane_text(
     cache: &Rc<RefCell<RenderCache>>,
     text: &str,
     indent_line_start: bool,
-) {
+) -> bool {
     // **受け取った時点で欄を空にする。**欄（`ime-input`）に字が残っているあいだ、
     // ペインの鍵はどれも動かない（`editor-pane.slint`の`key-pressed`は
     // `self.text == ""`のときだけ下の行へ進む）——つまり**ここで空にし忘れると、
@@ -23193,7 +23532,7 @@ fn insert_pane_text(
     id.set_ime_buffer(window, "");
     if document.read_only() || id.screen(window).viewer {
         window.tell_tab(viewer_cannot_edit().into());
-        return;
+        return false;
     }
     let input = normalize_typed_input(text);
     if input.is_empty() {
@@ -23208,7 +23547,7 @@ fn insert_pane_text(
                 text.chars().count()
             ),
         );
-        return;
+        return false;
     }
     // 要件 7.1: **typing over a rectangle takes the rectangle out first**, and
     // what is typed then goes in at its near corner. The selection the writer
@@ -23235,7 +23574,7 @@ fn insert_pane_text(
     // walk over the whole text (`SharedText::character_count`).
     if !fits_document_limit(document.text.character_count(), &input) {
         window.tell_tab(over_limit_message(&input).into());
-        return;
+        return false;
     }
     let caret = id.caret_byte(&state, &source);
     let selection = selection_source_range(&state.borrow());
@@ -23300,7 +23639,7 @@ fn insert_pane_text(
     let session = editor_session::EditorSession::with_state(document.clone(), state);
     let stored = Instant::now();
     let Some((next, change)) = session.insert_at(at, end, input) else {
-        return;
+        return false;
     };
     let stored_ms = elapsed_ms(stored);
     // Held while the edit is drawn: nothing that draws writes the text.
@@ -23308,6 +23647,7 @@ fn insert_pane_text(
     id.draw_edit(window, states, cache, document, &source, Some(next), change);
     let name = id.log_name();
     log_edit(cache, &name, &source, started, cloned_ms, stored_ms);
+    true
 }
 
 /// 行そのものを動かす・写す・消す（E3の②）。
@@ -23452,7 +23792,8 @@ fn insert_in_pane(window: &AppWindow, live: &Live, id: PaneId, shape: menu_comma
             );
             return;
         }
-        command_palette::open_templates(window, live, id);
+        let target = menu_commands::Target::for_pane(window, live, id);
+        command_palette::open_templates(window, live, &target, false);
         return;
     }
     // **打ち始めたら、そのタブは文書になる**（E3の③のEnterと同じ）。
@@ -23572,7 +23913,18 @@ fn table_edit_in_pane(window: &AppWindow, live: &Live, id: PaneId, what: table_e
 /// RFN01-88: テンプレートを、このPaneのキャレットの所へ入れる。選んだ字があれば
 /// 置き換える。**編集の道は1本**（[`apply_span_edit`]）なので、取り消しは1回で戻る。
 fn insert_template(window: &AppWindow, live: &Live, id: PaneId, path: &Path) {
-    let Some(text) = template::read(path) else {
+    let Some(text) = read_current_template(window, live, path) else {
+        return;
+    };
+    apply_template(window, live, id, &text);
+}
+
+fn read_current_template(window: &AppWindow, live: &Live, path: &Path) -> Option<String> {
+    let template = templates_in_use(live)
+        .into_iter()
+        .find(|template| template.path == path)
+        .and_then(|_| template::read(path));
+    if template.is_none() {
         window.tell_tab(
             say!(
                 "テンプレートを読めません: {}",
@@ -23581,12 +23933,15 @@ fn insert_template(window: &AppWindow, live: &Live, id: PaneId, path: &Path) {
             )
             .into(),
         );
-        return;
-    };
+    }
+    template
+}
+
+fn apply_template(window: &AppWindow, live: &Live, id: PaneId, text: &str) {
     answer_new_tab(window, live, id, None);
     let document = live.states.document(id);
     let title = template::title_of(document.file.borrow().path());
-    let text = template::fill(&text, &title, timestamp::now());
+    let text = template::fill(text, &title, timestamp::now());
     let source = document.text.borrow().clone();
     let (from, to) = chosen_source_range(&live.states.of(id).borrow(), source.len());
     let (from, to) = (from.min(to), from.max(to));
@@ -23857,15 +24212,17 @@ fn enter_in_pane(window: &AppWindow, live: &Live, id: PaneId, soft: bool) {
         ),
     );
     match what {
-        document::Continuation::Insert(text) => insert_pane_text(
-            window,
-            id,
-            &document,
-            &live.states,
-            &live.cache,
-            &text,
-            false,
-        ),
+        document::Continuation::Insert(text) => {
+            insert_pane_text(
+                window,
+                id,
+                &document,
+                &live.states,
+                &live.cache,
+                &text,
+                false,
+            );
+        }
         document::Continuation::Clear { upto, keep } => {
             let region = line_start..line_start + upto;
             let caret = line_start + keep.len();

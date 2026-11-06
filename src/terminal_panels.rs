@@ -375,13 +375,7 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
                 None
             } else {
                 let height = live.cache.borrow_mut().pane(id).below_height;
-                let Some(s) = start_shell(
-                    window,
-                    live,
-                    id,
-                    &shell_at(window, window.get_default_shell()),
-                    height,
-                ) else {
+                let Some(s) = start_shell(window, live, id, &default_shell(window), height) else {
                     return;
                 };
                 Some(Rc::new(RefCell::new(s)))
@@ -435,27 +429,6 @@ pub(crate) fn action(window: &AppWindow, live: &Live, id: PaneId, action: i32, i
         }
         10 => {
             start_file(window, live, id);
-            return;
-        }
-        12 => {
-            let Some(entry) = current(live, id) else {
-                return;
-            };
-            let shell = shell_at(window, index);
-            let old = entry.borrow().shell.clone();
-            let Some(old) = old else {
-                return;
-            };
-            if old.borrow().name() == shell.name {
-                return;
-            }
-            if window.get_terminal_confirm_close() && !old.borrow().finished() {
-                ask_question(window, live, Question::PanelSwitch { pane: id, entry, shell },
-                    pick("このTerminal Panelのシェルを切り替えますか？\n\n現在のセッションは終了します。", "Switch this Terminal Panel shell?\n\nIts current session will end.").into(),
-                    &[pick("切り替える", "Switch"), cancel()], 0);
-            } else {
-                switch_confirmed(window, live, id, &entry, shell);
-            }
             return;
         }
         11 => {
@@ -700,23 +673,15 @@ fn start_file(window: &AppWindow, live: &Live, id: PaneId) {
     if !current_source.is_some_and(|s| Rc::ptr_eq(&s, &source)) {
         return;
     }
-    let file = match std::fs::File::create(&chosen.path) {
-        Ok(file) => file,
-        Err(error) => {
-            window.tell(
-                format!(
-                    "{}: {error}",
-                    pick("ログを開始できません", "Cannot start log")
-                )
-                .into(),
-            );
-            return;
-        }
-    };
     let stamp = chosen
         .checked
         .then(|| Stamp::new(&window.get_terminal_timestamp_format()));
-    source.borrow_mut().start_file_log(chosen.path, file, stamp);
+    let mut source = source.borrow_mut();
+    let weak = window.as_weak();
+    source.start_file_log(chosen.path, stamp, move || {
+        let _ = weak.upgrade_in_event_loop(|window| window.invoke_terminal_woken());
+    });
+    report_log_error(window, &mut source);
 }
 
 pub(crate) fn stop_for_close(window: &AppWindow, live: &Live) -> bool {
@@ -759,23 +724,32 @@ pub(crate) fn save_for_close(
 
 pub(crate) fn stop_all(live: &Live) {
     for session in sessions(live) {
-        session.borrow_mut().stop_file_log();
+        let mut session = session.borrow_mut();
+        session.stop_file_log();
+        if let Some(error) = session.take_log_error() {
+            live.cache
+                .borrow_mut()
+                .log_diag("error", &format!("terminal log: {error}"));
+        }
     }
     for entry in entries(live) {
         entry.borrow_mut().stop();
     }
+    for error in terminal_session::wait_for_file_logs() {
+        live.cache
+            .borrow_mut()
+            .log_diag("error", &format!("terminal log: {error}"));
+    }
 }
 
-pub(crate) fn logging_to(live: &Live, path: &Path) -> bool {
-    sessions(live).iter().any(|session| {
-        session.borrow().file_log_path().is_some_and(|p| {
-            p.to_string_lossy()
-                .eq_ignore_ascii_case(&path.to_string_lossy())
-                || std::fs::canonicalize(p)
-                    .ok()
-                    .zip(std::fs::canonicalize(path).ok())
-                    .is_some_and(|(a, b)| a == b)
-        })
+pub(crate) fn logging_to(_live: &Live, path: &Path) -> bool {
+    terminal_session::file_log_paths().into_iter().any(|p| {
+        p.to_string_lossy()
+            .eq_ignore_ascii_case(&path.to_string_lossy())
+            || std::fs::canonicalize(p)
+                .ok()
+                .zip(std::fs::canonicalize(path).ok())
+                .is_some_and(|(a, b)| a == b)
     })
 }
 
@@ -797,17 +771,21 @@ pub(crate) fn stop_file(window: &AppWindow, session: &Rc<RefCell<TerminalSession
 
 fn report_log_error(window: &AppWindow, session: &mut TerminalSession) {
     if let Some(error) = session.take_log_error() {
-        window.tell(
-            format!(
-                "{}: {error}",
-                pick(
-                    "ファイル出力を停止しました。ログの保存に失敗しました",
-                    "File capture stopped: could not save the log"
-                )
-            )
-            .into(),
-        );
+        tell_log_error(window, &error);
     }
+}
+
+fn tell_log_error(window: &AppWindow, error: &str) {
+    window.tell(
+        format!(
+            "{}: {error}",
+            pick(
+                "ファイル出力を停止しました。ログの保存に失敗しました",
+                "File capture stopped: could not save the log"
+            )
+        )
+        .into(),
+    );
 }
 
 fn stop_source(window: &AppWindow, live: &Live, id: PaneId, file: bool) {
@@ -871,6 +849,42 @@ fn action_new(window: &AppWindow, live: &Live, id: PaneId) {
     action(window, live, id, 1, 0);
 }
 
+pub(crate) fn switch_profile(window: &AppWindow, live: &Live, id: PaneId, profile_id: u64) {
+    let Some(entry) = current(live, id) else {
+        return;
+    };
+    let Some(shell) = selected_shell(window, profile_id) else {
+        return;
+    };
+    let old = entry.borrow().shell.clone();
+    let Some(old) = old else {
+        return;
+    };
+    if old.borrow().uses_profile(&shell) {
+        return;
+    }
+    if window.get_terminal_confirm_close() && !old.borrow().finished() {
+        ask_question(
+            window,
+            live,
+            Question::PanelSwitch {
+                pane: id,
+                entry,
+                profile_id,
+            },
+            pick(
+                "このTerminal Panelのシェルを切り替えますか？\n\n現在のセッションは終了します。",
+                "Switch this Terminal Panel shell?\n\nIts current session will end.",
+            )
+            .into(),
+            &[pick("切り替える", "Switch"), cancel()],
+            0,
+        );
+    } else {
+        switch_confirmed(window, live, id, &entry, shell);
+    }
+}
+
 pub(crate) fn switch_confirmed(
     window: &AppWindow,
     live: &Live,
@@ -885,7 +899,7 @@ pub(crate) fn switch_confirmed(
         .borrow()
         .shell
         .as_ref()
-        .is_some_and(|s| s.borrow().name() == shell.name)
+        .is_some_and(|s| s.borrow().uses_profile(&shell))
     {
         return;
     }
@@ -917,6 +931,9 @@ pub(crate) fn switch_confirmed(
 }
 
 pub(crate) fn open_file(window: &AppWindow, live: &Live, id: PaneId, path: &Path) {
+    if !crate::folder_replace::path_available(window, path) {
+        return;
+    }
     if document_at(live, path).is_some()
         || entries(live)
             .iter()
@@ -1021,6 +1038,12 @@ pub(crate) fn entries(live: &Live) -> Vec<Rc<RefCell<PanelDocument>>> {
 }
 
 pub(crate) fn drain(window: &AppWindow, live: &Live) {
+    for error in terminal_session::collect_file_log_errors() {
+        live.cache
+            .borrow_mut()
+            .log_diag("error", &format!("terminal log: {error}"));
+        tell_log_error(window, &error);
+    }
     let sessions: Vec<_> = live
         .tabs
         .borrow()
@@ -1333,6 +1356,15 @@ pub(crate) fn install(window: &AppWindow, live: &Live) {
                 index.max(0) as usize,
                 &name,
             );
+        }
+    });
+    let weak = window.as_weak();
+    let switch_live = live.clone();
+    window.on_panel_switch_shell(move |pane, profile_id| {
+        if let Some(window) = weak.upgrade()
+            && let Ok(profile_id) = profile_id.parse()
+        {
+            switch_profile(&window, &switch_live, PaneId::from_index(pane), profile_id);
         }
     });
     let weak = window.as_weak();

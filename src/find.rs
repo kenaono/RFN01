@@ -315,19 +315,44 @@ impl Search {
     /// 要るとなったら足す）。
     ///
     /// 範囲内検索では**範囲の外を1バイトも触らない**。
+    #[cfg(test)]
     pub fn replace_all(&self, source: &str, replacement: &str) -> (String, usize) {
-        let mut out = String::with_capacity(source.len());
+        self.replace_all_with_limit(source, replacement, usize::MAX)
+            .expect("unbounded replacement")
+    }
+
+    pub fn replace_all_with_limit(
+        &self,
+        source: &str,
+        replacement: &str,
+        max_chars: usize,
+    ) -> Option<(String, usize)> {
+        let mut out = String::with_capacity(source.len().min(max_chars));
+        let replacement_chars = replacement.chars().count();
+        let mut remaining = max_chars;
         let mut from = 0;
         let mut replaced = 0;
+        let mut within_limit = true;
         self.walk(source, |start, end| {
-            out.push_str(&source[from..start]);
+            let unchanged = &source[from..start];
+            let needed = unchanged.chars().count().saturating_add(replacement_chars);
+            let Some(left) = remaining.checked_sub(needed) else {
+                within_limit = false;
+                return false;
+            };
+            remaining = left;
+            out.push_str(unchanged);
             out.push_str(replacement);
             from = end;
             replaced += 1;
             true
         });
-        out.push_str(&source[from..]);
-        (out, replaced)
+        let tail = &source[from..];
+        if !within_limit || tail.chars().count() > remaining {
+            return None;
+        }
+        out.push_str(tail);
+        Some((out, replaced))
     }
 }
 
@@ -890,6 +915,31 @@ mod tests {
         let (replaced, count) = seek("猫", inside).replace_all(source, "犬");
         assert_eq!(count, 2);
         assert_eq!(replaced, "まえがき 猫 ほんぶん 犬 犬 あとがき 猫");
+    }
+
+    #[test]
+    fn replace_all_checks_the_whole_character_budget_before_appending() {
+        let source = "猫 猫 犬";
+        let search = seek(
+            "猫",
+            Rules {
+                within: Some((0, "猫".len())),
+                ..PLAIN
+            },
+        );
+        assert_eq!(
+            search.replace_all_with_limit(source, "花鳥", 6),
+            Some(("花鳥 猫 犬".to_owned(), 1))
+        );
+        assert_eq!(search.replace_all_with_limit(source, "花鳥", 5), None);
+        assert_eq!(
+            search.replace_all_with_limit(source, "鳥", 6),
+            Some(("鳥 猫 犬".to_owned(), 1))
+        );
+        assert_eq!(
+            seek("猫", PLAIN).replace_all_with_limit(source, &"あ".repeat(1000), 10),
+            None
+        );
     }
 
     /// E1: **画面に色を付けるための一致の並び。**数え方は[`tally`]と同じで、
